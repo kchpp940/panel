@@ -455,4 +455,5 @@ class Vega(ModelPane):
 
     def _update(self, ref: str, model: Model) -> None:
         props = self._get_properties(model.document, sources=dict(model.data_sources))
+        props['_object_version'] = model._object_version + 1
         model.update(**props)

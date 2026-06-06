@@ -199,6 +199,7 @@ export class PlotlyPlotView extends HTMLBoxView {
   _hoverdata: any = null
   container: PlotlyHTMLElement
   _watched_sources: string[]
+  _last_object_version: number = -1
   _end_relayouting = debounce(() => {
     this._relayouting = false
   }, 2000, false)
@@ -416,15 +417,19 @@ export class PlotlyPlotView extends HTMLBoxView {
     }
     const data = this._trace_data()
     const newLayout = this._layout_data()
+    const object_changed = this.model._object_version !== this._last_object_version
     this._reacting = true
-    this._hoverdata = null
-    this._relayouting = false
-    if (this.container._hoverdata !== undefined) {
-      delete this.container._hoverdata
+    if (object_changed) {
+      this._hoverdata = null
+      this._relayouting = false
+      if (this.container._hoverdata !== undefined) {
+        delete this.container._hoverdata
+      }
+      this.model.viewport = {}
+      this.model.relayout_data = {}
+      this.model.restyle_data = []
+      this._last_object_version = this.model._object_version
     }
-    this.model.viewport = {}
-    this.model.relayout_data = {}
-    this.model.restyle_data = []
     if (new_plot) {
       const obj = {data, layout: newLayout, config: this.model.config, frames: this.model.frames}
       await (window as any).Plotly.newPlot(this.container, obj)
@@ -554,6 +559,7 @@ export namespace PlotlyPlot {
     viewport_update_policy: p.Property<string>
     viewport_update_throttle: p.Property<number>
     _render_count: p.Property<number>
+    _object_version: p.Property<number>
   }
 }
 
@@ -585,6 +591,7 @@ export class PlotlyPlot extends HTMLBox {
       viewport_update_policy: [ Str, "mouseup" ],
       viewport_update_throttle: [ Float, 200 ],
       _render_count: [ Float, 0 ],
+      _object_version: [ Float, 0 ],
     }))
   }
 }

@@ -76,3 +76,4 @@ class PlotlyPlot(LayoutDOM):
     viewport_update_policy = Enum( "mouseup", "continuous", "throttle")
     viewport_update_throttle = Int()
     _render_count = Int()
+    _object_version = Int()

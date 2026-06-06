@@ -443,13 +443,16 @@ class Plotly(ModelPane):
         self.relayout_data = {}
         self.restyle_data = []
 
+        new_version = model._object_version + 1
+
         if self.object is None:
             model.update(
                 data=[],
                 layout={},
                 viewport={},
                 relayout_data={},
-                restyle_data=[]
+                restyle_data=[],
+                _object_version=new_version
             )
             model._render_count += 1
             return
@@ -526,6 +529,7 @@ class Plotly(ModelPane):
         updates['viewport'] = {}
         updates['relayout_data'] = {}
         updates['restyle_data'] = []
+        updates['_object_version'] = new_version
 
         if updates:
             model.update(**updates)
