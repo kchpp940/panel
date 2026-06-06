@@ -417,6 +417,14 @@ export class PlotlyPlotView extends HTMLBoxView {
     const data = this._trace_data()
     const newLayout = this._layout_data()
     this._reacting = true
+    this._hoverdata = null
+    this._relayouting = false
+    if (this.container._hoverdata !== undefined) {
+      delete this.container._hoverdata
+    }
+    this.model.viewport = {}
+    this.model.relayout_data = {}
+    this.model.restyle_data = []
     if (new_plot) {
       const obj = {data, layout: newLayout, config: this.model.config, frames: this.model.frames}
       await (window as any).Plotly.newPlot(this.container, obj)

@@ -434,8 +434,23 @@ class Plotly(ModelPane):
         )
 
     def _update(self, ref: str, model: Model) -> None:
+        self.click_data = None
+        self.doubleclick_data = None
+        self.clickannotation_data = None
+        self.hover_data = None
+        self.selected_data = None
+        self.viewport = {}
+        self.relayout_data = {}
+        self.restyle_data = []
+
         if self.object is None:
-            model.update(data=[], layout={})
+            model.update(
+                data=[],
+                layout={},
+                viewport={},
+                relayout_data={},
+                restyle_data=[]
+            )
             model._render_count += 1
             return
 
@@ -507,6 +522,10 @@ class Plotly(ModelPane):
 
         if update_frames:
             updates['frames'] = frames or []
+
+        updates['viewport'] = {}
+        updates['relayout_data'] = {}
+        updates['restyle_data'] = []
 
         if updates:
             model.update(**updates)

@@ -6,15 +6,12 @@ import param
 
 from ..config import config
 from ..io.resources import CDN_DIST, bundled_files
-from ..models import GridStack as BkGridStack
 from ..reactive import ReactiveHTML
 from ..util import classproperty
 from .grid import GridSpec
 
 if t.TYPE_CHECKING:
     from collections.abc import Mapping
-
-    from bokeh.model import Model
 
 
 class GridStack(ReactiveHTML, GridSpec):  # type: ignore[misc, override]
@@ -50,15 +47,9 @@ class GridStack(ReactiveHTML, GridSpec):  # type: ignore[misc, override]
         Current state of the grid (updated as items are resized and
         dragged).""")  # type: ignore[assignment, ty:invalid-assignment]
 
-    _state_raw = param.Dict(default=None, doc="""
-        Internal atomic payload from the frontend containing both the
-        state items and the source of the update ('user' or 'layout').""")
-
     width = param.Integer(default=None)
 
     height = param.Integer(default=None)
-
-    _bokeh_model: t.ClassVar[type[Model]] = BkGridStack
 
     _extension_name = 'gridstack'
 
@@ -72,7 +63,60 @@ class GridStack(ReactiveHTML, GridSpec):  # type: ignore[misc, override]
     </div>
     """ # noqa
 
-    _scripts: t.ClassVar[dict[str, str]] = {}
+    _scripts = {
+        'render': """
+        const options = {
+          column: data.ncols,
+          disableResize: !data.allow_resize,
+          disableDrag: !data.allow_drag,
+          margin: 0
+        }
+        if (data.nrows) {
+          options.row = data.nrows
+          const height = model.height || grid.offsetHeight;
+          options.cellHeight = Math.floor(height/data.nrows);
+        }
+        const gridstack = GridStack.init(options, grid);
+        function sync_state(load=false) {
+          const items = []
+          for (const node of gridstack.engine.nodes) {
+            items.push({id: node.el.getAttribute('data-id'), x0: node.x, y0: node.y, x1: node.x+node.w, y1: node.y+node.h})
+          }
+          data.state = items
+        }
+        gridstack.on('resizestop', (event, el) => {
+          sync_state()
+          view.invalidate_layout()
+        })
+        gridstack.on('dragstop', (event, el) => {
+          sync_state()
+        })
+        sync_state()
+        state.gridstack = gridstack
+        state.init = false
+        """,
+        'after_layout': """
+        self.nrows()
+        if (!state.init) {
+          state.init = true
+          view.invalidate_layout()
+        }
+        state.gridstack.engine._notify()
+        """,
+        'allow_drag':   "state.gridstack.enableMove(data.allow_drag)",
+        'allow_resize': "state.gridstack.enableResize(data.allow_resize)",
+        'ncols':        "state.gridstack.column(data.ncols)",
+        'nrows': """
+        state.gridstack.opts.row = data.nrows
+        if (data.nrows) {
+          const height = model.height || grid.offsetHeight || model.min_height;
+          state.gridstack.cellHeight(Math.floor(height/data.nrows))
+        } else {
+          state.gridstack.cellHeight('auto')
+        }
+        """,
+        "remove": "state.gridstack.destroy()"
+    }
 
     __css_raw__ = [
         f'{config.npm_cdn}/gridstack@7.2.3/dist/gridstack.min.css',
@@ -119,127 +163,48 @@ class GridStack(ReactiveHTML, GridSpec):  # type: ignore[misc, override]
     def __css__(cls):
         return bundled_files(cls, 'css')
 
-    @param.depends('_state_raw', watch=True)
+    @param.depends('state', watch=True)
     def _update_objects(self):
-        if getattr(self, '_updating_objects', False):
-            return
-        if self._state_raw is None:
-            return
+        objects = {}
+        object_ids = {str(id(obj)): obj for obj in self}
+        for p in self.state:
+            objects[(p['y0'], p['x0'], p['y1'], p['x1'])] = object_ids[p['id']]
+        self.objects.clear()
+        self.objects.update(objects)
+        self._update_sizing()
 
-        source: str = self._state_raw.get("source", "layout")
-        items: list[dict[str, t.Any]] = self._state_raw.get("items", [])
-        if not items:
-            return
-
-        self._updating_objects = True
-        try:
-            with param.edit_constant(self):
-                self.state = list(items)
-        finally:
-            pass
-
-        try:
-            object_ids = {str(id(obj)): obj for obj in self}
-            new_objects = {}
-            for p in items:
-                new_objects[(p['y0'], p['x0'], p['y1'], p['x1'])] = object_ids[p['id']]
-
-            current_keys = set(self.objects.keys())
-            new_keys = set(new_objects.keys())
-            for key in current_keys - new_keys:
-                del self.objects[key]
-            for key, obj in new_objects.items():
-                if key not in self.objects or self.objects[key] is not obj:
-                    self.objects[key] = obj
-        finally:
-            self._updating_objects = False
-
-        if source == "user":
-            self._update_sizing(user_triggered=True)
-
-    @param.depends('objects', 'sizing_mode', watch=True)
-    def _update_sizing(self, user_triggered: bool = False):
-        if getattr(self, '_updating_objects', False):
-            return
-
-        parent_sizing = self.sizing_mode
-        parent_is_fixed = parent_sizing in ('fixed', None)
-        parent_is_stretch_both = parent_sizing == 'stretch_both'
-        parent_has_stretch_width = isinstance(parent_sizing, str) and 'width' in parent_sizing
-        parent_has_stretch_height = isinstance(parent_sizing, str) and 'height' in parent_sizing
-
-        cell_width = 0
-        cell_height = 0
+    @param.depends('objects', watch=True)
+    def _update_sizing(self):
         if self.ncols and self.width:
-            cell_width = self.width / self.ncols
+            width = self.width/self.ncols
+        else:
+            width = 0
+
         if self.nrows and self.height:
-            cell_height = self.height / self.nrows
+            height = self.height/self.nrows
+        else:
+            height = 0
 
         for (y0, x0, y1, x1), obj in self.objects.items():
             x0 = 0 if x0 is None else x0
-            x1 = self.ncols if x1 is None else x1
+            x1 = (self.ncols) if x1 is None else x1
             y0 = 0 if y0 is None else y0
-            y1 = self.nrows if y1 is None else y1
-            h, w = y1 - y0, x1 - x0
+            y1 = (self.nrows) if y1 is None else y1
+            h, w = y1-y0, x1-x0
 
-            properties: dict[str, t.Any] = {}
-
-            if parent_is_fixed:
-                if cell_width:
-                    properties['width'] = int(w * cell_width)
-                if cell_height:
-                    properties['height'] = int(h * cell_height)
+            properties = {}
+            if self.sizing_mode in ['fixed', None]:
+                if width:
+                    properties['width'] = int(w*width)
+                if height:
+                    properties['height'] = int(h*height)
             else:
-                if not obj.sizing_mode:
-                    properties['sizing_mode'] = parent_sizing
-
-                if parent_is_stretch_both:
-                    pass
-                elif user_triggered and parent_has_stretch_width and cell_height:
-                    properties['height'] = int(h * cell_height)
-                elif user_triggered and parent_has_stretch_height and cell_width:
-                    properties['width'] = int(w * cell_width)
-
-            if properties:
-                obj.param.update(**{
-                    k: v for k, v in properties.items()
-                    if not obj.param[k].readonly
-                })
-
-    @param.depends('ncols', 'nrows', 'width', 'height', watch=True)
-    def _recompute_fixed_sizing(self):
-        if self.sizing_mode not in ('fixed', None):
-            return
-        if getattr(self, '_updating_objects', False):
-            return
-        if not self.objects:
-            return
-
-        cell_width = 0
-        cell_height = 0
-        if self.ncols and self.width:
-            cell_width = self.width / self.ncols
-        if self.nrows and self.height:
-            cell_height = self.height / self.nrows
-
-        if not cell_width and not cell_height:
-            return
-
-        for (y0, x0, y1, x1), obj in self.objects.items():
-            x0 = 0 if x0 is None else x0
-            x1 = self.ncols if x1 is None else x1
-            y0 = 0 if y0 is None else y0
-            y1 = self.nrows if y1 is None else y1
-            h, w = y1 - y0, x1 - x0
-
-            properties: dict[str, t.Any] = {}
-            if cell_width:
-                properties['width'] = int(w * cell_width)
-            if cell_height:
-                properties['height'] = int(h * cell_height)
-
-            if properties:
-                obj.param.update(**{
-                    k: v for k, v in properties.items()
-                    if not obj.param[k].readonly
-                })
+                properties['sizing_mode'] = self.sizing_mode
+                if 'width' in self.sizing_mode and height:
+                    properties['height'] = int(h*height)
+                elif 'height' in self.sizing_mode and width:
+                    properties['width'] = int(w*width)
+            obj.param.update(**{
+                k: v for k, v in properties.items()
+                if not obj.param[k].readonly
+            })

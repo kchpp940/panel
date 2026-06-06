@@ -43,6 +43,9 @@ export class VegaPlotView extends LayoutDOMView {
     })
     this.on_change(data_sources, () => this._connect_sources())
     this.on_change(events, () => {
+      if (this.vega_view == null) {
+        return
+      }
       for (const event of this.model.events) {
         if (this._callbacks.indexOf(event) > -1) {
           continue
@@ -129,6 +132,12 @@ export class VegaPlotView extends LayoutDOMView {
     if ((data == null) || !(window as any).vegaEmbed) {
       return
     }
+    if (this.vega_view != null) {
+      this.vega_view.finalize()
+      this.vega_view = null
+    }
+    this._callbacks = []
+    this.container.innerHTML = ""
     if (this.model.data_sources && (Object.keys(this.model.data_sources).length > 0)) {
       const datasets = this._fetch_datasets()
       if ("data" in datasets) {
