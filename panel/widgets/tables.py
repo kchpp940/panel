@@ -168,43 +168,11 @@ class BaseTable(ReactiveData, Widget):
 
     __abstract = True
 
-    @classmethod
-    def _make_temp_rowid_colname(cls, df_cols) -> t.Any:
-        import pandas as pd
-        base = "__panel_rowid_temp__"
-        if isinstance(df_cols, pd.MultiIndex):
-            nlevels = df_cols.nlevels
-            name: t.Any = tuple([""] * (nlevels - 1) + [base])
-            counter = 0
-            while name in df_cols:
-                counter += 1
-                name = tuple([""] * (nlevels - 1) + [f"{base}{counter}"])
-            return name
-        name = base
-        counter = 0
-        while name in df_cols:
-            counter += 1
-            name = f"{base}{counter}"
-        return name
-
-    @classmethod
-    def _make_cds_rowid_field(cls, existing_keys: t.Iterable[str]) -> str:
-        base = "__panel_row_id__"
-        existing = set(existing_keys)
-        name = base
-        counter = 0
-        while name in existing:
-            counter += 1
-            name = f"{base}{counter}"
-        return name
-
     def __init__(self, value=None, **params):
         self._renamed_cols = {}
         self._filters = []
         self._index_mapping = {}
         self._edited_indexes = []
-        self._processed_row_ids: list[int] = []
-        self._internal_row_id_field: str = "__panel_row_id__"
         super().__init__(value=value, **params)
         self._internal_callbacks.extend([
             self.param.watch(self._setup_on_change, ['editors', 'formatters']),
@@ -425,7 +393,6 @@ class BaseTable(ReactiveData, Widget):
     @updating
     def _update_cds(self, *events: param.parameterized.Event):
         self._processed, data = self._get_data()
-        self._processed_row_ids = list(data.get(self._internal_row_id_field, []))
         self._update_index_mapping()
         self._data = {k: _convert_datetime_array_ignore_list(v) for k, v in data.items()}
         named_events = {e.name: e for e in events}
@@ -737,36 +704,13 @@ class BaseTable(ReactiveData, Widget):
     def _get_data(self) -> tuple[pd.DataFrame, DataDict]:
         return self._process_df_and_convert_to_cds(self.value)
 
-    def _process_df_and_convert_to_cds(
-        self,
-        df: pd.DataFrame,
-        row_ids: list[int] | None = None,
-    ) -> tuple[pd.DataFrame, DataDict]:
+    def _process_df_and_convert_to_cds(self, df: pd.DataFrame) -> tuple[pd.DataFrame, DataDict]:
         # By default we potentially have two distinct views of the data
         # locally we hold the fully filtered data, i.e. with header filters
         # applied but since header filters are applied on the frontend
-        # we send the unfiltered data.
-        #
-        # Internal row-id design:
-        #   * NEVER hard-code a temp column name that might collide with a
-        #     user's real column (e.g. user has their own "__row_id__" column).
-        #     Instead, _make_temp_rowid_colname() picks a name that is
-        #     guaranteed NOT to be in df.columns.
-        #   * Similarly, the CDS transport field name is chosen dynamically
-        #     via _make_cds_rowid_field() so it never collides with any real
-        #     user column in the CDS data dict.
-        #   * Inject the uniquely-named temp column BEFORE filtering so
-        #     stable row ids travel with their rows through any filter/sort.
-        #   * In NO case do we infer row ids from df.index via get_loc().
-        #   * The temp column is ALWAYS dropped from the returned df so it
-        #     never appears in self._processed, user columns, or edits.
-        #   * The dynamic CDS transport field name is stored in
-        #     self._internal_row_id_field and mirrored to the Bokeh model's
-        #     internal_row_id_field property so the TypeScript frontend knows
-        #     which CDS column carries the internal integer row ids.
+        # we send the unfiltered data
 
         import pandas as pd
-        import numpy as np
 
         # Ensure NaT serialization is enabled
         try:
@@ -774,40 +718,9 @@ class BaseTable(ReactiveData, Widget):
         except AssertionError:
             pass
 
-        # Phase 0 — pick a temp column name that does NOT collide with any
-        #           real user column (including "__row_id__" if the user
-        #           happened to name their column that).
-        temp_col = self._make_temp_rowid_colname(df.columns)
-
-        # Phase 1 — inject stable row ids BEFORE filtering.
-        if row_ids is not None:
-            # Caller-supplied row ids (e.g. from stream); must be 1:1 with df
-            if len(row_ids) != len(df):
-                raise ValueError(
-                    f"row_ids length ({len(row_ids)}) must match df length ({len(df)})"
-                )
-            df = df.copy()
-            df[temp_col] = list(row_ids)
-        elif df is self.value:
-            # Canonical source of truth: row_id == iloc position in self.value
-            df = df.copy()
-            df[temp_col] = np.arange(len(df))
-        else:
-            raise TypeError(
-                "_process_df_and_convert_to_cds requires explicit row_ids "
-                "when the passed df is not self.value"
-            )
-
-        # Phase 2 — filter (the uniquely-named temp column travels with its row)
         df = self._filter_dataframe(df, header_filters=False)
         if df is None:
             return [], {}
-
-        # Phase 3 — extract the unambiguous row ids that survived filtering,
-        #           then DROP the temp column so it can never leak to user data.
-        final_row_ids = df[temp_col].tolist()
-        df = df.drop(columns=[temp_col])
-
         indexes: list[t.Any]
         if isinstance(self.value.index, pd.MultiIndex):
             indexes = [
@@ -822,15 +735,6 @@ class BaseTable(ReactiveData, Widget):
         data = ColumnDataSource.from_df(df.reset_index() if len(indexes) > 1 else df)
         if not self.show_index and len(indexes) > 1:
             data = {k: v for k, v in data.items() if k not in indexes}
-        # Attach unambiguous, pre-filtered row ids to a dynamically-chosen
-        # CDS transport field. _make_cds_rowid_field picks a name that is
-        # GUARANTEED not to collide with any user column already in `data`
-        # (including "__panel_row_id__", "__row_id__", or any other name
-        # the user may have chosen).  Store it on self so that _update_cds,
-        # _process_data and the Bokeh model can all use the same name.
-        cds_field = self._make_cds_rowid_field(data.keys())
-        self._internal_row_id_field = cds_field
-        data[cds_field] = list(final_row_ids)
         return df, {k if isinstance(k, str) else str(k): self._process_column(v, k, df) for k, v in data.items()}
 
     def _update_column(self, column: str, array: TDataColumn):
@@ -944,13 +848,7 @@ class BaseTable(ReactiveData, Widget):
                 self.param.trigger('value')
             finally:
                 self._updating = False
-            # Compute stable row_ids for the streamed rows: their iloc positions
-            # in the (already updated) self.value. No get_loc() back-inference.
-            n_streamed = min(len(stream_value), len(self.value))
-            stream_row_ids = list(range(len(self.value) - n_streamed, len(self.value)))
-            stream_value, stream_data = self._process_df_and_convert_to_cds(
-                stream_value, row_ids=stream_row_ids
-            )
+            stream_value, stream_data = self._process_df_and_convert_to_cds(stream_value)
             try:
                 self._updating = True
                 self._stream(stream_data, rollover)
@@ -961,10 +859,7 @@ class BaseTable(ReactiveData, Widget):
             if rollover is not None and len(self.value) > rollover:
                 with param.discard_events(self):
                     self.value = self.value.iloc[-rollover:]
-            # The last row of self.value has iloc = len(self.value) - 1
-            stream_value, stream_data = self._process_df_and_convert_to_cds(
-                self.value.iloc[-1:], row_ids=[len(self.value) - 1]
-            )
+            stream_value, stream_data = self._process_df_and_convert_to_cds(self.value.iloc[-1:])
             try:
                 self._updating = True
                 self._stream(stream_data, rollover)
@@ -1506,16 +1401,11 @@ class Tabulator(BaseTable):
         self._on_edit_callbacks = []
         self._on_click_callbacks = {}
         self._old_value = None
-        self._row_id_to_iloc: dict[int, int] = {}
-        self._iloc_to_row_id: list[int] = []
-        self._current_page_row_ids: list[int] = []
         super().__init__(value=value, **params)
         self._configuration = configuration
         self.param.watch(self._update_children, self._content_params)
         self.param.watch(self._clear_selection_remote_pagination, 'value')
-        self.param.watch(lambda e: self._rebuild_row_id_mapping(), 'value')
         self.param.watch(lambda e: self.param.trigger("hidden_columns"), 'show_index')
-        self._rebuild_row_id_mapping()
         if click_handler:
             self.on_click(click_handler)
         if edit_handler:
@@ -1523,25 +1413,6 @@ class Tabulator(BaseTable):
         if style is not None:
             self.style._todo = style._todo
         self.param.selection.callable = self._get_selectable
-
-    def _rebuild_row_id_mapping(self) -> None:
-        self._row_id_to_iloc = {}
-        self._iloc_to_row_id = []
-        if self.value is None:
-            return
-        n = len(self.value)
-        for iloc in range(n):
-            row_id = iloc
-            self._row_id_to_iloc[row_id] = iloc
-            self._iloc_to_row_id.append(row_id)
-
-    def _iloc_from_row_id(self, row_id: int) -> int | None:
-        return self._row_id_to_iloc.get(row_id)
-
-    def _row_id_from_iloc(self, iloc: int) -> int | None:
-        if 0 <= iloc < len(self._iloc_to_row_id):
-            return self._iloc_to_row_id[iloc]
-        return None
 
     @param.depends('value', watch=True, on_init=True)
     def _apply_max_size(self):
@@ -1564,14 +1435,15 @@ class Tabulator(BaseTable):
         self._explicit_pagination = True
 
     @staticmethod
-    def _validate_iloc(row_id, iloc):
-        # Validate that the row id maps to a single integer iloc position.
-        # This is a safety check; under normal circumstances the internal
-        # row id mapping should always return a single integer iloc.
+    def _validate_iloc(idx, iloc):
+        # Validate that the index returned by Pandas get_loc is a single int,
+        # as get_loc can return a slice or a mask array when it finds more
+        # than one locations.
         if not isinstance(iloc, int):
             raise ValueError(
-                f'The Tabulator widget found an invalid internal row id mapping: '
-                f'row_id={row_id!r} maps to non-integer iloc={iloc!r}'
+                'The Tabulator widget expects the provided `value` Pandas DataFrame '
+                'to have unique indexes, in particular when it has to deal with '
+                f'click or edit events. Found this duplicate index: {idx!r}'
             )
 
     def _validate(self, *events):
@@ -1605,13 +1477,13 @@ class Tabulator(BaseTable):
             return
 
         event_col = self._renamed_cols.get(event.column, event.column)
-        # event.row is the internal stable row id (from __row_id__ column)
-        # Convert it to iloc position using our internal mapping
-        row_id = event.row
-        iloc = self._iloc_from_row_id(row_id)
-        if iloc is None or not isinstance(iloc, int):
-            return
-        self._validate_iloc(row_id, iloc)
+        if self.pagination == 'remote':
+            nrows = self.page_size or self.initial_page_size
+            event.row = event.row+(self.page-1)*nrows
+
+        idx = self._index_mapping.get(event.row, event.row)
+        iloc = self.value.index.get_loc(idx)
+        self._validate_iloc(idx, iloc)
         event.row = iloc
         if event_col not in self.buttons:
             if event_col in self.value.columns:
@@ -1625,9 +1497,9 @@ class Tabulator(BaseTable):
                 import pandas as pd
                 filter_df = pd.DataFrame({event.column: [event.value]})
                 filters = self._get_header_filters(filter_df)
-                # Check if edited cell was filtered; store DataFrame index value
+                # Check if edited cell was filtered
                 if filters and filters[0].any():
-                    self._edited_indexes.append(self.value.index[iloc])
+                    self._edited_indexes.append(idx)
             else:
                 if self._old_value is not None:
                     event.old = self._old_value[event_col].iloc[event.row]
@@ -1673,112 +1545,34 @@ class Tabulator(BaseTable):
         self._old_value = self.value.copy()
 
         import pandas as pd
-        data = dict(data)
-        # Extract the internal row-id transport field (dynamic name)
-        row_id_values = data.pop(self._internal_row_id_field, None)
         df = pd.DataFrame(data)
-        if row_id_values is not None:
-            df.index = row_id_values
         filters = self._get_header_filters(df) if self.pagination == 'remote' else []
         if filters:
             mask = filters[0]
             for f in filters:
                 mask &= f
             if self._edited_indexes:
-                # _edited_indexes stores DataFrame index values; convert row ids
-                # to DataFrame index values for comparison
-                df_df_index_values = [
-                    self.value.index[self._iloc_from_row_id(rid)]
-                    if self._iloc_from_row_id(rid) is not None else None
-                    for rid in df.index
-                ]
-                edited_mask = pd.Series([
-                    (v is not None and v in self._edited_indexes)
-                    for v in df_df_index_values
-                ], index=df.index)
-                mask = mask | edited_mask.values
+                edited_mask = (df[self.value.index.name or 'index'].isin(self._edited_indexes))
+                mask = mask | edited_mask
             df = df[mask]
-        # Use the internal row ids (now df.index) to locate rows via iloc mapping
-        if row_id_values is not None and len(df) > 0:
-            for col in df.columns:
-                col_name = self._renamed_cols.get(col, col)
-                if col_name in self.indexes:
-                    continue
-                # Convert row ids to iloc positions and update using .iloc
-                ilocs = []
-                col_values = []
-                for rid, val in zip(df.index, df[col].values):
-                    iloc = self._iloc_from_row_id(rid)
-                    if iloc is not None:
-                        ilocs.append(iloc)
-                        col_values.append(val)
-                if ilocs:
-                    self.value.iloc[ilocs, self.value.columns.get_loc(col_name)] = col_values
-                    if self._processed is not None and not self._processed.empty:
-                        processed_ilocs = []
-                        processed_vals = []
-                        for rid, val in zip(df.index, df[col].values):
-                            iloc = self._iloc_from_row_id(rid)
-                            if iloc is not None and iloc < len(self._processed):
-                                processed_ilocs.append(iloc)
-                                processed_vals.append(val)
-                        if processed_ilocs:
-                            self._processed.iloc[processed_ilocs, self._processed.columns.get_loc(col_name)] = processed_vals
-        else:
-            data = {col: df[col].values for col in df.columns}
-            return super()._process_data(data)
-        return None
+        data = {
+            col: df[col].values for col in df.columns
+        }
+        return super()._process_data(data)
 
     def _get_data(self):
         if self.pagination != 'remote' or self.value is None:
             return super()._get_data()
 
         # If data is paginated the current view on the frontend
-        # and locally are identical and both paginated.
-        #
-        # Internal row-id design (remote pagination):
-        #   1. Use _make_temp_rowid_colname() to generate a temp column name
-        #      that is GUARANTEED not to collide with any existing user column
-        #      (including "__row_id__" if the user happens to have one).
-        #   2. Inject the temp column BEFORE any filter/sort/page. Values are
-        #      the original iloc positions (0, 1, 2, ...).
-        #   3. Filter, sort, and page-slice the DataFrame with this temp column
-        #      attached so it travels with the correct rows.
-        #   4. Extract the row ids from the temp column of the paged result
-        #      directly — these are the correct, unambiguous row ids.
-        #   5. DROP the temp column from every user-visible DataFrame so it
-        #      never contaminates the user's data, column listings, or edits.
-        #   6. Dynamically choose a CDS transport field name that does NOT
-        #      collide with any user column in the CDS data dict, store it on
-        #      self._internal_row_id_field, and mirror it to the Bokeh model
-        #      so the TypeScript frontend knows which column to read.
+        # and locally are identical and both paginated
         import pandas as pd
-        import numpy as np
-
-        # Step 0 — pick a temp column name that won't collide with user columns
-        temp_col = self._make_temp_rowid_colname(self.value.columns)
-
-        # Step 1 — inject stable row ids BEFORE any filtering/sorting
-        value_with_rowid = self.value.copy()
-        value_with_rowid[temp_col] = np.arange(len(self.value))
-
-        # Step 2 — filter, sort, and page with the temp column tagging along
-        df_with_rowid = self._filter_dataframe(value_with_rowid)
-        df_with_rowid = self._sort_df(df_with_rowid)
-
+        df = self._filter_dataframe(self.value)
+        df = self._sort_df(df)
         nrows = self.page_size or self.initial_page_size
         start = (self.page-1)*nrows
-        page_df_with_rowid = df_with_rowid.iloc[start: start+nrows]
 
-        # Step 3 — extract unambiguous row ids directly from the temp column
-        row_ids = page_df_with_rowid[temp_col].tolist()
-        self._current_page_row_ids = row_ids
-
-        # Step 4 — strip the internal temp column everywhere it could leak
-        #         to user-facing data (self._processed, CDS user columns, etc.)
-        df = df_with_rowid.drop(columns=[temp_col])
-        page_df = page_df_with_rowid.drop(columns=[temp_col])
-
+        page_df = df.iloc[start: start+nrows]
         if isinstance(self.value.index, pd.MultiIndex):
             indexes = [
                 f'level_{i}' if n is None else n
@@ -1789,14 +1583,8 @@ class Tabulator(BaseTable):
             indexes = [df.index.name or default_index]
         if len(indexes) > 1:
             page_df = page_df.reset_index()
-        data = dict(ColumnDataSource.from_df(page_df))
-        # Attach the pre-computed, unambiguous row ids to a dynamically-chosen
-        # CDS transport field.  _make_cds_rowid_field guarantees no collision with
-        # any user column (including "__panel_row_id__", "__row_id__", etc).
-        cds_field = self._make_cds_rowid_field(data.keys())
-        self._internal_row_id_field = cds_field
-        data[cds_field] = row_ids
-        return df, {k if isinstance(k, str) else str(k): self._process_column(v, k, page_df) for k, v in data.items()}
+        data = ColumnDataSource.from_df(page_df).items()
+        return df, {k if isinstance(k, str) else str(k): self._process_column(v, k, page_df) for k, v in data}
 
     def _get_style_data(self, recompute=True):
         if self.value is None or self.style is None or self.value.empty:
@@ -1915,26 +1703,11 @@ class Tabulator(BaseTable):
             start = (self.page-1)*nrows
             df = df.iloc[start:(start+nrows)]
         indexed_children, children = {}, {}
-        # Determine the stable row ids for every row currently in the page df.
-        # These are NEVER derived from df.index via get_loc().
-        if self.pagination == 'remote':
-            page_row_ids = list(self._current_page_row_ids)
-        else:
-            # self._processed_row_ids is populated by _update_cds from the
-            # temp __row_id__ column that survived filtering — it is 1:1
-            # with the rows of self._processed (== df here).
-            page_row_ids = list(self._processed_row_ids)
-            if len(df) != len(page_row_ids):
-                # Fallback (shouldn't normally happen): if out of sync just
-                # use positional indices as row_ids.
-                page_row_ids = list(range(len(df)))
         if self.embed_content:
             indexes = list(range(len(df)))
-            # Map row ids to iloc positions on self.value
-            mapped = self._map_indexes(page_row_ids)
-            # expanded should be row ids (matching frontend __row_id__ → _index)
+            mapped = self._map_indexes(indexes)
             expanded = [
-                row_id for row_id, m in zip(page_row_ids, mapped)
+                i for i, m in zip(indexes, mapped)
                 if m in self.expanded
             ]
             for i in indexes:
@@ -1946,23 +1719,17 @@ class Tabulator(BaseTable):
                 indexed_children[idx] = children[i] = child
         else:
             expanded = []
-            # Build a lookup: row_id → position in the current page df
-            row_id_to_page_pos = {rid: pos for pos, rid in enumerate(page_row_ids)}
             for i in self.expanded:
-                # self.expanded stores iloc positions in self.value
-                row_id = self._row_id_from_iloc(i)
-                if row_id is None:
-                    continue
-                if row_id not in row_id_to_page_pos:
-                    # This expanded row is not currently visible on the page
-                    continue
                 idx = self.value.index[i]
                 if idx in self._indexed_children:
                     child = self._indexed_children[idx]
                 else:
                     child = self._get_row_content_panel(self.value.iloc[i])
-                expanded.append(row_id)
-                loc = row_id_to_page_pos[row_id]
+                try:
+                    loc = df.index.get_loc(idx)
+                except KeyError:
+                    continue
+                expanded.append(loc)
                 indexed_children[idx] = children[loc] = child
         removed = [
             child for idx, child in self._indexed_children.items()
@@ -2036,23 +1803,16 @@ class Tabulator(BaseTable):
             self._updating = False
             self._update_cds()
             return
-        if self.pagination == 'remote' and self._processed is not None:
+        if self.pagination == 'remote':
             nrows = self.page_size or self.initial_page_size
             start = (self.page - 1) * nrows
-            end = start + nrows
-            # Get the row ids currently displayed on this page
-            page_row_ids = self._current_page_row_ids
+            end = start+nrows
             filtered = {}
             for c, values in patch.items():
-                filtered_values = []
-                for (ind, val) in values:
-                    # ind is iloc position on self.value, convert to row id
-                    row_id = self._row_id_from_iloc(ind)
-                    if row_id is not None and row_id in page_row_ids:
-                        pos_in_page = page_row_ids.index(row_id)
-                        filtered_values.append((pos_in_page, val))
-                if filtered_values:
-                    filtered[c] = filtered_values
+                values = [(ind, val) for (ind, val) in values
+                          if ind >= start and ind < end]
+                if values:
+                    filtered[c] = values
             patch = filtered
         if not patch:
             return
@@ -2104,14 +1864,26 @@ class Tabulator(BaseTable):
     def _update_selected(self, *events: param.parameterized.Event, indices=None):
         kwargs = {}
         if self.value is not None:
-            # self.selection stores iloc positions on self.value
-            # Convert to internal stable row ids (frontend __row_id__ → _index)
-            # which Tabulator uses as its row index
+            # Compute integer indexes of the selected rows
+            # on the displayed page
+            index = self.value.iloc[self.selection].index
             indices = []
-            for iloc in self.selection:
-                row_id = self._row_id_from_iloc(iloc)
-                if row_id is not None:
-                    indices.append(row_id)
+            for ind in index.values:
+                try:
+                    iloc = self._processed.index.get_loc(ind)
+                    self._validate_iloc(ind, iloc)
+                    indices.append((ind, iloc))
+                except KeyError:
+                    continue
+            if self.pagination == 'remote':
+                nrows = self.page_size or self.initial_page_size
+                start = (self.page - 1) * nrows
+                end = start+nrows
+                p_range = self._processed.index[start:end]
+                indices = [iloc - start for ind, iloc in indices
+                           if ind in p_range]
+            else:
+                indices = [iloc for _, iloc in indices]
             kwargs['indices'] = indices
         super()._update_selected(*events, **kwargs)
 
@@ -2137,14 +1909,22 @@ class Tabulator(BaseTable):
             self._processed.loc[index, column] = array
 
     def _map_indexes(self, indexes: list[int], existing: list[int] = [], add: bool = True) -> list[int]:
-        # indexes are internal stable row ids (sent via __row_id__ column from frontend),
-        # convert them to iloc positions on self.value using our mapping
+        if self.pagination == 'remote':
+            nrows = self.page_size or self.initial_page_size
+            start = (self.page-1)*nrows
+        else:
+            start = 0
         ilocs = list(existing)
-        for v in indexes:
-            iloc = self._iloc_from_row_id(v)
-            if iloc is None:
+        try:
+            index = self._processed.iloc[[start+ind for ind in indexes]].index
+        except IndexError:
+            index = self._processed.iloc[[]].index
+        for v in index.values:
+            try:
+                iloc = self.value.index.get_loc(v)
+                self._validate_iloc(v, iloc)
+            except KeyError:
                 continue
-            self._validate_iloc(v, iloc)
             if add:
                 ilocs.append(iloc)
             elif iloc in ilocs:
@@ -2173,7 +1953,6 @@ class Tabulator(BaseTable):
         properties['configuration'] = self._get_configuration(properties['columns'])
         properties['cell_styles'] = self._get_style_data()
         properties['indexes'] = self.indexes
-        properties['internal_row_id_field'] = self._internal_row_id_field
         if self.pagination:
             length = self._length
             page_size = self.page_size or self.initial_page_size
@@ -2206,16 +1985,6 @@ class Tabulator(BaseTable):
         if 'selectable_rows' in params:
             params['selectable_rows'] = self._get_selectable()
         return params
-
-    @updating
-    def _update_cds(self, *events: param.parameterized.Event):
-        super()._update_cds(*events)
-        # Mirror the dynamically-chosen CDS row-id field name to every
-        # Bokeh model so the TypeScript frontend knows which column to read.
-        field = self._internal_row_id_field
-        for ref, (model, _parent) in self._models.items():
-            if hasattr(model, 'internal_row_id_field'):
-                model.internal_row_id_field = field
 
     def _get_model(
         self, doc: Document, root: Model | None = None,

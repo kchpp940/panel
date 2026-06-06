@@ -1,0 +1,42 @@
+Error processing line 1 of /Users/pkcha/.local/lib/python3.13/site-packages/autogluon_common-1.5.1b20260503-nspkg.pth:
+
+  Traceback (most recent call last):
+    File "<frozen site>", line 207, in addpackage
+    File "<string>", line 1, in <module>
+    File "<frozen importlib._bootstrap>", line 810, in module_from_spec
+  AttributeError: 'NoneType' object has no attribute 'loader'
+
+Remainder of file ignored
+Error processing line 1 of /Users/pkcha/.local/lib/python3.13/site-packages/autogluon_core-1.5.1b20260503-nspkg.pth:
+
+  Traceback (most recent call last):
+    File "<frozen site>", line 207, in addpackage
+    File "<string>", line 1, in <module>
+    File "<frozen importlib._bootstrap>", line 810, in module_from_spec
+  AttributeError: 'NoneType' object has no attribute 'loader'
+
+Remainder of file ignored
+Error processing line 1 of /Users/pkcha/.local/lib/python3.13/site-packages/autogluon_features-1.5.1b20260503-nspkg.pth:
+
+  Traceback (most recent call last):
+    File "<frozen site>", line 207, in addpackage
+    File "<string>", line 1, in <module>
+    File "<frozen importlib._bootstrap>", line 810, in module_from_spec
+  AttributeError: 'NoneType' object has no attribute 'loader'
+
+Remainder of file ignored
+Error processing line 1 of /Users/pkcha/.local/lib/python3.13/site-packages/autogluon_tabular-1.5.1b20260503-nspkg.pth:
+
+  Traceback (most recent call last):
+    File "<frozen site>", line 207, in addpackage
+    File "<string>", line 1, in <module>
+    File "<frozen importlib._bootstrap>", line 810, in module_from_spec
+  AttributeError: 'NoneType' object has no attribute 'loader'
+
+Remainder of file ignored
+Traceback (most recent call last):
+  File "/Users/pkcha/panel/test_fix.py", line 2, in <module>
+    from panel.widgets.tables import Tabulator
+  File "/Users/pkcha/panel/panel/__init__.py", line 48, in <module>
+    from param import rx
+ModuleNotFoundError: No module named 'param'

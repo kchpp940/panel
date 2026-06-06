@@ -732,10 +732,7 @@ def test_tabulator_filtered_expanded_content_remote_pagination(document, comm):
     row1 = model.children[1]
     assert row1.text == "&lt;pre&gt;3.0&lt;/pre&gt;"
 
-    # User clicks to keep only first row on screen expanded.
-    # The frontend sends DataFrame index values (matching _index column)
-    # The first row on screen has DataFrame index 1 (because B=1.0)
-    model.expanded = [1]
+    model.expanded = [0]
     assert table.expanded == [1]
 
     table.filters = [{'field': 'B', 'sorter': 'number', 'type': '=', 'value': '0'}]
@@ -2777,10 +2774,9 @@ def test_tabulator_pagination_remote_cell_click_event():
         for p in range(len(df)//2):
             table.page = p+1
             for row in range(2):
-                df_index = (p*2)+row
-                event = CellClickEvent(model=None, column=col, row=df_index)
+                event = CellClickEvent(model=None, column=col, row=row)
                 table._process_event(event)
-                assert values[-1] == (col, df_index, data[col].iloc[df_index])
+                assert values[-1] == (col, (p*2)+row, data[col].iloc[(p*2)+row])
 
 def test_tabulator_pagination_remote_cell_click_event_with_stream():
     df = makeMixedDataFrame()
@@ -2794,233 +2790,21 @@ def test_tabulator_pagination_remote_cell_click_event_with_stream():
         for p in range(len(df)//2):
             table.page = p+1
             for row in range(2):
-                df_index = (p*2)+row
-                event = CellClickEvent(model=None, column=col, row=df_index)
+                event = CellClickEvent(model=None, column=col, row=row)
                 table._process_event(event)
-                assert values[-1] == (col, df_index, data[col].iloc[df_index])
+                assert values[-1] == (col, (p*2)+row, data[col].iloc[(p*2)+row])
             table.stream(pd.DataFrame([(5.0, 0, 'foo6', df.D.iloc[-1])], columns=df.columns, index=[5]))
 
-def test_tabulator_cell_click_event_duplicate_index():
-    # With internal stable row ids, duplicate DataFrame indexes are handled
-    # correctly since we use integer row ids instead of DataFrame index values
-    df = pd.DataFrame(data={'A': [1, 2, 3]}, index=['a', 'a', 'b'])
-    table = Tabulator(df)
+def test_tabulator_cell_click_event_error_duplicate_index():
+    df = pd.DataFrame(data={'A': [1, 2]}, index=['a', 'a'])
+    table = Tabulator(df, sorters=[{'field': 'A', 'sorter': 'number', 'dir': 'desc'}])
 
     values = []
     table.on_click(lambda e: values.append((e.column, e.row, e.value)))
 
-    # Row id equals iloc position in original self.value
-    # Clicking row with row_id=0 (iloc=0)
-    event = CellClickEvent(model=None, column='A', row=0)
-    table._process_event(event)
-    assert values[-1] == ('A', 0, 1)
-
-    # Clicking row with row_id=1 (iloc=1) - duplicate index 'a'
-    event = CellClickEvent(model=None, column='A', row=1)
-    table._process_event(event)
-    assert values[-1] == ('A', 1, 2)
-
-    # Clicking row with row_id=2 (iloc=2) - index 'b'
-    event = CellClickEvent(model=None, column='A', row=2)
-    table._process_event(event)
-    assert values[-1] == ('A', 2, 3)
-
-
-def test_tabulator_row_id_isolation_from_user_data():
-    # The internal transport field (dynamic name, stored in
-    # self._internal_row_id_field) must never appear in self.value,
-    # self._processed columns, or user-visible column definitions.
-    df = pd.DataFrame({'A': [10, 20, 30], 'B': ['x', 'y', 'z']})
-    table = Tabulator(df)
-
-    # Default name when there is no collision
-    assert table._internal_row_id_field == '__panel_row_id__'
-    cds_field = table._internal_row_id_field
-    assert cds_field not in table.value.columns
-    assert cds_field not in table._processed.columns
-    col_fields = [c.field for c in table._get_columns()]
-    assert cds_field not in col_fields
-
-    # CDS data dict should contain the internal transport field
-    _, cds_data = table._get_data()
-    assert cds_field in cds_data
-    assert list(cds_data[cds_field]) == [0, 1, 2]
-
-
-def test_tabulator_user_rowid_column_preserved():
-    # If the user's DataFrame already has a column named "__row_id__",
-    # it must be fully preserved — never overwritten, never dropped,
-    # never confused with the internal row-id mechanism.
-    df = pd.DataFrame({
-        'A': [10, 20, 30],
-        '__row_id__': ['user_x', 'user_y', 'user_z'],  # user's real data
-    })
-    table = Tabulator(df)
-
-    # User data is untouched
-    assert '__row_id__' in table.value.columns
-    assert list(table.value['__row_id__']) == ['user_x', 'user_y', 'user_z']
-    assert '__row_id__' in table._processed.columns
-    assert list(table._processed['__row_id__']) == ['user_x', 'user_y', 'user_z']
-
-    # Column definition includes the user's __row_id__ as a real column
-    col_fields = [c.field for c in table._get_columns()]
-    assert '__row_id__' in col_fields
-
-    # CDS data contains BOTH the user's real "__row_id__" column AND the
-    # internal transport field — they must not collide.
-    _, cds_data = table._get_data()
-    cds_field = table._internal_row_id_field
-    assert cds_field != '__row_id__'  # internal field picked a different name
-    assert cds_field in cds_data
-    assert '__row_id__' in cds_data
-    # Internal transport field has integer row ids (iloc positions)
-    assert list(cds_data[cds_field]) == [0, 1, 2]
-    # User's real column is untouched
-    assert list(cds_data['__row_id__']) == ['user_x', 'user_y', 'user_z']
-
-
-def test_tabulator_user_panel_rowid_column_preserved():
-    # If the user's DataFrame has a column literally named "__panel_row_id__"
-    # (the default internal field name), the internal mechanism must pick a
-    # DIFFERENT, non-colliding name and the user's column must be fully
-    # preserved and editable.
-    df = pd.DataFrame({
-        'A': [10, 20, 30],
-        '__panel_row_id__': ['px', 'py', 'pz'],  # user's real data
-    })
-    table = Tabulator(df)
-
-    # User column is untouched in self.value / self._processed
-    assert '__panel_row_id__' in table.value.columns
-    assert list(table.value['__panel_row_id__']) == ['px', 'py', 'pz']
-    assert '__panel_row_id__' in table._processed.columns
-
-    # The internal field must have been renamed to avoid collision
-    _, cds_data = table._get_data()
-    cds_field = table._internal_row_id_field
-    assert cds_field != '__panel_row_id__'
-    assert cds_field.startswith('__panel_row_id__')  # e.g. "__panel_row_id__0"
-    assert cds_field in cds_data
-    assert list(cds_data[cds_field]) == [0, 1, 2]
-
-    # User's column is preserved in CDS data
-    assert '__panel_row_id__' in cds_data
-    assert list(cds_data['__panel_row_id__']) == ['px', 'py', 'pz']
-
-    # User's column appears in column definitions
-    col_fields = [c.field for c in table._get_columns()]
-    assert '__panel_row_id__' in col_fields
-
-    # User column can be edited without being disturbed by internal machinery
-    data = {
-        'A': [99, 20, 30],
-        '__panel_row_id__': ['px_edited', 'py', 'pz'],
-        cds_field: [0, 1, 2],
-    }
-    table._process_data(data)
-    assert list(table.value['A']) == [99, 20, 30]
-    assert list(table.value['__panel_row_id__']) == ['px_edited', 'py', 'pz']
-
-
-def test_tabulator_internal_row_id_field_synced_to_model(document, comm):
-    # The dynamic internal field name must be mirrored to the Bokeh model
-    # so the TypeScript frontend knows which CDS column to read.
-    df = pd.DataFrame({
-        'A': [1, 2],
-        '__panel_row_id__': ['collide', 'me'],  # forces name change
-    })
-    table = Tabulator(df)
-    model = table.get_root(document, comm)
-
-    # After get_root → _get_data, model should have the dynamic field name
-    cds_field = table._internal_row_id_field
-    assert cds_field != '__panel_row_id__'
-    assert model.internal_row_id_field == cds_field
-
-
-def test_tabulator_user_rowid_column_survives_filtering():
-    # User's __row_id__ column must survive filtering without corruption,
-    # and internal mapping must still use the correct iloc positions.
-    df = pd.DataFrame({
-        'A': [10, 20, 30, 40, 50],
-        '__row_id__': ['r0', 'r1', 'r2', 'r3', 'r4'],
-    })
-    table = Tabulator(df)
-    # Keep rows with A >= 30 → original ilocs 2, 3, 4
-    table.add_filter((30, None), column='A')
-
-    processed, cds_data = table._get_data()
-
-    # User column preserved and filtered correctly
-    assert '__row_id__' in processed.columns
-    assert list(processed['__row_id__']) == ['r2', 'r3', 'r4']
-    assert '__row_id__' in cds_data
-    assert list(cds_data['__row_id__']) == ['r2', 'r3', 'r4']
-
-    # Internal transport field maps to ORIGINAL ilocs, not re-indexed ones
-    cds_field = table._internal_row_id_field
-    assert list(cds_data[cds_field]) == [2, 3, 4]
-
-
-def test_tabulator_user_rowid_not_overwritten_by_edit():
-    # When the edit/write-back path runs, the user's __row_id__ column
-    # must not be touched by the internal machinery.
-    df = pd.DataFrame({
-        'A': [10, 20, 30],
-        '__row_id__': ['keep_me', 'keep_me_too', 'also_me'],
-    })
-    table = Tabulator(df)
-
-    cds_field = table._internal_row_id_field
-    # Simulate a CDS data sync that includes both fields
-    data = {
-        'A': [99, 20, 30],          # edit: A[0] changed from 10 → 99
-        '__row_id__': ['keep_me', 'keep_me_too', 'also_me'],  # user column
-        cds_field: [0, 1, 2],       # internal transport
-    }
-    table._process_data(data)
-
-    # The edit to column A was applied
-    assert list(table.value['A']) == [99, 20, 30]
-    # User's __row_id__ column is completely untouched
-    assert list(table.value['__row_id__']) == ['keep_me', 'keep_me_too', 'also_me']
-
-
-def test_tabulator_row_id_survives_filtering():
-    # After filtering, the remaining rows must carry the correct internal
-    # row id values that correspond to their original iloc positions.
-    df = pd.DataFrame({'A': [10, 20, 30, 40, 50]})
-    table = Tabulator(df)
-    # Add a filter that keeps rows with A >= 30 (original ilocs 2, 3, 4)
-    table.add_filter((30, None), column='A')
-    _, cds_data = table._get_data()
-    cds_field = table._internal_row_id_field
-    assert list(cds_data[cds_field]) == [2, 3, 4]
-
-
-def test_tabulator_row_id_remote_pagination(document, comm):
-    # With remote pagination + sorting + filtering, internal row ids must
-    # correctly point back to the original iloc positions in self.value.
-    df = pd.DataFrame({'A': [30, 10, 20]}, index=['x', 'y', 'z'])
-    table = Tabulator(
-        df, pagination='remote', page_size=2,
-        sorters=[{'field': 'A', 'dir': 'asc'}],
-    )
-    model = table.get_root(document, comm)
-
-    # After sorting by A ascending, order is A=10(iloc=1), A=20(iloc=2), A=30(iloc=0)
-    # Page 1 (size 2) should have row_ids [1, 2]
-    assert table._current_page_row_ids == [1, 2]
-
-    # Model has the internal field name synced
-    assert model.internal_row_id_field == table._internal_row_id_field
-
-    # Verify _map_indexes converts row_ids correctly
-    assert table._map_indexes([1, 2]) == [1, 2]
-    assert table._iloc_from_row_id(1) == 1
-    assert table._iloc_from_row_id(2) == 2
-
+    event = CellClickEvent(model=None, column='y', row=0)
+    with pytest.raises(ValueError, match="Found this duplicate index: 'a'"):
+        table._process_event(event)
 
 def test_tabulator_styling_empty_dataframe(document, comm):
     df = pd.DataFrame(columns=["A", "B", "C"]).astype({

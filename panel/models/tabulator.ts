@@ -1076,7 +1076,7 @@ export class DataTabulatorView extends HTMLBoxView {
     if (cds === null || (cds.columns().length === 0)) {
       data = []
     } else {
-      data = transform_cds_to_records(cds, true, 0, this.model.internal_row_id_field)
+      data = transform_cds_to_records(cds, true)
     }
     if (this.model.configuration.dataTree) {
       data = group_data(data, this.model.columns, this.model.indexes, this.model.aggregators)
@@ -1340,7 +1340,7 @@ export class DataTabulatorView extends HTMLBoxView {
     const prev_minheight = this.tabulator.element.style.minHeight
     this.tabulator.element.style.minHeight = `${this.tabulator.element.offsetHeight}px`
 
-    const data = transform_cds_to_records(this.model.source, true, 0, this.model.internal_row_id_field)
+    const data = transform_cds_to_records(this.model.source, true)
     this.tabulator.setData(data).then(() => {
       this.tabulator.element.style.minHeight = prev_minheight
     })
@@ -1607,39 +1607,23 @@ export class DataTabulatorView extends HTMLBoxView {
   cellEdited(cell: any): void {
     const field = cell._cell.column.field
     const column_def = this.columns.get(field)
-    const origIndex = cell.getData()._index
+    const index = cell.getData()._index
     const value = cell._cell.value
     if (column_def.validator === "numeric" && value === "") {
       cell.setValue(NaN, true)
       return
     }
-    // Find the positional index in the current CDS data for patching
-    // (CDS.patch uses positional indices 0,1,2... within the current data)
-    // The internal row-id column name is sent dynamically from Python via
-    // model.internal_row_id_field — we never hardcode it here.
-    const cds = this.model.source
-    let cdsPosIndex = origIndex
-    const row_id_field = this.model.internal_row_id_field
-    if (cds !== null && row_id_field != null && cds.columns().includes(row_id_field)) {
-      const indexArray = cds.get_array(row_id_field)
-      for (let i = 0; i < indexArray.length; i++) {
-        if (indexArray[i] === origIndex) {
-          cdsPosIndex = i
-          break
-        }
-      }
-    }
     this._tabulator_cell_updating = true
     comm_settings.debounce = false
-    this.model.trigger_event(new TableEditEvent(field, origIndex, true))
+    this.model.trigger_event(new TableEditEvent(field, index, true))
     try {
-      this.model.source.patch({[field]: [[cdsPosIndex, value]]})
+      this.model.source.patch({[field]: [[index, value]]})
     } finally {
       comm_settings.debounce = true
       this._tabulator_cell_updating = false
     }
-    this.model.trigger_event(new TableEditEvent(field, origIndex, false))
-    this.tabulator.scrollToRow(origIndex, "top", false)
+    this.model.trigger_event(new TableEditEvent(field, index, false))
+    this.tabulator.scrollToRow(index, "top", false)
   }
 }
 
@@ -1664,7 +1648,6 @@ export namespace DataTabulator {
     groupby: p.Property<string[]>
     hidden_columns: p.Property<string[]>
     indexes: p.Property<string[]>
-    internal_row_id_field: p.Property<string>
     layout: p.Property<typeof TableLayout["__type__"]>
     max_page: p.Property<number>
     page: p.Property<number>
@@ -1712,7 +1695,6 @@ export class DataTabulator extends HTMLBox {
       groupby:        [ List(Str),           [] ],
       hidden_columns: [ List(Str),           [] ],
       indexes:        [ List(Str),           [] ],
-      internal_row_id_field: [ Str,    "__panel_row_id__" ],
       layout:         [ TableLayout,     "fit_data" ],
       max_page:       [ Float,                   0 ],
       pagination:     [ Nullable(Str),      null ],

@@ -73,17 +73,31 @@ class GridStack(ReactiveHTML, GridSpec):  # type: ignore[misc, override]
         }
         if (data.nrows) {
           options.row = data.nrows
-          const height = model.height || grid.offsetHeight;
+          const height = model.height || grid.offsetHeight || model.min_height || 0;
           options.cellHeight = Math.floor(height/data.nrows);
         }
         const gridstack = GridStack.init(options, grid);
-        function sync_state(load=false) {
+        function sync_state() {
           const items = []
           for (const node of gridstack.engine.nodes) {
-            items.push({id: node.el.getAttribute('data-id'), x0: node.x, y0: node.y, x1: node.x+node.w, y1: node.y+node.h})
+            const el = node.el
+            el.setAttribute('gs-x', node.x)
+            el.setAttribute('gs-y', node.y)
+            el.setAttribute('gs-w', node.w)
+            el.setAttribute('gs-h', node.h)
+            items.push({id: el.getAttribute('data-id'), x0: node.x, y0: node.y, x1: node.x+node.w, y1: node.y+node.h})
           }
           data.state = items
         }
+        function update_cell_height() {
+          if (data.nrows) {
+            const height = model.height || grid.offsetHeight || model.min_height || 0;
+            if (height > 0) {
+              gridstack.cellHeight(Math.floor(height/data.nrows))
+            }
+          }
+        }
+        state.update_cell_height = update_cell_height
         gridstack.on('resizestop', (event, el) => {
           sync_state()
           view.invalidate_layout()
@@ -91,12 +105,20 @@ class GridStack(ReactiveHTML, GridSpec):  # type: ignore[misc, override]
         gridstack.on('dragstop', (event, el) => {
           sync_state()
         })
+        gridstack.on('change', (event, items) => {
+          sync_state()
+        })
+        state.resize_observer = new ResizeObserver(() => {
+          update_cell_height()
+        })
+        state.resize_observer.observe(grid)
         sync_state()
         state.gridstack = gridstack
         state.init = false
         """,
         'after_layout': """
         self.nrows()
+        state.update_cell_height()
         if (!state.init) {
           state.init = true
           view.invalidate_layout()
@@ -105,17 +127,37 @@ class GridStack(ReactiveHTML, GridSpec):  # type: ignore[misc, override]
         """,
         'allow_drag':   "state.gridstack.enableMove(data.allow_drag)",
         'allow_resize': "state.gridstack.enableResize(data.allow_resize)",
-        'ncols':        "state.gridstack.column(data.ncols)",
+        'ncols': """
+        state.gridstack.column(data.ncols)
+        const items = []
+        for (const node of state.gridstack.engine.nodes) {
+          const el = node.el
+          el.setAttribute('gs-x', node.x)
+          el.setAttribute('gs-y', node.y)
+          el.setAttribute('gs-w', node.w)
+          el.setAttribute('gs-h', node.h)
+          items.push({id: el.getAttribute('data-id'), x0: node.x, y0: node.y, x1: node.x+node.w, y1: node.y+node.h})
+        }
+        data.state = items
+        """,
         'nrows': """
         state.gridstack.opts.row = data.nrows
-        if (data.nrows) {
-          const height = model.height || grid.offsetHeight || model.min_height;
-          state.gridstack.cellHeight(Math.floor(height/data.nrows))
-        } else {
-          state.gridstack.cellHeight('auto')
+        state.update_cell_height()
+        const items = []
+        for (const node of state.gridstack.engine.nodes) {
+          const el = node.el
+          el.setAttribute('gs-x', node.x)
+          el.setAttribute('gs-y', node.y)
+          el.setAttribute('gs-w', node.w)
+          el.setAttribute('gs-h', node.h)
+          items.push({id: el.getAttribute('data-id'), x0: node.x, y0: node.y, x1: node.x+node.w, y1: node.y+node.h})
         }
+        data.state = items
         """,
-        "remove": "state.gridstack.destroy()"
+        "remove": """
+        if (state.resize_observer) state.resize_observer.disconnect()
+        state.gridstack.destroy()
+        """
     }
 
     __css_raw__ = [
@@ -165,16 +207,29 @@ class GridStack(ReactiveHTML, GridSpec):  # type: ignore[misc, override]
 
     @param.depends('state', watch=True)
     def _update_objects(self):
-        objects = {}
+        if getattr(self, '_updating_objects', False):
+            return
         object_ids = {str(id(obj)): obj for obj in self}
+        new_objects = {}
         for p in self.state:
-            objects[(p['y0'], p['x0'], p['y1'], p['x1'])] = object_ids[p['id']]
-        self.objects.clear()
-        self.objects.update(objects)
+            new_objects[(p['y0'], p['x0'], p['y1'], p['x1'])] = object_ids[p['id']]
+        self._updating_objects = True
+        try:
+            current_keys = set(self.objects.keys())
+            new_keys = set(new_objects.keys())
+            for key in current_keys - new_keys:
+                del self.objects[key]
+            for key, obj in new_objects.items():
+                if key not in self.objects or self.objects[key] is not obj:
+                    self.objects[key] = obj
+        finally:
+            self._updating_objects = False
         self._update_sizing()
 
-    @param.depends('objects', watch=True)
+    @param.depends('objects', 'ncols', 'nrows', 'width', 'height', 'sizing_mode', watch=True)
     def _update_sizing(self):
+        if getattr(self, '_updating_objects', False):
+            return
         if self.ncols and self.width:
             width = self.width/self.ncols
         else:
@@ -199,8 +254,11 @@ class GridStack(ReactiveHTML, GridSpec):  # type: ignore[misc, override]
                 if height:
                     properties['height'] = int(h*height)
             else:
-                properties['sizing_mode'] = self.sizing_mode
-                if 'width' in self.sizing_mode and height:
+                if not obj.sizing_mode:
+                    properties['sizing_mode'] = self.sizing_mode
+                if self.sizing_mode == 'stretch_both':
+                    pass
+                elif 'width' in self.sizing_mode and height:
                     properties['height'] = int(h*height)
                 elif 'height' in self.sizing_mode and width:
                     properties['width'] = int(w*width)
