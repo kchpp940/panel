@@ -6,12 +6,15 @@ import param
 
 from ..config import config
 from ..io.resources import CDN_DIST, bundled_files
+from ..models import GridStack as BkGridStack
 from ..reactive import ReactiveHTML
 from ..util import classproperty
 from .grid import GridSpec
 
 if t.TYPE_CHECKING:
     from collections.abc import Mapping
+
+    from bokeh.model import Model
 
 
 class GridStack(ReactiveHTML, GridSpec):  # type: ignore[misc, override]
@@ -51,6 +54,8 @@ class GridStack(ReactiveHTML, GridSpec):  # type: ignore[misc, override]
 
     height = param.Integer(default=None)
 
+    _bokeh_model: t.ClassVar[type[Model]] = BkGridStack
+
     _extension_name = 'gridstack'
 
     _template = """
@@ -63,102 +68,7 @@ class GridStack(ReactiveHTML, GridSpec):  # type: ignore[misc, override]
     </div>
     """ # noqa
 
-    _scripts = {
-        'render': """
-        const options = {
-          column: data.ncols,
-          disableResize: !data.allow_resize,
-          disableDrag: !data.allow_drag,
-          margin: 0
-        }
-        if (data.nrows) {
-          options.row = data.nrows
-          const height = model.height || grid.offsetHeight || model.min_height || 0;
-          options.cellHeight = Math.floor(height/data.nrows);
-        }
-        const gridstack = GridStack.init(options, grid);
-        function sync_state() {
-          const items = []
-          for (const node of gridstack.engine.nodes) {
-            const el = node.el
-            el.setAttribute('gs-x', node.x)
-            el.setAttribute('gs-y', node.y)
-            el.setAttribute('gs-w', node.w)
-            el.setAttribute('gs-h', node.h)
-            items.push({id: el.getAttribute('data-id'), x0: node.x, y0: node.y, x1: node.x+node.w, y1: node.y+node.h})
-          }
-          data.state = items
-        }
-        function update_cell_height() {
-          if (data.nrows) {
-            const height = model.height || grid.offsetHeight || model.min_height || 0;
-            if (height > 0) {
-              gridstack.cellHeight(Math.floor(height/data.nrows))
-            }
-          }
-        }
-        state.update_cell_height = update_cell_height
-        gridstack.on('resizestop', (event, el) => {
-          sync_state()
-          view.invalidate_layout()
-        })
-        gridstack.on('dragstop', (event, el) => {
-          sync_state()
-        })
-        gridstack.on('change', (event, items) => {
-          sync_state()
-        })
-        state.resize_observer = new ResizeObserver(() => {
-          update_cell_height()
-        })
-        state.resize_observer.observe(grid)
-        sync_state()
-        state.gridstack = gridstack
-        state.init = false
-        """,
-        'after_layout': """
-        self.nrows()
-        state.update_cell_height()
-        if (!state.init) {
-          state.init = true
-          view.invalidate_layout()
-        }
-        state.gridstack.engine._notify()
-        """,
-        'allow_drag':   "state.gridstack.enableMove(data.allow_drag)",
-        'allow_resize': "state.gridstack.enableResize(data.allow_resize)",
-        'ncols': """
-        state.gridstack.column(data.ncols)
-        const items = []
-        for (const node of state.gridstack.engine.nodes) {
-          const el = node.el
-          el.setAttribute('gs-x', node.x)
-          el.setAttribute('gs-y', node.y)
-          el.setAttribute('gs-w', node.w)
-          el.setAttribute('gs-h', node.h)
-          items.push({id: el.getAttribute('data-id'), x0: node.x, y0: node.y, x1: node.x+node.w, y1: node.y+node.h})
-        }
-        data.state = items
-        """,
-        'nrows': """
-        state.gridstack.opts.row = data.nrows
-        state.update_cell_height()
-        const items = []
-        for (const node of state.gridstack.engine.nodes) {
-          const el = node.el
-          el.setAttribute('gs-x', node.x)
-          el.setAttribute('gs-y', node.y)
-          el.setAttribute('gs-w', node.w)
-          el.setAttribute('gs-h', node.h)
-          items.push({id: el.getAttribute('data-id'), x0: node.x, y0: node.y, x1: node.x+node.w, y1: node.y+node.h})
-        }
-        data.state = items
-        """,
-        "remove": """
-        if (state.resize_observer) state.resize_observer.disconnect()
-        state.gridstack.destroy()
-        """
-    }
+    _scripts: t.ClassVar[dict[str, str]] = {}
 
     __css_raw__ = [
         f'{config.npm_cdn}/gridstack@7.2.3/dist/gridstack.min.css',
