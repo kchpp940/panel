@@ -2827,36 +2827,119 @@ def test_tabulator_cell_click_event_duplicate_index():
 
 
 def test_tabulator_row_id_isolation_from_user_data():
-    # __row_id__ must never appear in self.value, self._processed columns,
-    # or the column definitions exposed to the user.
+    # The internal transport field "__panel_row_id__" must never appear in
+    # self.value, self._processed columns, or user-visible column definitions.
     df = pd.DataFrame({'A': [10, 20, 30], 'B': ['x', 'y', 'z']})
     table = Tabulator(df)
 
-    assert '__row_id__' not in table.value.columns
-    assert '__row_id__' not in table._processed.columns
+    cds_field = table._INTERNAL_ROW_ID_CDS_FIELD
+    assert cds_field == '__panel_row_id__'
+    assert cds_field not in table.value.columns
+    assert cds_field not in table._processed.columns
     col_fields = [c.field for c in table._get_columns()]
-    assert '__row_id__' not in col_fields
+    assert cds_field not in col_fields
 
-    # CDS data dict should contain __row_id__ (it is the internal transport layer)
+    # CDS data dict should contain the internal transport field
     _, cds_data = table._get_data()
+    assert cds_field in cds_data
+    assert list(cds_data[cds_field]) == [0, 1, 2]
+
+
+def test_tabulator_user_rowid_column_preserved():
+    # If the user's DataFrame already has a column named "__row_id__",
+    # it must be fully preserved — never overwritten, never dropped,
+    # never confused with the internal row-id mechanism.
+    df = pd.DataFrame({
+        'A': [10, 20, 30],
+        '__row_id__': ['user_x', 'user_y', 'user_z'],  # user's real data
+    })
+    table = Tabulator(df)
+
+    # User data is untouched
+    assert '__row_id__' in table.value.columns
+    assert list(table.value['__row_id__']) == ['user_x', 'user_y', 'user_z']
+    assert '__row_id__' in table._processed.columns
+    assert list(table._processed['__row_id__']) == ['user_x', 'user_y', 'user_z']
+
+    # Column definition includes the user's __row_id__ as a real column
+    col_fields = [c.field for c in table._get_columns()]
+    assert '__row_id__' in col_fields
+
+    # CDS data contains BOTH the user's real "__row_id__" column AND the
+    # internal transport field "__panel_row_id__" — they must not collide.
+    _, cds_data = table._get_data()
+    cds_field = table._INTERNAL_ROW_ID_CDS_FIELD
+    assert cds_field in cds_data
     assert '__row_id__' in cds_data
-    assert list(cds_data['__row_id__']) == [0, 1, 2]
+    # Internal transport field has integer row ids (iloc positions)
+    assert list(cds_data[cds_field]) == [0, 1, 2]
+    # User's real column is untouched
+    assert list(cds_data['__row_id__']) == ['user_x', 'user_y', 'user_z']
+
+
+def test_tabulator_user_rowid_column_survives_filtering():
+    # User's __row_id__ column must survive filtering without corruption,
+    # and internal mapping must still use the correct iloc positions.
+    df = pd.DataFrame({
+        'A': [10, 20, 30, 40, 50],
+        '__row_id__': ['r0', 'r1', 'r2', 'r3', 'r4'],
+    })
+    table = Tabulator(df)
+    # Keep rows with A >= 30 → original ilocs 2, 3, 4
+    table.add_filter((30, None), column='A')
+
+    processed, cds_data = table._get_data()
+
+    # User column preserved and filtered correctly
+    assert '__row_id__' in processed.columns
+    assert list(processed['__row_id__']) == ['r2', 'r3', 'r4']
+    assert '__row_id__' in cds_data
+    assert list(cds_data['__row_id__']) == ['r2', 'r3', 'r4']
+
+    # Internal transport field maps to ORIGINAL ilocs, not re-indexed ones
+    cds_field = table._INTERNAL_ROW_ID_CDS_FIELD
+    assert list(cds_data[cds_field]) == [2, 3, 4]
+
+
+def test_tabulator_user_rowid_not_overwritten_by_edit():
+    # When the edit/write-back path runs, the user's __row_id__ column
+    # must not be touched by the internal machinery.
+    df = pd.DataFrame({
+        'A': [10, 20, 30],
+        '__row_id__': ['keep_me', 'keep_me_too', 'also_me'],
+    })
+    table = Tabulator(df)
+
+    cds_field = table._INTERNAL_ROW_ID_CDS_FIELD
+    # Simulate a CDS data sync that includes both fields
+    data = {
+        'A': [99, 20, 30],          # edit: A[0] changed from 10 → 99
+        '__row_id__': ['keep_me', 'keep_me_too', 'also_me'],  # user column
+        cds_field: [0, 1, 2],       # internal transport
+    }
+    table._process_data(data)
+
+    # The edit to column A was applied
+    assert list(table.value['A']) == [99, 20, 30]
+    # User's __row_id__ column is completely untouched
+    assert list(table.value['__row_id__']) == ['keep_me', 'keep_me_too', 'also_me']
 
 
 def test_tabulator_row_id_survives_filtering():
-    # After filtering, the remaining rows must carry the __row_id__ values
-    # that correspond to their original iloc positions, NOT new positions.
+    # After filtering, the remaining rows must carry the correct internal
+    # row id values that correspond to their original iloc positions.
     df = pd.DataFrame({'A': [10, 20, 30, 40, 50]})
     table = Tabulator(df)
     # Add a filter that keeps rows with A >= 30 (original ilocs 2, 3, 4)
     table.add_filter((30, None), column='A')
     _, cds_data = table._get_data()
-    assert list(cds_data['__row_id__']) == [2, 3, 4]
+    cds_field = table._INTERNAL_ROW_ID_CDS_FIELD
+    assert list(cds_data[cds_field]) == [2, 3, 4]
 
 
 def test_tabulator_row_id_remote_pagination(document, comm):
-    # With remote pagination + sorting + filtering, row ids must correctly
-    # point back to the original iloc positions in self.value.
+    # With remote pagination + sorting + filtering, internal row ids must
+    # correctly point back to the original iloc positions in self.value.
     df = pd.DataFrame({'A': [30, 10, 20]}, index=['x', 'y', 'z'])
     table = Tabulator(
         df, pagination='remote', page_size=2,
@@ -2868,8 +2951,6 @@ def test_tabulator_row_id_remote_pagination(document, comm):
     # Page 1 (size 2) should have row_ids [1, 2]
     assert table._current_page_row_ids == [1, 2]
 
-    # Cell edit on the second row of page 1 (cds position 1) should target iloc 2
-    edit_event = table._process_event
     # Verify _map_indexes converts row_ids correctly
     assert table._map_indexes([1, 2]) == [1, 2]
     assert table._iloc_from_row_id(1) == 1

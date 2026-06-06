@@ -168,6 +168,29 @@ class BaseTable(ReactiveData, Widget):
 
     __abstract = True
 
+    _INTERNAL_ROW_ID_CDS_FIELD: t.ClassVar[str] = "__panel_row_id__"
+
+    @classmethod
+    def _make_temp_rowid_colname(cls, df_cols) -> t.Any:
+        import pandas as pd
+        base = "__panel_rowid_temp__"
+        if isinstance(df_cols, pd.MultiIndex):
+            # Build a tuple whose last level is the unique marker; the other
+            # levels are filled with "" so it does not collide with user tuples.
+            nlevels = df_cols.nlevels
+            name: t.Any = tuple([""] * (nlevels - 1) + [base])
+            counter = 0
+            while name in df_cols:
+                counter += 1
+                name = tuple([""] * (nlevels - 1) + [f"{base}{counter}"])
+            return name
+        name = base
+        counter = 0
+        while name in df_cols:
+            counter += 1
+            name = f"{base}{counter}"
+        return name
+
     def __init__(self, value=None, **params):
         self._renamed_cols = {}
         self._filters = []
@@ -394,7 +417,7 @@ class BaseTable(ReactiveData, Widget):
     @updating
     def _update_cds(self, *events: param.parameterized.Event):
         self._processed, data = self._get_data()
-        self._processed_row_ids = list(data.get('__row_id__', []))
+        self._processed_row_ids = list(data.get(self._INTERNAL_ROW_ID_CDS_FIELD, []))
         self._update_index_mapping()
         self._data = {k: _convert_datetime_array_ignore_list(v) for k, v in data.items()}
         named_events = {e.name: e for e in events}
@@ -716,15 +739,21 @@ class BaseTable(ReactiveData, Widget):
         # applied but since header filters are applied on the frontend
         # we send the unfiltered data.
         #
-        # __row_id__ design (internal, never leaks to user data):
-        #   * ALWAYS inject a temp __row_id__ column into df BEFORE filtering
-        #     so that stable row ids travel with their rows through any
-        #     filtering operation.
-        #   * If explicit row_ids are given (stream / caller knows best) use
-        #     them; otherwise if df IS self.value generate them as range(len).
+        # Internal row-id design:
+        #   * NEVER hard-code a temp column name that might collide with a
+        #     user's real column (e.g. user has their own "__row_id__" column).
+        #     Instead, _make_temp_rowid_colname() picks a name that is
+        #     guaranteed NOT to be in df.columns.
+        #   * Inject this uniquely-named temp column BEFORE filtering so
+        #     stable row ids travel with their rows through any filter/sort.
         #   * In NO case do we infer row ids from df.index via get_loc().
-        #   * The temp __row_id__ column is dropped from the returned df so
-        #     it never appears in self._processed, user columns, or edits.
+        #   * The temp column is ALWAYS dropped from the returned df so it
+        #     never appears in self._processed, user columns, or edits.
+        #   * Internal row ids are written to the CDS dict under the fixed
+        #     _INTERNAL_ROW_ID_CDS_FIELD ("__panel_row_id__"), which is
+        #     consumed by the TypeScript frontend for row mapping. This
+        #     transport field is deliberately distinct from any plausible
+        #     user column name and is never rendered as a table column.
 
         import pandas as pd
         import numpy as np
@@ -735,6 +764,11 @@ class BaseTable(ReactiveData, Widget):
         except AssertionError:
             pass
 
+        # Phase 0 — pick a temp column name that does NOT collide with any
+        #           real user column (including "__row_id__" if the user
+        #           happened to name their column that).
+        temp_col = self._make_temp_rowid_colname(df.columns)
+
         # Phase 1 — inject stable row ids BEFORE filtering.
         if row_ids is not None:
             # Caller-supplied row ids (e.g. from stream); must be 1:1 with df
@@ -743,26 +777,26 @@ class BaseTable(ReactiveData, Widget):
                     f"row_ids length ({len(row_ids)}) must match df length ({len(df)})"
                 )
             df = df.copy()
-            df['__row_id__'] = list(row_ids)
+            df[temp_col] = list(row_ids)
         elif df is self.value:
             # Canonical source of truth: row_id == iloc position in self.value
             df = df.copy()
-            df['__row_id__'] = np.arange(len(df))
+            df[temp_col] = np.arange(len(df))
         else:
             raise TypeError(
                 "_process_df_and_convert_to_cds requires explicit row_ids "
                 "when the passed df is not self.value"
             )
 
-        # Phase 2 — filter (the __row_id__ temp column travels with its row)
+        # Phase 2 — filter (the uniquely-named temp column travels with its row)
         df = self._filter_dataframe(df, header_filters=False)
         if df is None:
             return [], {}
 
-        # Phase 3 — extract the unambiguous row ids that survived filtering
-        final_row_ids = df['__row_id__'].tolist()
-        # Strip the temp column so user code never sees it
-        df = df.drop(columns=['__row_id__'])
+        # Phase 3 — extract the unambiguous row ids that survived filtering,
+        #           then DROP the temp column so it can never leak to user data.
+        final_row_ids = df[temp_col].tolist()
+        df = df.drop(columns=[temp_col])
 
         indexes: list[t.Any]
         if isinstance(self.value.index, pd.MultiIndex):
@@ -778,8 +812,16 @@ class BaseTable(ReactiveData, Widget):
         data = ColumnDataSource.from_df(df.reset_index() if len(indexes) > 1 else df)
         if not self.show_index and len(indexes) > 1:
             data = {k: v for k, v in data.items() if k not in indexes}
-        # Attach unambiguous, pre-filtered row ids to CDS data only
-        data['__row_id__'] = list(final_row_ids)
+        # Attach unambiguous, pre-filtered row ids to the fixed internal
+        # CDS transport field. User columns (including any real "__row_id__")
+        # are untouched and remain under their own key in `data`.
+        cds_field = self._INTERNAL_ROW_ID_CDS_FIELD
+        if cds_field in data:
+            raise RuntimeError(
+                f"User column '{cds_field}' conflicts with Panel's internal "
+                "row-id transport field. Please rename your column."
+            )
+        data[cds_field] = list(final_row_ids)
         return df, {k if isinstance(k, str) else str(k): self._process_column(v, k, df) for k, v in data.items()}
 
     def _update_column(self, column: str, array: TDataColumn):
@@ -1623,8 +1665,8 @@ class Tabulator(BaseTable):
 
         import pandas as pd
         data = dict(data)
-        # Extract the __row_id__ column which contains internal stable row ids
-        row_id_values = data.pop('__row_id__', None)
+        # Extract the internal row-id transport field
+        row_id_values = data.pop(self._INTERNAL_ROW_ID_CDS_FIELD, None)
         df = pd.DataFrame(data)
         if row_id_values is not None:
             df.index = row_id_values
@@ -1647,7 +1689,7 @@ class Tabulator(BaseTable):
                 ], index=df.index)
                 mask = mask | edited_mask.values
             df = df[mask]
-        # Use the __row_id__ values (now df.index) to locate rows via iloc mapping
+        # Use the internal row ids (now df.index) to locate rows via iloc mapping
         if row_id_values is not None and len(df) > 0:
             for col in df.columns:
                 col_name = self._renamed_cols.get(col, col)
@@ -1685,22 +1727,29 @@ class Tabulator(BaseTable):
         # If data is paginated the current view on the frontend
         # and locally are identical and both paginated.
         #
-        # __row_id__ design (remote pagination):
-        #   1. Inject __row_id__ as a temp column BEFORE any filter/sort/page.
-        #      Values are the original iloc positions (0, 1, 2, ...).
-        #   2. Filter, sort, and page-slice the DataFrame with this temp column
+        # Internal row-id design (remote pagination):
+        #   1. Use _make_temp_rowid_colname() to generate a temp column name
+        #      that is GUARANTEED not to collide with any existing user column
+        #      (including "__row_id__" if the user happens to have one).
+        #   2. Inject the temp column BEFORE any filter/sort/page. Values are
+        #      the original iloc positions (0, 1, 2, ...).
+        #   3. Filter, sort, and page-slice the DataFrame with this temp column
         #      attached so it travels with the correct rows.
-        #   3. Extract the __row_id__ values from the paged result directly —
-        #      these are the correct, unambiguous row ids. NEVER use get_loc().
-        #   4. Drop the temp column before producing user-visible data so it
-        #      never contaminates the user's DataFrame, column listings, or
-        #      edit/write-back paths.
+        #   4. Extract the row ids from the temp column of the paged result
+        #      directly — these are the correct, unambiguous row ids.
+        #   5. DROP the temp column from every user-visible DataFrame so it
+        #      never contaminates the user's data, column listings, or edits.
+        #   6. Write the row ids to the CDS dict under the fixed internal
+        #      transport field _INTERNAL_ROW_ID_CDS_FIELD.
         import pandas as pd
         import numpy as np
 
+        # Step 0 — pick a temp column name that won't collide with user columns
+        temp_col = self._make_temp_rowid_colname(self.value.columns)
+
         # Step 1 — inject stable row ids BEFORE any filtering/sorting
         value_with_rowid = self.value.copy()
-        value_with_rowid['__row_id__'] = np.arange(len(self.value))
+        value_with_rowid[temp_col] = np.arange(len(self.value))
 
         # Step 2 — filter, sort, and page with the temp column tagging along
         df_with_rowid = self._filter_dataframe(value_with_rowid)
@@ -1711,13 +1760,13 @@ class Tabulator(BaseTable):
         page_df_with_rowid = df_with_rowid.iloc[start: start+nrows]
 
         # Step 3 — extract unambiguous row ids directly from the temp column
-        row_ids = page_df_with_rowid['__row_id__'].tolist()
+        row_ids = page_df_with_rowid[temp_col].tolist()
         self._current_page_row_ids = row_ids
 
         # Step 4 — strip the internal temp column everywhere it could leak
         #         to user-facing data (self._processed, CDS user columns, etc.)
-        df = df_with_rowid.drop(columns=['__row_id__'])
-        page_df = page_df_with_rowid.drop(columns=['__row_id__'])
+        df = df_with_rowid.drop(columns=[temp_col])
+        page_df = page_df_with_rowid.drop(columns=[temp_col])
 
         if isinstance(self.value.index, pd.MultiIndex):
             indexes = [
@@ -1730,8 +1779,16 @@ class Tabulator(BaseTable):
         if len(indexes) > 1:
             page_df = page_df.reset_index()
         data = dict(ColumnDataSource.from_df(page_df))
-        # Attach the pre-computed, unambiguous row ids to CDS data only
-        data['__row_id__'] = row_ids
+        # Attach the pre-computed, unambiguous row ids to the fixed internal
+        # CDS transport field. User columns (including any real "__row_id__")
+        # remain under their own key in `data`.
+        cds_field = self._INTERNAL_ROW_ID_CDS_FIELD
+        if cds_field in data:
+            raise RuntimeError(
+                f"User column '{cds_field}' conflicts with Panel's internal "
+                "row-id transport field. Please rename your column."
+            )
+        data[cds_field] = row_ids
         return df, {k if isinstance(k, str) else str(k): self._process_column(v, k, page_df) for k, v in data.items()}
 
     def _get_style_data(self, recompute=True):

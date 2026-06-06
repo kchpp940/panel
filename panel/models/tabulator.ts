@@ -19,6 +19,8 @@ import {transform_cds_to_records} from "./data"
 import {HTMLBox, HTMLBoxView} from "./layout"
 import {schedule_when, transformJsPlaceholders} from "./util"
 
+const INTERNAL_ROW_ID_FIELD = "__panel_row_id__"
+
 import tabulator_css from "styles/models/tabulator.css"
 
 export class TableEditEvent extends ModelEvent {
@@ -1617,8 +1619,8 @@ export class DataTabulatorView extends HTMLBoxView {
     // (CDS.patch uses positional indices 0,1,2... within the current data)
     const cds = this.model.source
     let cdsPosIndex = origIndex
-    if (cds !== null && cds.columns().includes("__row_id__")) {
-      const indexArray = cds.get_array("__row_id__")
+    if (cds !== null && cds.columns().includes(INTERNAL_ROW_ID_FIELD)) {
+      const indexArray = cds.get_array(INTERNAL_ROW_ID_FIELD)
       for (let i = 0; i < indexArray.length; i++) {
         if (indexArray[i] === origIndex) {
           cdsPosIndex = i
