@@ -78,7 +78,7 @@ export class GridStackView extends ReactiveHTMLView {
     }
   }
 
-  protected _sync_state(): void {
+  protected _sync_state(source: "user" | "layout"): void {
     if (this._gridstack == null) {
       return
     }
@@ -97,7 +97,9 @@ export class GridStackView extends ReactiveHTMLView {
         y1: node.y + node.h,
       })
     }
-    ;(this.model.data as any).state = items
+    const data = this.model.data as any
+    data._state_event = source
+    data.state = items
   }
 
   protected _update_allow_drag(): void {
@@ -115,7 +117,7 @@ export class GridStackView extends ReactiveHTMLView {
   protected _update_ncols(): void {
     if (this._gridstack != null) {
       this._gridstack.column((this.model.data as any).ncols)
-      this._sync_state()
+      this._sync_state("layout")
     }
   }
 
@@ -123,7 +125,7 @@ export class GridStackView extends ReactiveHTMLView {
     if (this._gridstack != null) {
       this._gridstack.opts.row = (this.model.data as any).nrows
       this._update_cell_height()
-      this._sync_state()
+      this._sync_state("layout")
     }
   }
 
@@ -154,14 +156,14 @@ export class GridStackView extends ReactiveHTMLView {
     this._gridstack = GridStack.init(options, grid)
 
     this._gridstack.on("resizestop", () => {
-      this._sync_state()
+      this._sync_state("user")
       this.invalidate_layout()
     })
     this._gridstack.on("dragstop", () => {
-      this._sync_state()
+      this._sync_state("user")
     })
     this._gridstack.on("change", () => {
-      this._sync_state()
+      this._sync_state("layout")
     })
 
     this._resize_observer = new ResizeObserver(() => {
@@ -169,7 +171,7 @@ export class GridStackView extends ReactiveHTMLView {
     })
     this._resize_observer.observe(grid)
 
-    this._sync_state()
+    this._sync_state("layout")
   }
 
   override _after_layout(): void {

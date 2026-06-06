@@ -50,6 +50,12 @@ class GridStack(ReactiveHTML, GridSpec):  # type: ignore[misc, override]
         Current state of the grid (updated as items are resized and
         dragged).""")  # type: ignore[assignment, ty:invalid-assignment]
 
+    _state_event = param.String(default="layout", doc="""
+        Internal marker indicating the source of the last state update:
+        - 'user': triggered by explicit user drag or resize
+        - 'layout': triggered by ncols/nrows change, initial render, or
+          automatic grid reflow""")
+
     width = param.Integer(default=None)
 
     height = param.Integer(default=None)
@@ -134,45 +140,92 @@ class GridStack(ReactiveHTML, GridSpec):  # type: ignore[misc, override]
                     self.objects[key] = obj
         finally:
             self._updating_objects = False
-        self._update_sizing()
+        if self._state_event == "user":
+            self._update_sizing(user_triggered=True)
 
-    @param.depends('objects', 'ncols', 'nrows', 'width', 'height', 'sizing_mode', watch=True)
-    def _update_sizing(self):
+    @param.depends('objects', 'sizing_mode', watch=True)
+    def _update_sizing(self, user_triggered: bool = False):
         if getattr(self, '_updating_objects', False):
             return
-        if self.ncols and self.width:
-            width = self.width/self.ncols
-        else:
-            width = 0
 
+        parent_sizing = self.sizing_mode
+        parent_is_fixed = parent_sizing in ('fixed', None)
+        parent_is_stretch_both = parent_sizing == 'stretch_both'
+        parent_has_stretch_width = isinstance(parent_sizing, str) and 'width' in parent_sizing
+        parent_has_stretch_height = isinstance(parent_sizing, str) and 'height' in parent_sizing
+
+        cell_width = 0
+        cell_height = 0
+        if self.ncols and self.width:
+            cell_width = self.width / self.ncols
         if self.nrows and self.height:
-            height = self.height/self.nrows
-        else:
-            height = 0
+            cell_height = self.height / self.nrows
 
         for (y0, x0, y1, x1), obj in self.objects.items():
             x0 = 0 if x0 is None else x0
-            x1 = (self.ncols) if x1 is None else x1
+            x1 = self.ncols if x1 is None else x1
             y0 = 0 if y0 is None else y0
-            y1 = (self.nrows) if y1 is None else y1
-            h, w = y1-y0, x1-x0
+            y1 = self.nrows if y1 is None else y1
+            h, w = y1 - y0, x1 - x0
 
-            properties = {}
-            if self.sizing_mode in ['fixed', None]:
-                if width:
-                    properties['width'] = int(w*width)
-                if height:
-                    properties['height'] = int(h*height)
+            properties: dict[str, t.Any] = {}
+
+            if parent_is_fixed:
+                if user_triggered and cell_width:
+                    properties['width'] = int(w * cell_width)
+                if user_triggered and cell_height:
+                    properties['height'] = int(h * cell_height)
             else:
                 if not obj.sizing_mode:
-                    properties['sizing_mode'] = self.sizing_mode
-                if self.sizing_mode == 'stretch_both':
+                    properties['sizing_mode'] = parent_sizing
+
+                if parent_is_stretch_both:
                     pass
-                elif 'width' in self.sizing_mode and height:
-                    properties['height'] = int(h*height)
-                elif 'height' in self.sizing_mode and width:
-                    properties['width'] = int(w*width)
-            obj.param.update(**{
-                k: v for k, v in properties.items()
-                if not obj.param[k].readonly
-            })
+                elif user_triggered and parent_has_stretch_width and cell_height:
+                    properties['height'] = int(h * cell_height)
+                elif user_triggered and parent_has_stretch_height and cell_width:
+                    properties['width'] = int(w * cell_width)
+
+            if properties:
+                obj.param.update(**{
+                    k: v for k, v in properties.items()
+                    if not obj.param[k].readonly
+                })
+
+    @param.depends('ncols', 'nrows', 'width', 'height', watch=True)
+    def _recompute_fixed_sizing(self):
+        if self.sizing_mode not in ('fixed', None):
+            return
+        if getattr(self, '_updating_objects', False):
+            return
+        if not self.objects:
+            return
+
+        cell_width = 0
+        cell_height = 0
+        if self.ncols and self.width:
+            cell_width = self.width / self.ncols
+        if self.nrows and self.height:
+            cell_height = self.height / self.nrows
+
+        if not cell_width and not cell_height:
+            return
+
+        for (y0, x0, y1, x1), obj in self.objects.items():
+            x0 = 0 if x0 is None else x0
+            x1 = self.ncols if x1 is None else x1
+            y0 = 0 if y0 is None else y0
+            y1 = self.nrows if y1 is None else y1
+            h, w = y1 - y0, x1 - x0
+
+            properties: dict[str, t.Any] = {}
+            if cell_width:
+                properties['width'] = int(w * cell_width)
+            if cell_height:
+                properties['height'] = int(h * cell_height)
+
+            if properties:
+                obj.param.update(**{
+                    k: v for k, v in properties.items()
+                    if not obj.param[k].readonly
+                })
