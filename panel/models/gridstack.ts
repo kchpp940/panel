@@ -98,8 +98,7 @@ export class GridStackView extends ReactiveHTMLView {
       })
     }
     const data = this.model.data as any
-    data._state_event = source
-    data.state = items
+    data._state_raw = {source, items}
   }
 
   protected _update_allow_drag(): void {

@@ -50,11 +50,9 @@ class GridStack(ReactiveHTML, GridSpec):  # type: ignore[misc, override]
         Current state of the grid (updated as items are resized and
         dragged).""")  # type: ignore[assignment, ty:invalid-assignment]
 
-    _state_event = param.String(default="layout", doc="""
-        Internal marker indicating the source of the last state update:
-        - 'user': triggered by explicit user drag or resize
-        - 'layout': triggered by ncols/nrows change, initial render, or
-          automatic grid reflow""")
+    _state_raw = param.Dict(default=None, doc="""
+        Internal atomic payload from the frontend containing both the
+        state items and the source of the update ('user' or 'layout').""")
 
     width = param.Integer(default=None)
 
@@ -121,16 +119,31 @@ class GridStack(ReactiveHTML, GridSpec):  # type: ignore[misc, override]
     def __css__(cls):
         return bundled_files(cls, 'css')
 
-    @param.depends('state', watch=True)
+    @param.depends('_state_raw', watch=True)
     def _update_objects(self):
         if getattr(self, '_updating_objects', False):
             return
-        object_ids = {str(id(obj)): obj for obj in self}
-        new_objects = {}
-        for p in self.state:
-            new_objects[(p['y0'], p['x0'], p['y1'], p['x1'])] = object_ids[p['id']]
+        if self._state_raw is None:
+            return
+
+        source: str = self._state_raw.get("source", "layout")
+        items: list[dict[str, t.Any]] = self._state_raw.get("items", [])
+        if not items:
+            return
+
         self._updating_objects = True
         try:
+            with param.edit_constant(self):
+                self.state = list(items)
+        finally:
+            pass
+
+        try:
+            object_ids = {str(id(obj)): obj for obj in self}
+            new_objects = {}
+            for p in items:
+                new_objects[(p['y0'], p['x0'], p['y1'], p['x1'])] = object_ids[p['id']]
+
             current_keys = set(self.objects.keys())
             new_keys = set(new_objects.keys())
             for key in current_keys - new_keys:
@@ -140,7 +153,8 @@ class GridStack(ReactiveHTML, GridSpec):  # type: ignore[misc, override]
                     self.objects[key] = obj
         finally:
             self._updating_objects = False
-        if self._state_event == "user":
+
+        if source == "user":
             self._update_sizing(user_triggered=True)
 
     @param.depends('objects', 'sizing_mode', watch=True)
@@ -171,9 +185,9 @@ class GridStack(ReactiveHTML, GridSpec):  # type: ignore[misc, override]
             properties: dict[str, t.Any] = {}
 
             if parent_is_fixed:
-                if user_triggered and cell_width:
+                if cell_width:
                     properties['width'] = int(w * cell_width)
-                if user_triggered and cell_height:
+                if cell_height:
                     properties['height'] = int(h * cell_height)
             else:
                 if not obj.sizing_mode:
