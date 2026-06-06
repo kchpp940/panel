@@ -1617,8 +1617,8 @@ export class DataTabulatorView extends HTMLBoxView {
     // (CDS.patch uses positional indices 0,1,2... within the current data)
     const cds = this.model.source
     let cdsPosIndex = origIndex
-    if (cds !== null && cds.columns().includes("_index")) {
-      const indexArray = cds.get_array("_index")
+    if (cds !== null && cds.columns().includes("__row_id__")) {
+      const indexArray = cds.get_array("__row_id__")
       for (let i = 0; i < indexArray.length; i++) {
         if (indexArray[i] === origIndex) {
           cdsPosIndex = i

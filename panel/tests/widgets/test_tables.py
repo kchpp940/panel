@@ -2800,16 +2800,30 @@ def test_tabulator_pagination_remote_cell_click_event_with_stream():
                 assert values[-1] == (col, df_index, data[col].iloc[df_index])
             table.stream(pd.DataFrame([(5.0, 0, 'foo6', df.D.iloc[-1])], columns=df.columns, index=[5]))
 
-def test_tabulator_cell_click_event_error_duplicate_index():
-    df = pd.DataFrame(data={'A': [1, 2]}, index=['a', 'a'])
-    table = Tabulator(df, sorters=[{'field': 'A', 'sorter': 'number', 'dir': 'desc'}])
+def test_tabulator_cell_click_event_duplicate_index():
+    # With internal stable row ids, duplicate DataFrame indexes are handled
+    # correctly since we use integer row ids instead of DataFrame index values
+    df = pd.DataFrame(data={'A': [1, 2, 3]}, index=['a', 'a', 'b'])
+    table = Tabulator(df)
 
     values = []
     table.on_click(lambda e: values.append((e.column, e.row, e.value)))
 
-    event = CellClickEvent(model=None, column='y', row='a')
-    with pytest.raises(ValueError, match="Found this duplicate index: 'a'"):
-        table._process_event(event)
+    # Row id equals iloc position in original self.value
+    # Clicking row with row_id=0 (iloc=0)
+    event = CellClickEvent(model=None, column='A', row=0)
+    table._process_event(event)
+    assert values[-1] == ('A', 0, 1)
+
+    # Clicking row with row_id=1 (iloc=1) - duplicate index 'a'
+    event = CellClickEvent(model=None, column='A', row=1)
+    table._process_event(event)
+    assert values[-1] == ('A', 1, 2)
+
+    # Clicking row with row_id=2 (iloc=2) - index 'b'
+    event = CellClickEvent(model=None, column='A', row=2)
+    table._process_event(event)
+    assert values[-1] == ('A', 2, 3)
 
 def test_tabulator_styling_empty_dataframe(document, comm):
     df = pd.DataFrame(columns=["A", "B", "C"]).astype({

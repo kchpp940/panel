@@ -735,8 +735,24 @@ class BaseTable(ReactiveData, Widget):
         data = ColumnDataSource.from_df(df.reset_index() if len(indexes) > 1 else df)
         if not self.show_index and len(indexes) > 1:
             data = {k: v for k, v in data.items() if k not in indexes}
-        # Add _index column with the original DataFrame index values as row identifiers
-        data['_index'] = df.index.values
+        # Add __row_id__ column with stable integer row identifiers (iloc positions in self.value)
+        # Using double underscores to avoid conflicts with user-defined columns
+        # Map each row in df back to its iloc position in the original self.value
+        row_ids: list[int] = []
+        if len(df) > 0 and self.value is not None and len(self.value) > 0:
+            for idx_val in df.index:
+                try:
+                    iloc = self.value.index.get_loc(idx_val)
+                    if isinstance(iloc, slice):
+                        iloc = iloc.start if iloc.start is not None else 0
+                    elif isinstance(iloc, np.ndarray):
+                        iloc = int(iloc[0]) if len(iloc) > 0 else len(row_ids)
+                    row_ids.append(int(iloc))
+                except (KeyError, TypeError, IndexError):
+                    row_ids.append(len(row_ids))
+        else:
+            row_ids = list(range(len(df)))
+        data['__row_id__'] = row_ids
         return df, {k if isinstance(k, str) else str(k): self._process_column(v, k, df) for k, v in data.items()}
 
     def _update_column(self, column: str, array: TDataColumn):
@@ -1403,11 +1419,16 @@ class Tabulator(BaseTable):
         self._on_edit_callbacks = []
         self._on_click_callbacks = {}
         self._old_value = None
+        self._row_id_to_iloc: dict[int, int] = {}
+        self._iloc_to_row_id: list[int] = []
+        self._current_page_row_ids: list[int] = []
         super().__init__(value=value, **params)
         self._configuration = configuration
         self.param.watch(self._update_children, self._content_params)
         self.param.watch(self._clear_selection_remote_pagination, 'value')
+        self.param.watch(lambda e: self._rebuild_row_id_mapping(), 'value')
         self.param.watch(lambda e: self.param.trigger("hidden_columns"), 'show_index')
+        self._rebuild_row_id_mapping()
         if click_handler:
             self.on_click(click_handler)
         if edit_handler:
@@ -1415,6 +1436,25 @@ class Tabulator(BaseTable):
         if style is not None:
             self.style._todo = style._todo
         self.param.selection.callable = self._get_selectable
+
+    def _rebuild_row_id_mapping(self) -> None:
+        self._row_id_to_iloc = {}
+        self._iloc_to_row_id = []
+        if self.value is None:
+            return
+        n = len(self.value)
+        for iloc in range(n):
+            row_id = iloc
+            self._row_id_to_iloc[row_id] = iloc
+            self._iloc_to_row_id.append(row_id)
+
+    def _iloc_from_row_id(self, row_id: int) -> int | None:
+        return self._row_id_to_iloc.get(row_id)
+
+    def _row_id_from_iloc(self, iloc: int) -> int | None:
+        if 0 <= iloc < len(self._iloc_to_row_id):
+            return self._iloc_to_row_id[iloc]
+        return None
 
     @param.depends('value', watch=True, on_init=True)
     def _apply_max_size(self):
@@ -1437,15 +1477,14 @@ class Tabulator(BaseTable):
         self._explicit_pagination = True
 
     @staticmethod
-    def _validate_iloc(idx, iloc):
-        # Validate that the index returned by Pandas get_loc is a single int,
-        # as get_loc can return a slice or a mask array when it finds more
-        # than one locations.
+    def _validate_iloc(row_id, iloc):
+        # Validate that the row id maps to a single integer iloc position.
+        # This is a safety check; under normal circumstances the internal
+        # row id mapping should always return a single integer iloc.
         if not isinstance(iloc, int):
             raise ValueError(
-                'The Tabulator widget expects the provided `value` Pandas DataFrame '
-                'to have unique indexes, in particular when it has to deal with '
-                f'click or edit events. Found this duplicate index: {idx!r}'
+                f'The Tabulator widget found an invalid internal row id mapping: '
+                f'row_id={row_id!r} maps to non-integer iloc={iloc!r}'
             )
 
     def _validate(self, *events):
@@ -1479,10 +1518,13 @@ class Tabulator(BaseTable):
             return
 
         event_col = self._renamed_cols.get(event.column, event.column)
-        # event.row is the original DataFrame index value (sent via _index column)
-        idx = event.row
-        iloc = self.value.index.get_loc(idx)
-        self._validate_iloc(idx, iloc)
+        # event.row is the internal stable row id (from __row_id__ column)
+        # Convert it to iloc position using our internal mapping
+        row_id = event.row
+        iloc = self._iloc_from_row_id(row_id)
+        if iloc is None or not isinstance(iloc, int):
+            return
+        self._validate_iloc(row_id, iloc)
         event.row = iloc
         if event_col not in self.buttons:
             if event_col in self.value.columns:
@@ -1496,9 +1538,9 @@ class Tabulator(BaseTable):
                 import pandas as pd
                 filter_df = pd.DataFrame({event.column: [event.value]})
                 filters = self._get_header_filters(filter_df)
-                # Check if edited cell was filtered
+                # Check if edited cell was filtered; store DataFrame index value
                 if filters and filters[0].any():
-                    self._edited_indexes.append(idx)
+                    self._edited_indexes.append(self.value.index[iloc])
             else:
                 if self._old_value is not None:
                     event.old = self._old_value[event_col].iloc[event.row]
@@ -1545,35 +1587,56 @@ class Tabulator(BaseTable):
 
         import pandas as pd
         data = dict(data)
-        # Extract the _index column which contains original DataFrame index values
-        index_values = data.pop('_index', None)
+        # Extract the __row_id__ column which contains internal stable row ids
+        row_id_values = data.pop('__row_id__', None)
         df = pd.DataFrame(data)
-        if index_values is not None:
-            df.index = index_values
+        if row_id_values is not None:
+            df.index = row_id_values
         filters = self._get_header_filters(df) if self.pagination == 'remote' else []
         if filters:
             mask = filters[0]
             for f in filters:
                 mask &= f
             if self._edited_indexes:
-                edited_mask = (df.index.isin(self._edited_indexes))
-                mask = mask | edited_mask
+                # _edited_indexes stores DataFrame index values; convert row ids
+                # to DataFrame index values for comparison
+                df_df_index_values = [
+                    self.value.index[self._iloc_from_row_id(rid)]
+                    if self._iloc_from_row_id(rid) is not None else None
+                    for rid in df.index
+                ]
+                edited_mask = pd.Series([
+                    (v is not None and v in self._edited_indexes)
+                    for v in df_df_index_values
+                ], index=df.index)
+                mask = mask | edited_mask.values
             df = df[mask]
-        # Use the _index values (now df.index) to locate rows and update columns
-        if index_values is not None and len(df) > 0:
+        # Use the __row_id__ values (now df.index) to locate rows via iloc mapping
+        if row_id_values is not None and len(df) > 0:
             for col in df.columns:
                 col_name = self._renamed_cols.get(col, col)
                 if col_name in self.indexes:
                     continue
-                # Update self.value using the original index values
-                mask = df.index.isin(self.value.index)
-                if mask.any():
-                    subset = df[mask]
-                    self.value.loc[subset.index, col_name] = subset[col].values
+                # Convert row ids to iloc positions and update using .iloc
+                ilocs = []
+                col_values = []
+                for rid, val in zip(df.index, df[col].values):
+                    iloc = self._iloc_from_row_id(rid)
+                    if iloc is not None:
+                        ilocs.append(iloc)
+                        col_values.append(val)
+                if ilocs:
+                    self.value.iloc[ilocs, self.value.columns.get_loc(col_name)] = col_values
                     if self._processed is not None and not self._processed.empty:
-                        processed_mask = subset.index.isin(self._processed.index)
-                        if processed_mask.any():
-                            self._processed.loc[subset.index[processed_mask], col_name] = subset[processed_mask][col].values
+                        processed_ilocs = []
+                        processed_vals = []
+                        for rid, val in zip(df.index, df[col].values):
+                            iloc = self._iloc_from_row_id(rid)
+                            if iloc is not None and iloc < len(self._processed):
+                                processed_ilocs.append(iloc)
+                                processed_vals.append(val)
+                        if processed_ilocs:
+                            self._processed.iloc[processed_ilocs, self._processed.columns.get_loc(col_name)] = processed_vals
         else:
             data = {col: df[col].values for col in df.columns}
             return super()._process_data(data)
@@ -1592,6 +1655,25 @@ class Tabulator(BaseTable):
         start = (self.page-1)*nrows
 
         page_df = df.iloc[start: start+nrows]
+        # Capture original DataFrame index values before potential reset_index
+        original_index_values = page_df.index.values
+        # Compute __row_id__ (iloc positions in original self.value)
+        row_ids: list[int] = []
+        if len(self.value) > 0:
+            for idx_val in original_index_values:
+                try:
+                    iloc = self.value.index.get_loc(idx_val)
+                    if isinstance(iloc, slice):
+                        iloc = iloc.start if iloc.start is not None else 0
+                    elif isinstance(iloc, np.ndarray):
+                        iloc = int(iloc[0]) if len(iloc) > 0 else len(row_ids)
+                    row_ids.append(int(iloc))
+                except (KeyError, TypeError, IndexError):
+                    row_ids.append(len(row_ids))
+        else:
+            row_ids = list(range(len(page_df)))
+        # Store the current page row ids for _patch to use
+        self._current_page_row_ids = row_ids
         if isinstance(self.value.index, pd.MultiIndex):
             indexes = [
                 f'level_{i}' if n is None else n
@@ -1603,8 +1685,9 @@ class Tabulator(BaseTable):
         if len(indexes) > 1:
             page_df = page_df.reset_index()
         data = dict(ColumnDataSource.from_df(page_df))
-        # Add _index column with the original DataFrame index values as row identifiers
-        data['_index'] = page_df.index.values
+        # Add __row_id__ column with stable integer row identifiers (iloc positions in self.value)
+        # Using double underscores to avoid conflicts with user-defined columns
+        data['__row_id__'] = row_ids
         return df, {k if isinstance(k, str) else str(k): self._process_column(v, k, page_df) for k, v in data.items()}
 
     def _get_style_data(self, recompute=True):
@@ -1724,14 +1807,32 @@ class Tabulator(BaseTable):
             start = (self.page-1)*nrows
             df = df.iloc[start:(start+nrows)]
         indexed_children, children = {}, {}
+        # Compute row ids for each row in the current page
+        if self.pagination == 'remote':
+            page_row_ids = self._current_page_row_ids
+        else:
+            # Compute row ids from filtered/sorted df.index values
+            page_row_ids: list[int] = []
+            if len(self.value) > 0:
+                for idx_val in df.index:
+                    try:
+                        iloc = self.value.index.get_loc(idx_val)
+                        if isinstance(iloc, slice):
+                            iloc = iloc.start if iloc.start is not None else 0
+                        elif isinstance(iloc, np.ndarray):
+                            iloc = int(iloc[0]) if len(iloc) > 0 else len(page_row_ids)
+                        page_row_ids.append(int(iloc))
+                    except (KeyError, TypeError, IndexError):
+                        page_row_ids.append(len(page_row_ids))
+            else:
+                page_row_ids = list(range(len(df)))
         if self.embed_content:
             indexes = list(range(len(df)))
-            # Get original DataFrame index values for _map_indexes
-            df_index_values = list(df.index.values)
-            mapped = self._map_indexes(df_index_values)
-            # expanded should be original DataFrame index values (matching frontend _index)
+            # Map row ids to iloc positions on self.value
+            mapped = self._map_indexes(page_row_ids)
+            # expanded should be row ids (matching frontend __row_id__ → _index)
             expanded = [
-                df_index for df_index, m in zip(df_index_values, mapped)
+                row_id for row_id, m in zip(page_row_ids, mapped)
                 if m in self.expanded
             ]
             for i in indexes:
@@ -1751,8 +1852,10 @@ class Tabulator(BaseTable):
                     child = self._get_row_content_panel(self.value.iloc[i])
                 if idx not in df.index:
                     continue
-                # expanded should be original DataFrame index values (matching frontend _index)
-                expanded.append(idx)
+                # expanded should be row ids (matching frontend __row_id__ → _index)
+                row_id = self._row_id_from_iloc(i)
+                if row_id is not None:
+                    expanded.append(row_id)
                 loc = df.index.get_loc(idx)
                 indexed_children[idx] = children[loc] = child
         removed = [
@@ -1831,21 +1934,17 @@ class Tabulator(BaseTable):
             nrows = self.page_size or self.initial_page_size
             start = (self.page - 1) * nrows
             end = start + nrows
-            # Get the DataFrame index values currently displayed on this page
-            page_index_values = set(self._processed.index[start:end].values)
+            # Get the row ids currently displayed on this page
+            page_row_ids = self._current_page_row_ids
             filtered = {}
             for c, values in patch.items():
                 filtered_values = []
                 for (ind, val) in values:
-                    # ind is iloc position on self.value, convert to DataFrame index value
-                    if 0 <= ind < len(self.value):
-                        df_idx_val = self.value.index[ind]
-                        if df_idx_val in page_index_values:
-                            # Compute position within current page CDS data
-                            df_idx_list = list(self._processed.index[start:end].values)
-                            if df_idx_val in df_idx_list:
-                                pos_in_page = df_idx_list.index(df_idx_val)
-                                filtered_values.append((pos_in_page, val))
+                    # ind is iloc position on self.value, convert to row id
+                    row_id = self._row_id_from_iloc(ind)
+                    if row_id is not None and row_id in page_row_ids:
+                        pos_in_page = page_row_ids.index(row_id)
+                        filtered_values.append((pos_in_page, val))
                 if filtered_values:
                     filtered[c] = filtered_values
             patch = filtered
@@ -1900,10 +1999,13 @@ class Tabulator(BaseTable):
         kwargs = {}
         if self.value is not None:
             # self.selection stores iloc positions on self.value
-            # Convert to original DataFrame index values (frontend _index)
+            # Convert to internal stable row ids (frontend __row_id__ → _index)
             # which Tabulator uses as its row index
-            index = self.value.iloc[self.selection].index
-            indices = list(index.values)
+            indices = []
+            for iloc in self.selection:
+                row_id = self._row_id_from_iloc(iloc)
+                if row_id is not None:
+                    indices.append(row_id)
             kwargs['indices'] = indices
         super()._update_selected(*events, **kwargs)
 
@@ -1929,15 +2031,14 @@ class Tabulator(BaseTable):
             self._processed.loc[index, column] = array
 
     def _map_indexes(self, indexes: list[int], existing: list[int] = [], add: bool = True) -> list[int]:
-        # indexes are original DataFrame index values (sent via _index column from frontend),
-        # convert them to iloc positions on self.value
+        # indexes are internal stable row ids (sent via __row_id__ column from frontend),
+        # convert them to iloc positions on self.value using our mapping
         ilocs = list(existing)
         for v in indexes:
-            try:
-                iloc = self.value.index.get_loc(v)
-                self._validate_iloc(v, iloc)
-            except KeyError:
+            iloc = self._iloc_from_row_id(v)
+            if iloc is None:
                 continue
+            self._validate_iloc(v, iloc)
             if add:
                 ilocs.append(iloc)
             elif iloc in ilocs:

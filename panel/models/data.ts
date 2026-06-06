@@ -8,7 +8,7 @@ export function transform_cds_to_records(cds: ColumnDataSource, addId: boolean =
   if (columns.length === 0 || cdsLength === null) {
     return []
   }
-  const has_index_column = columns.includes("_index")
+  const has_row_id_column = columns.includes("__row_id__")
 
   for (let i = start; i < cdsLength; i++) {
     const item: any = {}
@@ -25,9 +25,9 @@ export function transform_cds_to_records(cds: ColumnDataSource, addId: boolean =
       }
     }
     if (addId) {
-      // Prefer the explicit _index column sent from Python (original DataFrame index),
+      // Prefer the explicit __row_id__ column sent from Python (stable internal row id),
       // fall back to positional index for backward compatibility
-      item._index = has_index_column ? item._index : i
+      item._index = has_row_id_column ? item.__row_id__ : i
     }
     data.push(item)
   }
