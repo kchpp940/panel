@@ -2825,6 +2825,57 @@ def test_tabulator_cell_click_event_duplicate_index():
     table._process_event(event)
     assert values[-1] == ('A', 2, 3)
 
+
+def test_tabulator_row_id_isolation_from_user_data():
+    # __row_id__ must never appear in self.value, self._processed columns,
+    # or the column definitions exposed to the user.
+    df = pd.DataFrame({'A': [10, 20, 30], 'B': ['x', 'y', 'z']})
+    table = Tabulator(df)
+
+    assert '__row_id__' not in table.value.columns
+    assert '__row_id__' not in table._processed.columns
+    col_fields = [c.field for c in table._get_columns()]
+    assert '__row_id__' not in col_fields
+
+    # CDS data dict should contain __row_id__ (it is the internal transport layer)
+    _, cds_data = table._get_data()
+    assert '__row_id__' in cds_data
+    assert list(cds_data['__row_id__']) == [0, 1, 2]
+
+
+def test_tabulator_row_id_survives_filtering():
+    # After filtering, the remaining rows must carry the __row_id__ values
+    # that correspond to their original iloc positions, NOT new positions.
+    df = pd.DataFrame({'A': [10, 20, 30, 40, 50]})
+    table = Tabulator(df)
+    # Add a filter that keeps rows with A >= 30 (original ilocs 2, 3, 4)
+    table.add_filter((30, None), column='A')
+    _, cds_data = table._get_data()
+    assert list(cds_data['__row_id__']) == [2, 3, 4]
+
+
+def test_tabulator_row_id_remote_pagination(document, comm):
+    # With remote pagination + sorting + filtering, row ids must correctly
+    # point back to the original iloc positions in self.value.
+    df = pd.DataFrame({'A': [30, 10, 20]}, index=['x', 'y', 'z'])
+    table = Tabulator(
+        df, pagination='remote', page_size=2,
+        sorters=[{'field': 'A', 'dir': 'asc'}],
+    )
+    model = table.get_root(document, comm)
+
+    # After sorting by A ascending, order is A=10(iloc=1), A=20(iloc=2), A=30(iloc=0)
+    # Page 1 (size 2) should have row_ids [1, 2]
+    assert table._current_page_row_ids == [1, 2]
+
+    # Cell edit on the second row of page 1 (cds position 1) should target iloc 2
+    edit_event = table._process_event
+    # Verify _map_indexes converts row_ids correctly
+    assert table._map_indexes([1, 2]) == [1, 2]
+    assert table._iloc_from_row_id(1) == 1
+    assert table._iloc_from_row_id(2) == 2
+
+
 def test_tabulator_styling_empty_dataframe(document, comm):
     df = pd.DataFrame(columns=["A", "B", "C"]).astype({
         "A": float,
