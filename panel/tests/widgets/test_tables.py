@@ -732,7 +732,10 @@ def test_tabulator_filtered_expanded_content_remote_pagination(document, comm):
     row1 = model.children[1]
     assert row1.text == "&lt;pre&gt;3.0&lt;/pre&gt;"
 
-    model.expanded = [0]
+    # User clicks to keep only first row on screen expanded.
+    # The frontend sends DataFrame index values (matching _index column)
+    # The first row on screen has DataFrame index 1 (because B=1.0)
+    model.expanded = [1]
     assert table.expanded == [1]
 
     table.filters = [{'field': 'B', 'sorter': 'number', 'type': '=', 'value': '0'}]
@@ -2774,9 +2777,10 @@ def test_tabulator_pagination_remote_cell_click_event():
         for p in range(len(df)//2):
             table.page = p+1
             for row in range(2):
-                event = CellClickEvent(model=None, column=col, row=row)
+                df_index = (p*2)+row
+                event = CellClickEvent(model=None, column=col, row=df_index)
                 table._process_event(event)
-                assert values[-1] == (col, (p*2)+row, data[col].iloc[(p*2)+row])
+                assert values[-1] == (col, df_index, data[col].iloc[df_index])
 
 def test_tabulator_pagination_remote_cell_click_event_with_stream():
     df = makeMixedDataFrame()
@@ -2790,9 +2794,10 @@ def test_tabulator_pagination_remote_cell_click_event_with_stream():
         for p in range(len(df)//2):
             table.page = p+1
             for row in range(2):
-                event = CellClickEvent(model=None, column=col, row=row)
+                df_index = (p*2)+row
+                event = CellClickEvent(model=None, column=col, row=df_index)
                 table._process_event(event)
-                assert values[-1] == (col, (p*2)+row, data[col].iloc[(p*2)+row])
+                assert values[-1] == (col, df_index, data[col].iloc[df_index])
             table.stream(pd.DataFrame([(5.0, 0, 'foo6', df.D.iloc[-1])], columns=df.columns, index=[5]))
 
 def test_tabulator_cell_click_event_error_duplicate_index():
@@ -2802,7 +2807,7 @@ def test_tabulator_cell_click_event_error_duplicate_index():
     values = []
     table.on_click(lambda e: values.append((e.column, e.row, e.value)))
 
-    event = CellClickEvent(model=None, column='y', row=0)
+    event = CellClickEvent(model=None, column='y', row='a')
     with pytest.raises(ValueError, match="Found this duplicate index: 'a'"):
         table._process_event(event)
 

@@ -1607,23 +1607,36 @@ export class DataTabulatorView extends HTMLBoxView {
   cellEdited(cell: any): void {
     const field = cell._cell.column.field
     const column_def = this.columns.get(field)
-    const index = cell.getData()._index
+    const origIndex = cell.getData()._index
     const value = cell._cell.value
     if (column_def.validator === "numeric" && value === "") {
       cell.setValue(NaN, true)
       return
     }
+    // Find the positional index in the current CDS data for patching
+    // (CDS.patch uses positional indices 0,1,2... within the current data)
+    const cds = this.model.source
+    let cdsPosIndex = origIndex
+    if (cds !== null && cds.columns().includes("_index")) {
+      const indexArray = cds.get_array("_index")
+      for (let i = 0; i < indexArray.length; i++) {
+        if (indexArray[i] === origIndex) {
+          cdsPosIndex = i
+          break
+        }
+      }
+    }
     this._tabulator_cell_updating = true
     comm_settings.debounce = false
-    this.model.trigger_event(new TableEditEvent(field, index, true))
+    this.model.trigger_event(new TableEditEvent(field, origIndex, true))
     try {
-      this.model.source.patch({[field]: [[index, value]]})
+      this.model.source.patch({[field]: [[cdsPosIndex, value]]})
     } finally {
       comm_settings.debounce = true
       this._tabulator_cell_updating = false
     }
-    this.model.trigger_event(new TableEditEvent(field, index, false))
-    this.tabulator.scrollToRow(index, "top", false)
+    this.model.trigger_event(new TableEditEvent(field, origIndex, false))
+    this.tabulator.scrollToRow(origIndex, "top", false)
   }
 }
 
