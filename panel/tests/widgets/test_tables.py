@@ -2827,13 +2827,15 @@ def test_tabulator_cell_click_event_duplicate_index():
 
 
 def test_tabulator_row_id_isolation_from_user_data():
-    # The internal transport field "__panel_row_id__" must never appear in
-    # self.value, self._processed columns, or user-visible column definitions.
+    # The internal transport field (dynamic name, stored in
+    # self._internal_row_id_field) must never appear in self.value,
+    # self._processed columns, or user-visible column definitions.
     df = pd.DataFrame({'A': [10, 20, 30], 'B': ['x', 'y', 'z']})
     table = Tabulator(df)
 
-    cds_field = table._INTERNAL_ROW_ID_CDS_FIELD
-    assert cds_field == '__panel_row_id__'
+    # Default name when there is no collision
+    assert table._internal_row_id_field == '__panel_row_id__'
+    cds_field = table._internal_row_id_field
     assert cds_field not in table.value.columns
     assert cds_field not in table._processed.columns
     col_fields = [c.field for c in table._get_columns()]
@@ -2866,15 +2868,75 @@ def test_tabulator_user_rowid_column_preserved():
     assert '__row_id__' in col_fields
 
     # CDS data contains BOTH the user's real "__row_id__" column AND the
-    # internal transport field "__panel_row_id__" — they must not collide.
+    # internal transport field — they must not collide.
     _, cds_data = table._get_data()
-    cds_field = table._INTERNAL_ROW_ID_CDS_FIELD
+    cds_field = table._internal_row_id_field
+    assert cds_field != '__row_id__'  # internal field picked a different name
     assert cds_field in cds_data
     assert '__row_id__' in cds_data
     # Internal transport field has integer row ids (iloc positions)
     assert list(cds_data[cds_field]) == [0, 1, 2]
     # User's real column is untouched
     assert list(cds_data['__row_id__']) == ['user_x', 'user_y', 'user_z']
+
+
+def test_tabulator_user_panel_rowid_column_preserved():
+    # If the user's DataFrame has a column literally named "__panel_row_id__"
+    # (the default internal field name), the internal mechanism must pick a
+    # DIFFERENT, non-colliding name and the user's column must be fully
+    # preserved and editable.
+    df = pd.DataFrame({
+        'A': [10, 20, 30],
+        '__panel_row_id__': ['px', 'py', 'pz'],  # user's real data
+    })
+    table = Tabulator(df)
+
+    # User column is untouched in self.value / self._processed
+    assert '__panel_row_id__' in table.value.columns
+    assert list(table.value['__panel_row_id__']) == ['px', 'py', 'pz']
+    assert '__panel_row_id__' in table._processed.columns
+
+    # The internal field must have been renamed to avoid collision
+    _, cds_data = table._get_data()
+    cds_field = table._internal_row_id_field
+    assert cds_field != '__panel_row_id__'
+    assert cds_field.startswith('__panel_row_id__')  # e.g. "__panel_row_id__0"
+    assert cds_field in cds_data
+    assert list(cds_data[cds_field]) == [0, 1, 2]
+
+    # User's column is preserved in CDS data
+    assert '__panel_row_id__' in cds_data
+    assert list(cds_data['__panel_row_id__']) == ['px', 'py', 'pz']
+
+    # User's column appears in column definitions
+    col_fields = [c.field for c in table._get_columns()]
+    assert '__panel_row_id__' in col_fields
+
+    # User column can be edited without being disturbed by internal machinery
+    data = {
+        'A': [99, 20, 30],
+        '__panel_row_id__': ['px_edited', 'py', 'pz'],
+        cds_field: [0, 1, 2],
+    }
+    table._process_data(data)
+    assert list(table.value['A']) == [99, 20, 30]
+    assert list(table.value['__panel_row_id__']) == ['px_edited', 'py', 'pz']
+
+
+def test_tabulator_internal_row_id_field_synced_to_model(document, comm):
+    # The dynamic internal field name must be mirrored to the Bokeh model
+    # so the TypeScript frontend knows which CDS column to read.
+    df = pd.DataFrame({
+        'A': [1, 2],
+        '__panel_row_id__': ['collide', 'me'],  # forces name change
+    })
+    table = Tabulator(df)
+    model = table.get_root(document, comm)
+
+    # After get_root → _get_data, model should have the dynamic field name
+    cds_field = table._internal_row_id_field
+    assert cds_field != '__panel_row_id__'
+    assert model.internal_row_id_field == cds_field
 
 
 def test_tabulator_user_rowid_column_survives_filtering():
@@ -2897,7 +2959,7 @@ def test_tabulator_user_rowid_column_survives_filtering():
     assert list(cds_data['__row_id__']) == ['r2', 'r3', 'r4']
 
     # Internal transport field maps to ORIGINAL ilocs, not re-indexed ones
-    cds_field = table._INTERNAL_ROW_ID_CDS_FIELD
+    cds_field = table._internal_row_id_field
     assert list(cds_data[cds_field]) == [2, 3, 4]
 
 
@@ -2910,7 +2972,7 @@ def test_tabulator_user_rowid_not_overwritten_by_edit():
     })
     table = Tabulator(df)
 
-    cds_field = table._INTERNAL_ROW_ID_CDS_FIELD
+    cds_field = table._internal_row_id_field
     # Simulate a CDS data sync that includes both fields
     data = {
         'A': [99, 20, 30],          # edit: A[0] changed from 10 → 99
@@ -2933,7 +2995,7 @@ def test_tabulator_row_id_survives_filtering():
     # Add a filter that keeps rows with A >= 30 (original ilocs 2, 3, 4)
     table.add_filter((30, None), column='A')
     _, cds_data = table._get_data()
-    cds_field = table._INTERNAL_ROW_ID_CDS_FIELD
+    cds_field = table._internal_row_id_field
     assert list(cds_data[cds_field]) == [2, 3, 4]
 
 
@@ -2950,6 +3012,9 @@ def test_tabulator_row_id_remote_pagination(document, comm):
     # After sorting by A ascending, order is A=10(iloc=1), A=20(iloc=2), A=30(iloc=0)
     # Page 1 (size 2) should have row_ids [1, 2]
     assert table._current_page_row_ids == [1, 2]
+
+    # Model has the internal field name synced
+    assert model.internal_row_id_field == table._internal_row_id_field
 
     # Verify _map_indexes converts row_ids correctly
     assert table._map_indexes([1, 2]) == [1, 2]

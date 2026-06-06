@@ -147,6 +147,13 @@ class DataTabulator(HTMLBox):
 
     indexes = List(String)
 
+    internal_row_id_field = String(help="""
+    Name of the hidden CDS column used for stable row-id mapping. Dynamically
+    chosen at runtime by the Python widget to avoid colliding with any user
+    column name; the TypeScript frontend reads this property to know which
+    CDS column carries the internal integer row ids.
+    """)
+
     layout = Enum('fit_data', 'fit_data_fill', 'fit_data_stretch', 'fit_data_table', 'fit_columns', default="fit_data")
 
     source = Instance(ColumnDataSource)

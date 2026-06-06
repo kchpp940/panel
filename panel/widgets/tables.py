@@ -168,15 +168,11 @@ class BaseTable(ReactiveData, Widget):
 
     __abstract = True
 
-    _INTERNAL_ROW_ID_CDS_FIELD: t.ClassVar[str] = "__panel_row_id__"
-
     @classmethod
     def _make_temp_rowid_colname(cls, df_cols) -> t.Any:
         import pandas as pd
         base = "__panel_rowid_temp__"
         if isinstance(df_cols, pd.MultiIndex):
-            # Build a tuple whose last level is the unique marker; the other
-            # levels are filled with "" so it does not collide with user tuples.
             nlevels = df_cols.nlevels
             name: t.Any = tuple([""] * (nlevels - 1) + [base])
             counter = 0
@@ -191,12 +187,24 @@ class BaseTable(ReactiveData, Widget):
             name = f"{base}{counter}"
         return name
 
+    @classmethod
+    def _make_cds_rowid_field(cls, existing_keys: t.Iterable[str]) -> str:
+        base = "__panel_row_id__"
+        existing = set(existing_keys)
+        name = base
+        counter = 0
+        while name in existing:
+            counter += 1
+            name = f"{base}{counter}"
+        return name
+
     def __init__(self, value=None, **params):
         self._renamed_cols = {}
         self._filters = []
         self._index_mapping = {}
         self._edited_indexes = []
         self._processed_row_ids: list[int] = []
+        self._internal_row_id_field: str = "__panel_row_id__"
         super().__init__(value=value, **params)
         self._internal_callbacks.extend([
             self.param.watch(self._setup_on_change, ['editors', 'formatters']),
@@ -417,7 +425,7 @@ class BaseTable(ReactiveData, Widget):
     @updating
     def _update_cds(self, *events: param.parameterized.Event):
         self._processed, data = self._get_data()
-        self._processed_row_ids = list(data.get(self._INTERNAL_ROW_ID_CDS_FIELD, []))
+        self._processed_row_ids = list(data.get(self._internal_row_id_field, []))
         self._update_index_mapping()
         self._data = {k: _convert_datetime_array_ignore_list(v) for k, v in data.items()}
         named_events = {e.name: e for e in events}
@@ -744,16 +752,18 @@ class BaseTable(ReactiveData, Widget):
         #     user's real column (e.g. user has their own "__row_id__" column).
         #     Instead, _make_temp_rowid_colname() picks a name that is
         #     guaranteed NOT to be in df.columns.
-        #   * Inject this uniquely-named temp column BEFORE filtering so
+        #   * Similarly, the CDS transport field name is chosen dynamically
+        #     via _make_cds_rowid_field() so it never collides with any real
+        #     user column in the CDS data dict.
+        #   * Inject the uniquely-named temp column BEFORE filtering so
         #     stable row ids travel with their rows through any filter/sort.
         #   * In NO case do we infer row ids from df.index via get_loc().
         #   * The temp column is ALWAYS dropped from the returned df so it
         #     never appears in self._processed, user columns, or edits.
-        #   * Internal row ids are written to the CDS dict under the fixed
-        #     _INTERNAL_ROW_ID_CDS_FIELD ("__panel_row_id__"), which is
-        #     consumed by the TypeScript frontend for row mapping. This
-        #     transport field is deliberately distinct from any plausible
-        #     user column name and is never rendered as a table column.
+        #   * The dynamic CDS transport field name is stored in
+        #     self._internal_row_id_field and mirrored to the Bokeh model's
+        #     internal_row_id_field property so the TypeScript frontend knows
+        #     which CDS column carries the internal integer row ids.
 
         import pandas as pd
         import numpy as np
@@ -812,15 +822,14 @@ class BaseTable(ReactiveData, Widget):
         data = ColumnDataSource.from_df(df.reset_index() if len(indexes) > 1 else df)
         if not self.show_index and len(indexes) > 1:
             data = {k: v for k, v in data.items() if k not in indexes}
-        # Attach unambiguous, pre-filtered row ids to the fixed internal
-        # CDS transport field. User columns (including any real "__row_id__")
-        # are untouched and remain under their own key in `data`.
-        cds_field = self._INTERNAL_ROW_ID_CDS_FIELD
-        if cds_field in data:
-            raise RuntimeError(
-                f"User column '{cds_field}' conflicts with Panel's internal "
-                "row-id transport field. Please rename your column."
-            )
+        # Attach unambiguous, pre-filtered row ids to a dynamically-chosen
+        # CDS transport field. _make_cds_rowid_field picks a name that is
+        # GUARANTEED not to collide with any user column already in `data`
+        # (including "__panel_row_id__", "__row_id__", or any other name
+        # the user may have chosen).  Store it on self so that _update_cds,
+        # _process_data and the Bokeh model can all use the same name.
+        cds_field = self._make_cds_rowid_field(data.keys())
+        self._internal_row_id_field = cds_field
         data[cds_field] = list(final_row_ids)
         return df, {k if isinstance(k, str) else str(k): self._process_column(v, k, df) for k, v in data.items()}
 
@@ -1665,8 +1674,8 @@ class Tabulator(BaseTable):
 
         import pandas as pd
         data = dict(data)
-        # Extract the internal row-id transport field
-        row_id_values = data.pop(self._INTERNAL_ROW_ID_CDS_FIELD, None)
+        # Extract the internal row-id transport field (dynamic name)
+        row_id_values = data.pop(self._internal_row_id_field, None)
         df = pd.DataFrame(data)
         if row_id_values is not None:
             df.index = row_id_values
@@ -1739,8 +1748,10 @@ class Tabulator(BaseTable):
         #      directly — these are the correct, unambiguous row ids.
         #   5. DROP the temp column from every user-visible DataFrame so it
         #      never contaminates the user's data, column listings, or edits.
-        #   6. Write the row ids to the CDS dict under the fixed internal
-        #      transport field _INTERNAL_ROW_ID_CDS_FIELD.
+        #   6. Dynamically choose a CDS transport field name that does NOT
+        #      collide with any user column in the CDS data dict, store it on
+        #      self._internal_row_id_field, and mirror it to the Bokeh model
+        #      so the TypeScript frontend knows which column to read.
         import pandas as pd
         import numpy as np
 
@@ -1779,15 +1790,11 @@ class Tabulator(BaseTable):
         if len(indexes) > 1:
             page_df = page_df.reset_index()
         data = dict(ColumnDataSource.from_df(page_df))
-        # Attach the pre-computed, unambiguous row ids to the fixed internal
-        # CDS transport field. User columns (including any real "__row_id__")
-        # remain under their own key in `data`.
-        cds_field = self._INTERNAL_ROW_ID_CDS_FIELD
-        if cds_field in data:
-            raise RuntimeError(
-                f"User column '{cds_field}' conflicts with Panel's internal "
-                "row-id transport field. Please rename your column."
-            )
+        # Attach the pre-computed, unambiguous row ids to a dynamically-chosen
+        # CDS transport field.  _make_cds_rowid_field guarantees no collision with
+        # any user column (including "__panel_row_id__", "__row_id__", etc).
+        cds_field = self._make_cds_rowid_field(data.keys())
+        self._internal_row_id_field = cds_field
         data[cds_field] = row_ids
         return df, {k if isinstance(k, str) else str(k): self._process_column(v, k, page_df) for k, v in data.items()}
 
@@ -2166,6 +2173,7 @@ class Tabulator(BaseTable):
         properties['configuration'] = self._get_configuration(properties['columns'])
         properties['cell_styles'] = self._get_style_data()
         properties['indexes'] = self.indexes
+        properties['internal_row_id_field'] = self._internal_row_id_field
         if self.pagination:
             length = self._length
             page_size = self.page_size or self.initial_page_size
@@ -2198,6 +2206,16 @@ class Tabulator(BaseTable):
         if 'selectable_rows' in params:
             params['selectable_rows'] = self._get_selectable()
         return params
+
+    @updating
+    def _update_cds(self, *events: param.parameterized.Event):
+        super()._update_cds(*events)
+        # Mirror the dynamically-chosen CDS row-id field name to every
+        # Bokeh model so the TypeScript frontend knows which column to read.
+        field = self._internal_row_id_field
+        for ref, (model, _parent) in self._models.items():
+            if hasattr(model, 'internal_row_id_field'):
+                model.internal_row_id_field = field
 
     def _get_model(
         self, doc: Document, root: Model | None = None,

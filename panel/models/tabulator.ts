@@ -19,8 +19,6 @@ import {transform_cds_to_records} from "./data"
 import {HTMLBox, HTMLBoxView} from "./layout"
 import {schedule_when, transformJsPlaceholders} from "./util"
 
-const INTERNAL_ROW_ID_FIELD = "__panel_row_id__"
-
 import tabulator_css from "styles/models/tabulator.css"
 
 export class TableEditEvent extends ModelEvent {
@@ -1078,7 +1076,7 @@ export class DataTabulatorView extends HTMLBoxView {
     if (cds === null || (cds.columns().length === 0)) {
       data = []
     } else {
-      data = transform_cds_to_records(cds, true)
+      data = transform_cds_to_records(cds, true, 0, this.model.internal_row_id_field)
     }
     if (this.model.configuration.dataTree) {
       data = group_data(data, this.model.columns, this.model.indexes, this.model.aggregators)
@@ -1342,7 +1340,7 @@ export class DataTabulatorView extends HTMLBoxView {
     const prev_minheight = this.tabulator.element.style.minHeight
     this.tabulator.element.style.minHeight = `${this.tabulator.element.offsetHeight}px`
 
-    const data = transform_cds_to_records(this.model.source, true)
+    const data = transform_cds_to_records(this.model.source, true, 0, this.model.internal_row_id_field)
     this.tabulator.setData(data).then(() => {
       this.tabulator.element.style.minHeight = prev_minheight
     })
@@ -1617,10 +1615,13 @@ export class DataTabulatorView extends HTMLBoxView {
     }
     // Find the positional index in the current CDS data for patching
     // (CDS.patch uses positional indices 0,1,2... within the current data)
+    // The internal row-id column name is sent dynamically from Python via
+    // model.internal_row_id_field — we never hardcode it here.
     const cds = this.model.source
     let cdsPosIndex = origIndex
-    if (cds !== null && cds.columns().includes(INTERNAL_ROW_ID_FIELD)) {
-      const indexArray = cds.get_array(INTERNAL_ROW_ID_FIELD)
+    const row_id_field = this.model.internal_row_id_field
+    if (cds !== null && row_id_field != null && cds.columns().includes(row_id_field)) {
+      const indexArray = cds.get_array(row_id_field)
       for (let i = 0; i < indexArray.length; i++) {
         if (indexArray[i] === origIndex) {
           cdsPosIndex = i
@@ -1663,6 +1664,7 @@ export namespace DataTabulator {
     groupby: p.Property<string[]>
     hidden_columns: p.Property<string[]>
     indexes: p.Property<string[]>
+    internal_row_id_field: p.Property<string>
     layout: p.Property<typeof TableLayout["__type__"]>
     max_page: p.Property<number>
     page: p.Property<number>
@@ -1710,6 +1712,7 @@ export class DataTabulator extends HTMLBox {
       groupby:        [ List(Str),           [] ],
       hidden_columns: [ List(Str),           [] ],
       indexes:        [ List(Str),           [] ],
+      internal_row_id_field: [ Str,    "__panel_row_id__" ],
       layout:         [ TableLayout,     "fit_data" ],
       max_page:       [ Float,                   0 ],
       pagination:     [ Nullable(Str),      null ],
