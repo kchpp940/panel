@@ -237,14 +237,10 @@ def _reload(module_paths, changes):
         if module in sys.modules:
             del sys.modules[module]
 
-    for doc, loc in list(state._locations.items()):
+    for doc, loc in state._locations.items():
         if not doc.session_context:
             continue
-        # Use the unified cleanup registry for hot-reload prep
-        # (stops periodic callbacks + clears loaded/connected flags)
-        already_loaded = state._loaded.get(doc, False)
-        state._cleanup_registry.prepare_hot_reload(doc)
-        if already_loaded:
+        elif state._loaded.get(doc):
             loc.reload = True
         else:
             def reload_session(event, loc=loc):

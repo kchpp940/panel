@@ -172,14 +172,6 @@ class PeriodicCallback(param.Parameterized):
         self._start_time = time.time()
         if state.curdoc and state.curdoc.session_context and not state._is_pyodide and self.session_scoped:
             self._doc = state.curdoc
-            # Register self with state._periodic so the unified cleanup
-            # registry will call our _cleanup (idempotent)
-            if self._doc not in state._periodic:
-                state._periodic[self._doc] = []
-            if self not in state._periodic[self._doc]:
-                state._periodic[self._doc].append(self)
-            # Ensure doc is registered with the cleanup registry
-            state._cleanup_registry.register(self._doc)
             if state._unblocked(state.curdoc):
                 self._cb = self._doc.add_periodic_callback(self._periodic_callback, self.period)
             else:
@@ -210,38 +202,17 @@ class PeriodicCallback(param.Parameterized):
             self.counter = 0
         self._timeout = None
         if self._doc and self._cb and not state._is_pyodide:
-            session_context = self._doc._session_context
-            if callable(session_context):
-                try:
-                    session_context = session_context()
-                except Exception:
-                    session_context = None
-            if session_context:
-                try:
-                    self._doc.callbacks.remove_session_callback(self._cb)
-                except Exception:
-                    pass
+            if self._doc._session_context:
+                self._doc.callbacks.remove_session_callback(self._cb)
             elif self._cb in self._doc.callbacks.session_callbacks:
-                try:
-                    self._doc.callbacks._session_callbacks.remove(self._cb)
-                except Exception:
-                    pass
+                self._doc.callbacks._session_callbacks.remove(self._cb)
         elif self._cb:
-            try:
-                self._cb.cancel()
-            except Exception:
-                pass
+            self._cb.cancel()
         self._cb = None
         doc = self._doc or curdoc_locked()
         if doc and self.session_scoped:
-            # Remove self from state._periodic (defensive -- registry will
-            # clear the whole list on session destroy anyway)
-            cbs = state._periodic.get(doc)
-            if cbs and self in cbs:
-                try:
-                    cbs.remove(self)
-                except Exception:
-                    pass
-                if not cbs:
-                    state._periodic.pop(doc, None)
+            doc.callbacks.session_destroyed_callbacks = {
+                cb for cb in doc.callbacks.session_destroyed_callbacks
+                if cb is not self._cleanup
+            }
             self._doc = None

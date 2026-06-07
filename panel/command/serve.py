@@ -318,6 +318,16 @@ class Serve(_BkServe):
             action  = 'store_true',
             help    = "Whether to add a global loading spinner to the application(s).",
         )),
+        ('--snapshots', Argument(
+            action  = 'store_true',
+            help    = "Enable dashboard state snapshot management (REST API + sidebar widget).",
+        )),
+        ('--snapshot-endpoint', Argument(
+            action  = 'store',
+            type    = str,
+            help    = "The endpoint for the snapshot REST API.",
+            default = "_snapshots"
+        )),
     )) # type: ignore[assignment, ty:invalid-assignment]
 
     # Supported file extensions
@@ -478,6 +488,32 @@ class Serve(_BkServe):
             argvs = {f: args.args for f in files}
             applications = build_single_handler_applications(files, argvs)
             patterns += [(rf"/{args.liveness_endpoint}", LivenessHandler, dict(applications=applications))]
+
+        if args.snapshots:
+            from ..io.snapshot_api import snapshot_rest_provider
+            from ..io.snapshot import SNAPSHOT_BASE_URL, apply_url_snapshot
+
+            endpoint = args.snapshot_endpoint or SNAPSHOT_BASE_URL
+            patterns += snapshot_rest_provider(endpoint)
+
+            def _snapshot_session_created(session_context):
+                doc = session_context._document
+                with set_curdoc(doc):
+                    state.onload(lambda: apply_url_snapshot())
+
+                    try:
+                        template = state.template
+                    except Exception:
+                        template = None
+                    if template is not None and hasattr(template, 'sidebar'):
+                        try:
+                            from ..widgets.snapshot import SnapshotManager
+                            sm = SnapshotManager(name="Snapshots")
+                            template.sidebar.append(sm)
+                        except Exception as e:
+                            state.log(f"Failed to add SnapshotManager to sidebar: {e}", level='warning')
+
+            state._on_session_created_internal.append(_snapshot_session_created)
 
         config.profiler = args.profiler
         if args.admin:
