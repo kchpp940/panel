@@ -75,7 +75,8 @@ PWA_IMAGES = [
     ICON_DIR / 'icon-192x192.png',
     ICON_DIR / 'icon-512x512.png',
     ICON_DIR / 'apple-touch-icon.png',
-    ICON_DIR / 'index_background.png'
+    ICON_DIR / 'index_background.png',
+    ICON_DIR / 'logo_horizontal.png',
 ]
 
 Runtimes = t.Literal['pyodide', 'pyscript', 'pyodide-worker', 'pyscript-worker']
@@ -332,13 +333,18 @@ def _safe_filename(url: str) -> str:
     return f'{cleaned_base}_{url_hash}{ext}'
 
 
-def _download_or_copy_url(url: str, dest_path: pathlib.Path) -> bool:
+def _download_or_copy_url(url: str, dest_path: pathlib.Path) -> tuple[bool, str | None]:
     """
     Try to get the content for a URL from (in order):
     1. A local panel bundled file (if it matches CDN_DIST path)
     2. A local file path
     3. A remote HTTP download
-    Returns True on success.
+
+    Returns
+    -------
+    (success, error_message)
+        success: True if the file was written successfully.
+        error_message: None on success, or a description of the failure.
     """
     from ..io.resources import BUNDLE_DIR
 
@@ -348,19 +354,21 @@ def _download_or_copy_url(url: str, dest_path: pathlib.Path) -> bool:
             candidate = DIST_DIR / rel
             if candidate.is_file():
                 dest_path.write_bytes(candidate.read_bytes())
-                return True
+                return True, None
             bundled_rel = rel.replace('bundled/', '', 1) if 'bundled/' in rel else rel
             candidate2 = BUNDLE_DIR / bundled_rel
             if candidate2.is_file():
                 dest_path.write_bytes(candidate2.read_bytes())
-                return True
+                return True, None
+            return False, f'CDN_DIST match failed, no bundled file at {candidate} or {candidate2}'
 
         parsed = urlparse(url)
         if parsed.scheme in ('', 'file'):
             local_path = pathlib.Path(parsed.path or url).expanduser().resolve()
             if local_path.is_file():
                 dest_path.write_bytes(local_path.read_bytes())
-                return True
+                return True, None
+            return False, f'Local file not found: {local_path}'
 
         if parsed.scheme in ('http', 'https'):
             import urllib.request
@@ -370,10 +378,17 @@ def _download_or_copy_url(url: str, dest_path: pathlib.Path) -> bool:
             with urllib.request.urlopen(req, timeout=30, context=ctx) as resp:
                 if resp.status == 200:
                     dest_path.write_bytes(resp.read())
-                    return True
-    except Exception:
-        pass
-    return False
+                    return True, None
+                return False, f'HTTP {resp.status} for {url}'
+            return False, f'Failed HTTP request for {url}'
+
+        return False, f'Unsupported URL scheme: {parsed.scheme!r} for {url}'
+    except Exception as exc:
+        return False, f'{type(exc).__name__}: {exc}'
+
+
+class AssetLocalizationError(RuntimeError):
+    """Raised when a required asset cannot be localized to disk."""
 
 
 def build_local_assets(
@@ -381,6 +396,7 @@ def build_local_assets(
     dest_dir: str | os.PathLike,
     assets_subdir: str = 'assets',
     verbose: bool = True,
+    strict: bool = True,
 ) -> tuple[dict[str, str], pathlib.Path, list[str]]:
     """
     Download / copy a list of resource URLs into a local assets directory.
@@ -395,6 +411,10 @@ def build_local_assets(
         Sub-directory name under dest_dir to store assets.
     verbose : bool
         Print progress.
+    strict : bool
+        If True (default), raise AssetLocalizationError on the first resource
+        that fails to localize. If False, warn and continue (the URL will NOT
+        be added to url_mapping).
 
     Returns
     -------
@@ -410,6 +430,7 @@ def build_local_assets(
     url_mapping: dict[str, str] = {}
     local_rel_paths: list[str] = []
     seen_local: set[str] = set()
+    failures: list[tuple[str, str]] = []
 
     for url in resource_urls:
         if not url or url.startswith('data:'):
@@ -418,7 +439,8 @@ def build_local_assets(
             continue
         filename = _safe_filename(url)
         target = assets_path / filename
-        if _download_or_copy_url(url, target):
+        ok, err = _download_or_copy_url(url, target)
+        if ok:
             rel = f'./{assets_subdir}/{filename}'
             url_mapping[url] = rel
             if rel not in seen_local:
@@ -426,9 +448,78 @@ def build_local_assets(
                 local_rel_paths.append(rel)
             if verbose:
                 print(f'  [asset] localized: {os.path.basename(url)} -> {rel}')
-        elif verbose:
-            print(f'  [asset] WARNING: could not localize {url}')
+        else:
+            failures.append((url, err or 'unknown error'))
+            if verbose:
+                print(f'  [asset] FAILED: could not localize {url}: {err}')
+
+    if strict and failures:
+        lines = [f'  - {url!r}: {msg}' for url, msg in failures]
+        raise AssetLocalizationError(
+            f'Failed to localize {len(failures)} required asset(s); '
+            f'aborting convert.\n' + '\n'.join(lines)
+        )
+
     return url_mapping, assets_path, local_rel_paths
+
+
+def _find_remaining_remote_urls(content: str, known_urls: list[str]) -> list[str]:
+    """
+    Scan *content* for any remaining http(s) URLs that appear in *known_urls*
+    (i.e. resources we tried to localize). Returns the list of URLs still present.
+    """
+    remaining: list[str] = []
+    for url in known_urls:
+        if not url or not urlparse(url).scheme in ('http', 'https'):
+            continue
+        if url in content or url.split('?')[0] in content:
+            remaining.append(url)
+    return remaining
+
+
+def _find_any_remote_resource_urls(content: str) -> list[str]:
+    """
+    Scan *content* for ANY http(s) URLs that appear to be used as web resources:
+    - inside <script src="...">
+    - inside <link href="..."> (except purely navigational rels)
+    - inside fetch('...'), importScripts('...'), new Worker('...')
+    - inside micropip.install(['...'])
+    - inside JSON string values that look like URLs in config blobs
+    - Navigational <a href="..."> links are explicitly excluded.
+    Returns a sorted list of unique URLs found.
+    """
+    found: list[str] = []
+    seen: set[str] = set()
+
+    def _add(u: str):
+        u_clean = u.strip().rstrip('"').rstrip("'")
+        if u_clean and u_clean not in seen and urlparse(u_clean).scheme in ('http', 'https'):
+            seen.add(u_clean)
+            found.append(u_clean)
+
+    for pattern in [
+        re.compile(r"""<script[^>]+src\s*=\s*["']([^"']+)["']""", re.IGNORECASE),
+        re.compile(r"""<link[^>]+href\s*=\s*["']([^"']+)["']""", re.IGNORECASE),
+        re.compile(r"""importScripts\s*\(\s*["']([^"']+)["']"""),
+        re.compile(r"""fetch\s*\(\s*["']([^"']+)["']"""),
+        re.compile(r"""new\s+Worker\s*\(\s*["']([^"']+)["']"""),
+        re.compile(r"""micropip\.install\s*\(\s*\[([^\]]+)\]"""),
+        re.compile(r"""(?<=[\(\'"=,\s])https?://[^\s\)\'"<>,]+"""),
+    ]:
+        for m in pattern.finditer(content):
+            val = m.group(1) if m.groups() else m.group(0)
+            if ',' in val:
+                for piece in re.split(r''',\s*''', val):
+                    piece = piece.strip().strip('"').strip("'")
+                    _add(piece)
+            else:
+                _add(val)
+
+    nav_pattern = re.compile(r"""<a[^>]+href\s*=\s*["']([^"']+)["']""", re.IGNORECASE)
+    nav_urls = {m.group(1).strip() for m in nav_pattern.finditer(content)
+                if urlparse(m.group(1).strip()).scheme in ('http', 'https')}
+
+    return sorted(u for u in found if u not in nav_urls)
 
 
 _URL_REWRITE_PATTERNS: list[tuple[re.Pattern, str]] = []
@@ -537,16 +628,29 @@ class DummyRequirement:
 
 def make_index(files, title=None, manifest=True):
     if manifest:
-        manifest = 'site.webmanifest'
-        favicon = 'images/favicon.ico'
-        apple_icon = 'images/apple-touch-icon.png'
+        manifest = './site.webmanifest'
+        favicon = './images/favicon.ico'
+        apple_icon = './images/apple-touch-icon.png'
     else:
         manifest = favicon = apple_icon = None
     items = {label: './'+os.path.basename(f) for label, f in sorted(files.items())}
-    return INDEX_TEMPLATE.render(
+    html = INDEX_TEMPLATE.render(
         items=items, manifest=manifest, apple_icon=apple_icon,
-        favicon=favicon, title=title, PANEL_CDN=CDN_DIST
+        favicon=favicon, title=title, PANEL_CDN='./images/'
     )
+    html = re.sub(
+        r'<link\s+rel="preconnect"\s+href="https://fonts\.googleapis\.com"\s*>',
+        '', html
+    )
+    html = re.sub(
+        r'<link\s+rel="preconnect"\s+href="https://fonts\.gstatic\.com"[^>]*>',
+        '', html
+    )
+    html = re.sub(
+        r'<link\s+href="https://fonts\.googleapis\.com[^"]*"\s+rel="stylesheet"[^>]*>',
+        '', html
+    )
+    return html
 
 def build_pwa_manifest(files, title=None, **kwargs) -> str:
     if len(files) > 1:
@@ -933,9 +1037,9 @@ def convert_app(
     parsed_requirements = collect_python_requirements(
         app, requirements, panel_version=panel_version, http_patch=http_patch
     )
-    # prepare wheels to be available via emscripten MEMFS
     parsed_requirements_rewritten = []
     wheels2pack: dict[str | os.PathLike, str] = {}
+    cdn_wheel_urls: list[str] = []
 
     for req in parsed_requirements:
         try:
@@ -945,13 +1049,14 @@ def convert_app(
                 emfs_wheel_path = 'packed_wheels' + '/' + wheel_name
                 parsed_requirements_rewritten.append(f'emfs:{emfs_wheel_path}')
                 wheels2pack[req_as_url.path] = emfs_wheel_path
+            elif req_as_url.scheme in ('http', 'https') and req.endswith('.whl'):
+                cdn_wheel_urls.append(req)
+                parsed_requirements_rewritten.append(req)
             else:
                 parsed_requirements_rewritten.append(req)
         except ValueError:
-            # no url, so must be a properly formatted requirement
             parsed_requirements_rewritten.append(req)
 
-    # make a zip out of resources
     resources_validated: dict[str | os.PathLike, str] = {}
     for resourcepath in ([] if resources is None else resources):
         commonpath = pathlib.Path(
@@ -966,15 +1071,11 @@ def convert_app(
         else:
             raise ValueError('resources have to be in a folder rootable at the app-directory')
 
-    # resources unpacked into emscripten MEMFS
-    app_resources = {**wheels2pack, **resources_validated}
-    if app_resources:
-        app_resources_packfile = f'{app_name}.resources.zip'
-        pack_files(app_resources, os.path.join(dest_path, app_resources_packfile))
-    else:
-        app_resources_packfile = None
+    app_resources_preliminary = {**wheels2pack, **resources_validated}
+    app_resources_packfile = (
+        f'{app_name}.resources.zip' if app_resources_preliminary or cdn_wheel_urls else None
+    )
 
-    # try to convert the app to a standalone package
     try:
         with set_resource_mode('inline' if inline else 'cdn'):
             html, worker, collected_urls = script_to_html(
@@ -995,7 +1096,6 @@ def convert_app(
         print(f'Failed to convert {app} to {runtime} target: {e}')
         return
 
-    # ---------- Localize assets: detect extensions, collect URLs, download, rewrite ----------
     if verbose:
         print(f'  [assets] Detecting extensions for {app_name}...')
 
@@ -1034,20 +1134,42 @@ def convert_app(
             pass
 
     if verbose:
-        print(f'  [assets] Localizing {len(all_resource_urls)} resource URLs...')
+        print(f'  [assets] Localizing {len(all_resource_urls)} required resource URLs (strict mode)...')
 
     url_mapping, _assets_path, local_asset_paths = build_local_assets(
         all_resource_urls,
         dest_path,
         assets_subdir='assets',
         verbose=verbose,
+        strict=True,
     )
 
-    # Generate and write the asset manifest
+    wheel_emfs_mapping: dict[str, str] = {}
+    for url in cdn_wheel_urls:
+        local_rel = url_mapping.get(url)
+        if not local_rel:
+            raise AssetLocalizationError(
+                f'CDN wheel {url!r} was localized but missing from url_mapping; aborting convert.'
+            )
+        local_abs = str(dest_path / local_rel[2:])
+        wheel_name = os.path.basename(urlparse(url).path)
+        emfs_path = 'packed_wheels' + '/' + wheel_name
+        wheels2pack[local_abs] = emfs_path
+        wheel_emfs_mapping[url] = f'emfs:{emfs_path}'
+        if verbose:
+            print(f'  [asset] wheel packed into MEMFS: {wheel_name} -> {emfs_path}')
+
+    app_resources = {**wheels2pack, **resources_validated}
+    if app_resources and app_resources_packfile:
+        pack_files(app_resources, os.path.join(dest_path, app_resources_packfile))
+        if verbose:
+            print(f'  [asset] resources.zip created with {len(app_resources)} entries')
+
     manifest_data = {
         'version': 1,
         'extensions': all_ext_names,
         'mapping': url_mapping,
+        'wheel_emfs_mapping': wheel_emfs_mapping,
         'assets': local_asset_paths,
     }
     manifest_path = dest_path / f'{app_name}.assets.json'
@@ -1056,10 +1178,24 @@ def convert_app(
         encoding='utf-8',
     )
 
-    # Rewrite all CDN / remote URLs in HTML and worker to local asset paths
+    html = rewrite_local_urls(html, wheel_emfs_mapping)
     html = rewrite_local_urls(html, url_mapping)
     if worker:
+        worker = rewrite_local_urls(worker, wheel_emfs_mapping)
         worker = rewrite_local_urls(worker, url_mapping)
+
+    remaining_html = _find_remaining_remote_urls(html, all_resource_urls)
+    remaining_worker = (
+        _find_remaining_remote_urls(worker, all_resource_urls) if worker else []
+    )
+    if remaining_html or remaining_worker:
+        remaining = sorted(set(remaining_html) | set(remaining_worker))
+        raise AssetLocalizationError(
+            f'Strict check failed: {len(remaining)} CDN URL(s) still present in output '
+            f'after rewriting:\n' + '\n'.join(f'  - {u!r}' for u in remaining)
+        )
+    if verbose:
+        print('  [assets] Strict CDN check passed — no remote URLs remain in HTML/worker.')
 
     # Collect all resources that should be cached by the service worker
     # (now only local paths — no remote CDN URLs)
@@ -1263,6 +1399,12 @@ def convert_apps(
 
     if build_index and len(files_labels) >= 1:
         index = make_index(files_labels, manifest=build_pwa, title=title)
+        remote_in_index = _find_any_remote_resource_urls(index)
+        if remote_in_index:
+            raise AssetLocalizationError(
+                f'Strict check failed: {len(remote_in_index)} CDN URL(s) still present '
+                f'in index.html:\n' + '\n'.join(f'  - {u!r}' for u in remote_in_index)
+            )
         with open(dest_path / 'index.html', 'w') as f:
             f.write(index)
         _add_global_res('./index.html')
@@ -1271,6 +1413,14 @@ def convert_apps(
 
     if not build_pwa:
         return
+
+    remote_res = [p for p in all_collected_resources
+                  if urlparse(p).scheme in ('http', 'https')]
+    if remote_res:
+        raise AssetLocalizationError(
+            f'Strict check failed: {len(remote_res)} CDN URL(s) leaked into '
+            f'service worker pre-cache list:\n' + '\n'.join(f'  - {u!r}' for u in remote_res)
+        )
 
     # Write icons
     imgs_path = (dest_path / 'images')
@@ -1299,6 +1449,12 @@ def convert_apps(
         name=title or 'Panel Pyodide App',
         pre_cache=', '.join([repr(p) for p in all_collected_resources])
     )
+    remote_in_sw = _find_any_remote_resource_urls(worker)
+    if remote_in_sw:
+        raise AssetLocalizationError(
+            f'Strict check failed: {len(remote_in_sw)} CDN URL(s) still present '
+            f'in serviceWorker.js:\n' + '\n'.join(f'  - {u!r}' for u in remote_in_sw)
+        )
     with open(dest_path / 'serviceWorker.js', 'w', encoding='utf-8') as f:
         f.write(worker)
     if verbose:
