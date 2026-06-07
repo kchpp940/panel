@@ -172,8 +172,14 @@ class PeriodicCallback(param.Parameterized):
         self._start_time = time.time()
         if state.curdoc and state.curdoc.session_context and not state._is_pyodide and self.session_scoped:
             self._doc = state.curdoc
-            if self._cleanup not in self._doc.session_destroyed_callbacks:
-                self._doc.on_session_destroyed(self._cleanup)
+            # Register self with state._periodic so the unified cleanup
+            # registry will call our _cleanup (idempotent)
+            if self._doc not in state._periodic:
+                state._periodic[self._doc] = []
+            if self not in state._periodic[self._doc]:
+                state._periodic[self._doc].append(self)
+            # Ensure doc is registered with the cleanup registry
+            state._cleanup_registry.register(self._doc)
             if state._unblocked(state.curdoc):
                 self._cb = self._doc.add_periodic_callback(self._periodic_callback, self.period)
             else:
@@ -228,11 +234,14 @@ class PeriodicCallback(param.Parameterized):
         self._cb = None
         doc = self._doc or curdoc_locked()
         if doc and self.session_scoped:
-            try:
-                doc.callbacks.session_destroyed_callbacks = {
-                    cb for cb in doc.callbacks.session_destroyed_callbacks
-                    if cb is not self._cleanup
-                }
-            except Exception:
-                pass
+            # Remove self from state._periodic (defensive -- registry will
+            # clear the whole list on session destroy anyway)
+            cbs = state._periodic.get(doc)
+            if cbs and self in cbs:
+                try:
+                    cbs.remove(self)
+                except Exception:
+                    pass
+                if not cbs:
+                    state._periodic.pop(doc, None)
             self._doc = None

@@ -1042,8 +1042,9 @@ class Viewable(Renderable, Layoutable, ServableMixin):
             title = title or 'Panel Application'
             doc.title = title
 
-        # Set up before any model sets up a session destroy hook
-        doc.on_session_destroyed(state._destroy_session)
+        # Register with unified cleanup registry (idempotent -- safe even if
+        # already registered via Application.initialize_document).
+        state._cleanup_registry.register(doc)
         doc.on_session_destroyed(self._server_destroy) # type: ignore
 
         if self._design:
@@ -1067,14 +1068,16 @@ class Viewable(Renderable, Layoutable, ServableMixin):
                 if notification:
                     notification_model = notification.get_root(doc)
                     notification_model.name = 'notifications'
-                    doc.on_session_destroyed(notification._server_destroy)
+                    # NOTE: notification._server_destroy is called by the
+                    # unified cleanup registry; no need to register separately.
                     doc.add_root(notification_model)
             if config.browser_info and doc is state.curdoc:
                 browser = state.browser_info
                 if browser:
                     browser_model = browser._get_model(doc, model)
                     browser_model.name = 'browser_info'
-                    doc.on_session_destroyed(browser._server_destroy)
+                    # NOTE: browser._server_destroy is called by the
+                    # unified cleanup registry; no need to register separately.
                     doc.add_root(browser_model)
         return doc
 

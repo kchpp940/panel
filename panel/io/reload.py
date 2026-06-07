@@ -240,17 +240,10 @@ def _reload(module_paths, changes):
     for doc, loc in list(state._locations.items()):
         if not doc.session_context:
             continue
-        # Stop periodic callbacks before reload to avoid duplicate execution
-        for cb in list(state._periodic.get(doc, [])):
-            try:
-                cb.stop()
-            except Exception:
-                pass
-        # Check loaded flag BEFORE clearing it
+        # Use the unified cleanup registry for hot-reload prep
+        # (stops periodic callbacks + clears loaded/connected flags)
         already_loaded = state._loaded.get(doc, False)
-        # Clear loaded/connected flags so the new session starts fresh
-        state._loaded.pop(doc, None)
-        state._connected.pop(doc, None)
+        state._cleanup_registry.prepare_hot_reload(doc)
         if already_loaded:
             loc.reload = True
         else:

@@ -87,6 +87,182 @@ def curdoc_locked() -> Document | None:
 
 class _Undefined: pass
 
+
+class _SessionCleanupRegistry:
+    """
+    Idempotent, single-entry-point registry for session/document cleanup.
+
+    Guarantees:
+    1. Each document is registered for session_destroyed exactly once.
+    2. Cleanup runs in a fixed, deterministic order.
+    3. Cleanup is idempotent -- calling it multiple times is safe.
+    4. Exceptions from individual cleanup steps are caught and logged,
+       never aborting the full cleanup sequence.
+    """
+
+    def __init__(self, state_obj: '_state') -> None:
+        self._state = state_obj
+        self._registered_docs: set[int] = set()
+        self._cleaned_docs: set[int] = set()
+        self._lock = threading.Lock()
+
+    # ------------------------------------------------------------------
+    # Registration -- idempotent: a doc is registered at most once
+    # ------------------------------------------------------------------
+
+    def register(self, doc: Document) -> None:
+        """
+        Register a document for unified session cleanup.
+
+        Safe to call multiple times for the same document -- only the
+        first call registers the session_destroyed callback.
+        """
+        doc_id = id(doc)
+        with self._lock:
+            if doc_id in self._registered_docs:
+                return
+            self._registered_docs.add(doc_id)
+        # Attach the single canonical session_destroyed callback.
+        # This must be the ONLY place state._destroy_session is registered.
+        doc.on_session_destroyed(self._state._destroy_session)
+
+    # ------------------------------------------------------------------
+    # Cleanup execution -- fixed order, idempotent
+    # ------------------------------------------------------------------
+
+    _STATE_WEAKMAP_ATTRS: tuple[str, ...] = (
+        '_periodic',
+        '_locations',
+        '_notifications',
+        '_browsers',
+        '_templates',
+        '_change_callbacks',
+        '_onload',
+        '_stylesheets',
+        '_extensions_',
+        '_session_outputs',
+    )
+
+    _STATE_POP_ATTRS: tuple[str, ...] = (
+        '_loaded',
+        '_connected',
+        '_rel_paths',
+        '_base_urls',
+        '_thread_id_',
+    )
+
+    def cleanup_document(
+        self,
+        doc: Document,
+        session_context: SessionContext | None,
+    ) -> bool:
+        """
+        Run the full deterministic cleanup sequence for *doc*.
+
+        Returns True if cleanup actually ran, False if it was a no-op
+        because this doc was already cleaned up (idempotency).
+        """
+        doc_id = id(doc)
+        with self._lock:
+            if doc_id in self._cleaned_docs:
+                return False
+            self._cleaned_docs.add(doc_id)
+
+        # ---- Phase 1: Objects with explicit _server_destroy hooks ----
+        # Order matters: stop running work first, then tear down
+        # front-end-facing components.
+
+        # 1) Periodic callbacks -- stop threads/async tasks before anything else
+        if doc in self._state._periodic:
+            for cb in list(self._state._periodic[doc]):
+                try:
+                    cb._cleanup(session_context)
+                except Exception as e:
+                    _state_logger.debug('Error cleaning up PeriodicCallback: %s', e)
+            del self._state._periodic[doc]
+
+        # 2) Location -- URL sync must stop before we clear state
+        if doc in self._state._locations:
+            loc = self._state._locations[doc]
+            try:
+                loc._server_destroy(session_context)
+            except Exception as e:
+                _state_logger.debug('Error cleaning up Location: %s', e)
+            del self._state._locations[doc]
+
+        # 3) Notifications -- unwatch notification param changes
+        if doc in self._state._notifications:
+            notification = self._state._notifications[doc]
+            try:
+                notification._server_destroy(session_context)
+            except Exception as e:
+                _state_logger.debug('Error cleaning up NotificationArea: %s', e)
+            del self._state._notifications[doc]
+
+        # 4) BrowserInfo -- stop syncing browser state
+        if doc in self._state._browsers:
+            browser = self._state._browsers[doc]
+            try:
+                browser._server_destroy(session_context)
+            except Exception as e:
+                _state_logger.debug('Error cleaning up BrowserInfo: %s', e)
+            del self._state._browsers[doc]
+
+        # ---- Phase 2: Plain WeakKeyDictionary state maps ----
+        # These have no lifecycle hooks -- just drop the references.
+        for attr in self._STATE_WEAKMAP_ATTRS:
+            mapping = getattr(self._state, attr, None)
+            if isinstance(mapping, WeakKeyDictionary) and doc in mapping:
+                try:
+                    del mapping[doc]
+                except Exception as e:
+                    _state_logger.debug('Error clearing state.%s for doc: %s', attr, e)
+
+        # ---- Phase 3: Pop-only state (uses .pop for safety) ----
+        for attr in self._STATE_POP_ATTRS:
+            mapping = getattr(self._state, attr, None)
+            if isinstance(mapping, WeakKeyDictionary):
+                try:
+                    mapping.pop(doc, None)
+                except Exception as e:
+                    _state_logger.debug('Error popping state.%s for doc: %s', attr, e)
+
+        return True
+
+    def reset(self) -> None:
+        """Wipe all bookkeeping (called by state.reset())."""
+        with self._lock:
+            self._registered_docs.clear()
+            self._cleaned_docs.clear()
+
+    # ------------------------------------------------------------------
+    # Hot-reload support -- lighter-weight cleanup that preserves the
+    # Location (so we can signal the browser to reload).
+    # ------------------------------------------------------------------
+
+    def prepare_hot_reload(self, doc: Document) -> None:
+        """
+        Prepare *doc* for a hot reload:
+
+        * Stop all periodic callbacks (so they don't fire during/after reload)
+        * Clear ``_loaded`` / ``_connected`` flags
+        * Preserve the Location object (caller is responsible for
+          flipping ``location.reload = True``).
+
+        Safe to call multiple times.
+        """
+        # 1) Stop periodic callbacks
+        if doc in self._state._periodic:
+            for cb in list(self._state._periodic[doc]):
+                try:
+                    cb.stop()
+                except Exception as e:
+                    _state_logger.debug('Error stopping PeriodicCallback on hot reload: %s', e)
+
+        # 2) Clear loaded/connected flags so the new session starts fresh
+        self._state._loaded.pop(doc, None)
+        self._state._connected.pop(doc, None)
+
 Tat: t.TypeAlias = dt.datetime | Callable[[dt.datetime], dt.datetime] | TIterator[dt.datetime]
 
 class _state(param.Parameterized):
@@ -239,6 +415,13 @@ class _state(param.Parameterized):
     # Types
     _notification_type: t.ClassVar[type[NotificationAreaBase] | None] = None
 
+    # Unified, idempotent session cleanup registry -- the single source of truth
+    _cleanup_registry: _SessionCleanupRegistry
+
+    def __init__(self, **params):
+        super().__init__(**params)
+        self._cleanup_registry = _SessionCleanupRegistry(self)
+
     def __repr__(self) -> str:
         server_info = []
         for server, panel, _docs in self._servers.values():
@@ -365,7 +548,11 @@ class _state(param.Parameterized):
         self.param.trigger('session_info')
 
     def _destroy_session(self, session_context):
-        doc = None
+        """
+        Canonical session_destroyed callback. Delegates all actual cleanup
+        to the unified, idempotent _cleanup_registry.
+        """
+        # ---- Session-level bookkeeping (not doc-level cleanup) ----
         if session_context is not None and hasattr(session_context, 'id'):
             session_id = session_context.id
             sessions = self.session_info['sessions']
@@ -375,85 +562,18 @@ class _state(param.Parameterized):
                     self.session_info['live'] -= 1
                 session['ended'] = dt.datetime.now().timestamp()
                 self.param.trigger('session_info')
-            doc = getattr(session_context, '_document', None)
 
-        # Fall back to curdoc if session_context did not provide a document
+        # ---- Locate the document to clean up ----
+        doc = None
+        if session_context is not None:
+            doc = getattr(session_context, '_document', None)
         if doc is None:
             doc = self.curdoc
-
         if doc is None:
             return
 
-        # Cleanup periodic callbacks
-        if doc in self._periodic:
-            for cb in list(self._periodic[doc]):
-                try:
-                    cb._cleanup(session_context)
-                except Exception:
-                    pass
-            del self._periodic[doc]
-
-        # Cleanup Locations
-        if doc in self._locations:
-            loc = state._locations[doc]
-            try:
-                loc._server_destroy(session_context)
-            except Exception:
-                pass
-            del state._locations[doc]
-
-        # Cleanup Notifications
-        if doc in self._notifications:
-            notification = self._notifications[doc]
-            try:
-                notification._server_destroy(session_context)
-            except Exception:
-                pass
-            del state._notifications[doc]
-
-        # Cleanup BrowserInfo
-        if doc in self._browsers:
-            browser = self._browsers[doc]
-            try:
-                browser._server_destroy(session_context)
-            except Exception:
-                pass
-            del self._browsers[doc]
-
-        # Clean up templates
-        if doc in self._templates:
-            del self._templates[doc]
-
-        # Cleanup change callbacks
-        if doc in self._change_callbacks:
-            del self._change_callbacks[doc]
-
-        # Cleanup onload callbacks
-        if doc in self._onload:
-            del self._onload[doc]
-
-        # Cleanup loaded and connected flags
-        self._loaded.pop(doc, None)
-        self._connected.pop(doc, None)
-
-        # Cleanup stylesheets cache
-        if doc in self._stylesheets:
-            del self._stylesheets[doc]
-
-        # Cleanup extensions
-        if doc in self._extensions_:
-            del self._extensions_[doc]
-
-        # Cleanup session outputs (notebook)
-        if doc in self._session_outputs:
-            del self._session_outputs[doc]
-
-        # Cleanup rel_paths and base_urls
-        self._rel_paths.pop(doc, None)
-        self._base_urls.pop(doc, None)
-
-        # Cleanup thread id
-        self._thread_id_.pop(doc, None)
+        # ---- Delegate actual cleanup to the registry (idempotent) ----
+        self._cleanup_registry.cleanup_document(doc, session_context)
 
     @property
     def _current_stack(self):
@@ -931,6 +1051,7 @@ class _state(param.Parameterized):
         """
         self.kill_all_servers()
         self._curdoc = ContextVar('curdoc', default=None)
+        self._cleanup_registry.reset()
         self._indicators.clear()
         self._browser = None
         self._browsers.clear()

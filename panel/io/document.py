@@ -222,19 +222,19 @@ def _destroy_document(self, session):
     multiple documents are destroyed in quick succession we do not
     schedule excessive garbage collection.
     """
-    # If session_context is available, delegate to state._destroy_session
-    # which handles all Panel-specific cleanup in a unified way
+    # Resolve session_context from the document (it may be a callable/lambda)
     session_context = getattr(self, '_session_context', None)
     if session_context is not None and callable(session_context):
         try:
             session_context = session_context()
         except Exception:
             session_context = None
-    if session_context is not None and hasattr(session_context, 'id'):
-        try:
-            state._destroy_session(session_context)
-        except Exception:
-            pass
+
+    # ---- Unified, idempotent Panel cleanup via the registry ----
+    # This handles periodic callbacks, locations, notifications,
+    # browser info, and all doc-indexed state maps.  Safe even if
+    # session_destroyed has already triggered it (idempotent).
+    state._cleanup_registry.cleanup_document(self, session_context)
 
     if session is not None:
         self.remove_on_change(session)
@@ -258,14 +258,6 @@ def _destroy_document(self, session):
         del module
     self.modules._modules = []
 
-    # Clear periodic callbacks (defensive cleanup, state._destroy_session should have handled this)
-    for cb in list(state._periodic.get(self, [])):
-        try:
-            cb.stop()
-        except Exception:
-            pass
-    state._periodic.pop(self, None)
-
     # Cancel any pending write tasks for this document
     _WRITE_MSGS.pop(self, None)
     _WRITE_BLOCK.pop(self, None)
@@ -273,19 +265,6 @@ def _destroy_document(self, session):
         future.cancel()
     for task in _write_tasks.pop(self, []):
         task.cancel()
-
-    # Clean up remaining pn.state WeakKeyDictionary entries
-    # (state._destroy_session should have handled most of these already)
-    for attr in dir(state):
-        # _param_watchers is deprecated in Param 2.0 and will raise a warning
-        if not attr.startswith('_') or attr == "_param_watchers":
-            continue
-        state_obj = getattr(state, attr)
-        if isinstance(state_obj, weakref.WeakKeyDictionary) and self in state_obj:
-            try:
-                del state_obj[self]
-            except Exception:
-                pass
 
     # Schedule GC
     global _panel_last_cleanup
