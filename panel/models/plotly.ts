@@ -435,10 +435,8 @@ export class PlotlyPlotView extends HTMLBoxView {
       const obj = {data, layout: newLayout, config: this.model.config, frames: this.model.frames}
       await (window as any).Plotly.newPlot(this.container, obj)
     } else {
-      await (window as any).Plotly.react(this.container, data, newLayout, this.model.config)
-      if (this.model.frames != null) {
-        await (window as any).Plotly.addFrames(this.container, this.model.frames)
-      }
+      const obj = {data, layout: newLayout, config: this.model.config, frames: this.model.frames}
+      await (window as any).Plotly.react(this.container, obj)
     }
     this._updateSetViewportFunction()
     this._updateViewportProperty()
