@@ -199,8 +199,6 @@ export class PlotlyPlotView extends HTMLBoxView {
   _hoverdata: any = null
   container: PlotlyHTMLElement
   _watched_sources: string[]
-  _last_object_version: number = -1
-  _last_frames_ref: any = null
   _end_relayouting = debounce(() => {
     this._relayouting = false
   }, 2000, false)
@@ -252,7 +250,7 @@ export class PlotlyPlotView extends HTMLBoxView {
       this.plot()
     })
     this.on_change(frames, () => {
-      this.plot()
+      this.plot(true)
     })
     this.on_change(viewport, () => {
       this._updateViewportFromProperty()
@@ -276,7 +274,7 @@ export class PlotlyPlotView extends HTMLBoxView {
     set_size(this.container, this.model)
     this._rendered = false
     this.watch_stylesheets()
-    this.plot().then(() => {
+    this.plot(true).then(() => {
       this.shadow_el.appendChild(this.container)
       this._rendered = true
       this.resize_layout()
@@ -412,41 +410,21 @@ export class PlotlyPlotView extends HTMLBoxView {
     })
   }
 
-  async plot(): Promise<void> {
+  async plot(new_plot: boolean=false): Promise<void> {
     if (!(window as any).Plotly || !this.container) {
       return
     }
     const data = this._trace_data()
     const newLayout = this._layout_data()
-    const object_changed = this.model._object_version !== this._last_object_version
-    const frames_changed = this.model.frames !== this._last_frames_ref
-    this._last_frames_ref = this.model.frames
     this._reacting = true
-    if (object_changed) {
-      this._hoverdata = null
-      this._relayouting = false
-      if (this.container._hoverdata !== undefined) {
-        delete this.container._hoverdata
-      }
-      this.model.viewport = {}
-      this.model.relayout_data = {}
-      this.model.restyle_data = []
-      this._last_object_version = this.model._object_version
-    }
-    const needs_new_plot = object_changed || !this._plotInitialized
-    if (needs_new_plot) {
+    if (new_plot) {
       const obj = {data, layout: newLayout, config: this.model.config, frames: this.model.frames}
       await (window as any).Plotly.newPlot(this.container, obj)
     } else {
-      if (frames_changed && this.model.frames != null) {
-        try {
-          await (window as any).Plotly.animate(this.container, null, {mode: "immediate"})
-        } catch (e) {
-          // ignore animation stop errors
-        }
+      await (window as any).Plotly.react(this.container, data, newLayout, this.model.config)
+      if (this.model.frames != null) {
+        await (window as any).Plotly.addFrames(this.container, this.model.frames)
       }
-      const obj = {data, layout: newLayout, config: this.model.config, frames: this.model.frames}
-      await (window as any).Plotly.react(this.container, obj)
     }
     this._updateSetViewportFunction()
     this._updateViewportProperty()
@@ -568,7 +546,6 @@ export namespace PlotlyPlot {
     viewport_update_policy: p.Property<string>
     viewport_update_throttle: p.Property<number>
     _render_count: p.Property<number>
-    _object_version: p.Property<number>
   }
 }
 
@@ -600,7 +577,6 @@ export class PlotlyPlot extends HTMLBox {
       viewport_update_policy: [ Str, "mouseup" ],
       viewport_update_throttle: [ Float, 200 ],
       _render_count: [ Float, 0 ],
-      _object_version: [ Float, 0 ],
     }))
   }
 }

@@ -78,5 +78,3 @@ class VegaPlot(LayoutDOM):
     theme = Nullable(Enum(VegaTheme))
 
     throttle = Dict(String, Int)
-
-    _object_version = Int()

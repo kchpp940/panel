@@ -6,6 +6,7 @@ import dataclasses
 import json
 import os
 import pathlib
+import re
 import typing as t
 import uuid
 
@@ -78,6 +79,78 @@ PWA_IMAGES = [
 ]
 
 Runtimes = t.Literal['pyodide', 'pyscript', 'pyodide-worker', 'pyscript-worker']
+
+_SCRIPT_SRC_RE = re.compile(r'<script[^>]+src=["\']([^"\']+)["\']')
+_LINK_HREF_RE = re.compile(r'<link[^>]+href=["\']([^"\']+)["\']')
+
+
+def _extract_urls_from_tags(tag_strings: list[str] | tuple[str, ...]) -> list[str]:
+    """Extract resource URLs from HTML <script> and <link> tags."""
+    urls: list[str] = []
+    for tag in tag_strings:
+        if not isinstance(tag, str):
+            continue
+        for m in _SCRIPT_SRC_RE.finditer(tag):
+            url = m.group(1)
+            if url and url not in urls:
+                urls.append(url)
+        for m in _LINK_HREF_RE.finditer(tag):
+            url = m.group(1)
+            if url and url not in urls:
+                urls.append(url)
+    return urls
+
+
+def _collect_bundle_urls(bundle, extra_js_tags: list[str], extra_css_tags: list[str]) -> list[str]:
+    """
+    Collect all external JS/CSS URLs from a resource Bundle and extra tag strings.
+    Returns a deduplicated list of URLs suitable for service worker pre-caching.
+    """
+    urls: list[str] = []
+    seen: set[str] = set()
+
+    def _add(u: str):
+        if not u or u in seen or u.startswith('data:'):
+            return
+        seen.add(u)
+        urls.append(u)
+
+    if bundle is not None:
+        for jsf in getattr(bundle, 'js_files', []) or []:
+            _add(str(jsf))
+        for jsf in getattr(bundle, 'js_modules', []) or []:
+            _add(str(jsf))
+        for cssf in getattr(bundle, 'css_files', []) or []:
+            _add(str(cssf))
+
+    for url in _extract_urls_from_tags(extra_js_tags):
+        _add(url)
+    for url in _extract_urls_from_tags(extra_css_tags):
+        _add(url)
+
+    return urls
+
+
+def _collect_document_stylesheet_urls(document) -> list[str]:
+    """
+    Collect all external stylesheet URLs from ImportedStyleSheet objects
+    attached to models in the document. This catches design/theme stylesheets
+    that are applied at the model level rather than in the global bundle.
+    """
+    from bokeh.models import ImportedStyleSheet
+    urls: list[str] = []
+    seen: set[str] = set()
+    for model in document.models:
+        stylesheets = getattr(model, 'stylesheets', None)
+        if not stylesheets:
+            continue
+        for ss in stylesheets:
+            if isinstance(ss, ImportedStyleSheet) and ss.url:
+                url = ss.url.split('?')[0]
+                if url and url not in seen and not url.startswith('data:'):
+                    seen.add(url)
+                    urls.append(url)
+    return urls
 
 PRE = """
 import asyncio
@@ -321,7 +394,7 @@ def script_to_html(
     manifest: str | None = None,
     inline: bool = False,
     compiled: bool = True
-) -> tuple[str, str | None]:
+) -> tuple[str, str | None, list[str]]:
     """
     Converts a Panel or Bokeh script to a standalone WASM Python
     application.
@@ -454,12 +527,28 @@ def script_to_html(
 
     # Collect resources
     resources = Resources(mode='inline' if inline else 'cdn')
-    css_resources += loading_resources(template, inline)
+    css_resource_tags = loading_resources(template, inline)
+    css_resources = list(css_resources) + css_resource_tags if isinstance(css_resources, list) else css_resource_tags
     with set_curdoc(document):
-        bokeh_js, bokeh_css = bundle_resources(document.roots, resources)
-    extra_js = [INIT_SERVICE_WORKER, bokeh_js] if manifest else [bokeh_js]
-    bokeh_js = '\n'.join(js_resources+extra_js)
-    bokeh_css = '\n'.join([bokeh_css]+css_resources)
+        bundle = bundle_resources(document.roots, resources)
+    bokeh_js_str = bundle._render_js()
+    bokeh_css_str = bundle._render_css()
+    extra_js_tags = [INIT_SERVICE_WORKER, bokeh_js_str] if manifest else [bokeh_js_str]
+    bokeh_js = '\n'.join(js_resources + extra_js_tags)
+    bokeh_css = '\n'.join([bokeh_css_str] + css_resources)
+
+    collected_urls = _collect_bundle_urls(bundle, js_resources + extra_js_tags, css_resources)
+    collected_urls.extend(_collect_document_stylesheet_urls(document))
+
+    if config.design:
+        try:
+            design_res = config.design().resolve_resources(cdn=True, include_theme=True)
+            for rtype in ('js', 'css', 'js_modules'):
+                for url in design_res.get(rtype, {}).values():
+                    if url and url not in collected_urls and not url.startswith('data:'):
+                        collected_urls.append(url)
+        except Exception:
+            pass
 
     # Configure template
     template_variables = document._template_variables
@@ -490,7 +579,7 @@ def script_to_html(
             .replace('<link rel="stylesheet"', '<link rel="stylesheet" crossorigin="anonymous"')
             .replace('<link rel="icon"', '<link rel="icon" crossorigin="anonymous"')
         )
-    return html, web_worker
+    return html, web_worker, collected_urls
 
 
 def convert_app(
@@ -507,7 +596,7 @@ def convert_app(
     inline: bool = False,
     compiled: bool = False,
     verbose: bool = True,
-):
+) -> tuple[str, str, list[str]] | None:
     if dest_path is None:
         dest_path = pathlib.Path('./')
     elif not isinstance(dest_path, pathlib.PurePath):
@@ -564,7 +653,7 @@ def convert_app(
     # try to convert the app to a standalone package
     try:
         with set_resource_mode('inline' if inline else 'cdn'):
-            html, worker = script_to_html(
+            html, worker, collected_urls = script_to_html(
                 app,
                 requirements=parsed_requirements_rewritten,
                 app_resources=app_resources_packfile,
@@ -582,18 +671,48 @@ def convert_app(
         print(f'Failed to convert {app} to {runtime} target: {e}')
         return
 
+    # Collect all resources that should be cached by the service worker
+    all_resources: list[str] = list(collected_urls)
+    seen = set(all_resources)
+
+    def _add_res(path: str):
+        if path and path not in seen:
+            seen.add(path)
+            all_resources.append(path)
+
     # write out the app
     filename = f'{app_name}.html'
+    _add_res(f'./{filename}')
 
     with open(dest_path / filename, 'w', encoding='utf-8') as out:
         out.write(html)
     if 'worker' in runtime and worker:
         ext = 'py' if runtime.startswith('pyscript') else 'js'
-        with open(dest_path / f'{app_name}.{ext}', 'w', encoding="utf-8") as out:
+        worker_filename = f'{app_name}.{ext}'
+        _add_res(f'./{worker_filename}')
+        with open(dest_path / worker_filename, 'w', encoding="utf-8") as out:
             out.write(worker)
+
+    # Add resources zip to cache list
+    if app_resources_packfile:
+        _add_res(f'./{app_resources_packfile}')
+
+    # Add packed wheels (stored in the resources zip) and any wheel URLs from requirements
+    for req in parsed_requirements:
+        try:
+            req_url = urlparse(req)
+            if req_url.scheme in ('https', 'http'):
+                _add_res(req)
+        except ValueError:
+            pass
+
+    # Add user-specified resource files (relative paths)
+    for rel_path in resources_validated.values():
+        _add_res(f'./{rel_path}')
+
     if verbose:
         print(f'Successfully converted {app} to {runtime} target and wrote output to {filename}.')
-    return (app_name.replace('_', ' '), filename)
+    return (app_name.replace('_', ' '), filename, all_resources)
 
 
 def _convert_process_pool(
@@ -602,12 +721,14 @@ def _convert_process_pool(
     max_workers: int = 4,
     requirements: list[str] | t.Literal['auto'] | os.PathLike = 'auto',
     **kwargs
-):
+) -> tuple[dict[str, str], list[str]]:
     import multiprocessing as mp
 
     from concurrent.futures import ProcessPoolExecutor
 
-    files = {}
+    files: dict[str, str] = {}
+    all_resources: list[str] = []
+    seen: set[str] = set()
     groups = [apps[i:i+max_workers] for i in range(0, len(apps), max_workers)]
     for group in groups:
         with ProcessPoolExecutor(
@@ -626,9 +747,13 @@ def _convert_process_pool(
             for future in concurrent.futures.as_completed(futures):
                 result = future.result()
                 if result is not None:
-                    name, filename = result
+                    name, filename, resources = result
                     files[name] = filename
-    return files
+                    for r in resources:
+                        if r not in seen:
+                            seen.add(r)
+                            all_resources.append(r)
+    return files, all_resources
 
 
 def convert_apps(
@@ -730,19 +855,34 @@ def convert_apps(
     }
 
     if state._is_pyodide:
-        files = {
-            app: convert_app(app, dest_path, **kwargs)  # type: ignore
-            for app in apps
-        }
+        files_labels: dict[str, str] = {}
+        all_collected_resources: list[str] = []
+        seen_resources: set[str] = set()
+        for app in apps:
+            result = convert_app(app, dest_path, **kwargs)  # type: ignore
+            if result is not None:
+                name, filename, resources = result
+                files_labels[name] = filename
+                for r in resources:
+                    if r not in seen_resources:
+                        seen_resources.add(r)
+                        all_collected_resources.append(r)
     else:
-        files = _convert_process_pool(
+        files_labels, all_collected_resources = _convert_process_pool(
             apps, dest_path, max_workers=max_workers, **kwargs  # type: ignore
         )
+        seen_resources = set(all_collected_resources)
 
-    if build_index and len(files) >= 1:
-        index = make_index(files, manifest=build_pwa, title=title)
+    def _add_global_res(path: str):
+        if path and path not in seen_resources:
+            seen_resources.add(path)
+            all_collected_resources.append(path)
+
+    if build_index and len(files_labels) >= 1:
+        index = make_index(files_labels, manifest=build_pwa, title=title)
         with open(dest_path / 'index.html', 'w') as f:
             f.write(index)
+        _add_global_res('./index.html')
         if verbose:
             print('Successfully wrote index.html.')
 
@@ -756,14 +896,17 @@ def convert_apps(
     for img in PWA_IMAGES:
         with open(imgs_path / img.name, 'wb') as f:
             f.write(img.read_bytes())
-        img_rel.append(f'images/{img.name}')
+        img_path = f'images/{img.name}'
+        img_rel.append(img_path)
+        _add_global_res(f'./{img_path}')
     if verbose:
         print('Successfully wrote icons and images.')
 
     # Write manifest
-    manifest = build_pwa_manifest(files, title=title, **pwa_config)
+    manifest_content = build_pwa_manifest(files_labels, title=title, **pwa_config)
     with open(dest_path / 'site.webmanifest', 'w', encoding='utf-8') as f:
-        f.write(manifest)
+        f.write(manifest_content)
+    _add_global_res('./site.webmanifest')
     if verbose:
         print('Successfully wrote site.manifest.')
 
@@ -771,7 +914,7 @@ def convert_apps(
     worker = SERVICE_WORKER_TEMPLATE.render(
         uuid=uuid.uuid4().hex,
         name=title or 'Panel Pyodide App',
-        pre_cache=', '.join([repr(p) for p in img_rel])
+        pre_cache=', '.join([repr(p) for p in all_collected_resources])
     )
     with open(dest_path / 'serviceWorker.js', 'w', encoding='utf-8') as f:
         f.write(worker)

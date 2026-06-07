@@ -11,18 +11,22 @@ self.addEventListener('install', (e) => {
     for (const cacheName of cacheNames) {
       if (cacheName.startsWith(appName) && cacheName !== appCacheName) {
         console.log(`[Service Worker] Delete old cache ${cacheName}`);
-        caches.delete(cacheName);
+        await caches.delete(cacheName);
       }
     }
     const cache = await caches.open(appCacheName);
     console.log('[Service Worker] Caching ');
-    preCacheFiles.forEach(async (cacheFile) => {
+    await Promise.all(preCacheFiles.map(async (cacheFile) => {
       const request = new Request(cacheFile);
-      const response = await fetch(request);
-      if (response.ok || response.type == 'opaque') {
-        cache.put(request, response);
+      try {
+        const response = await fetch(request);
+        if (response.ok || response.type == 'opaque') {
+          await cache.put(request, response);
+        }
+      } catch (err) {
+        console.warn(`[Service Worker] Failed to cache ${cacheFile}:`, err);
       }
-    })
+    }));
   })());
 });
 
@@ -37,17 +41,33 @@ self.addEventListener('fetch', (e) => {
   }
   e.respondWith((async () => {
     const cache = await caches.open(appCacheName);
-    let response = await cache.match(e.request);
+    const cached = await cache.match(e.request);
+    const url = new URL(e.request.url);
     console.log(`[Service Worker] Fetching resource: ${e.request.url}`);
-    if (response) {
+    if (cached) {
+      return cached;
+    }
+    try {
+      const response = await fetch(e.request);
+      if (!response.ok && !(response.type == 'opaque')) {
+        console.warn(`[Service Worker] Fetch returned non-ok status: ${response.status} for ${url.pathname}`);
+        return response;
+      }
+      if (response.type === 'basic' || response.type === 'cors' || response.type === 'opaque') {
+        console.log(`[Service Worker] Caching new resource: ${e.request.url}`);
+        try {
+          await cache.put(e.request, response.clone());
+        } catch (cacheErr) {
+          console.warn(`[Service Worker] Failed to cache ${url.pathname}:`, cacheErr);
+        }
+      }
       return response;
+    } catch (err) {
+      console.warn(`[Service Worker] Network fetch failed for ${url.pathname}:`, err);
+      if (cached) {
+        return cached;
+      }
+      throw err;
     }
-    response = await fetch(e.request);
-    if (!response.ok && !(response.type == 'opaque')) {
-      throw Error('[Service Worker] Fetching resource failed with response: ' + response.status);
-    }
-    console.log(`[Service Worker] Caching new resource: ${e.request.url}`);
-    cache.put(e.request, response.clone());
-    return response;
   })());
 });

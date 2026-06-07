@@ -33,10 +33,6 @@ export class VegaPlotView extends LayoutDOMView {
   _replot: any
   _resize: any
   _rendered: boolean = false
-  _last_object_version: number = -1
-  _last_data_ref: any = null
-  _last_theme: any = null
-  _last_show_actions: any = null
 
   override connect_signals(): void {
     super.connect_signals()
@@ -47,9 +43,6 @@ export class VegaPlotView extends LayoutDOMView {
     })
     this.on_change(data_sources, () => this._connect_sources())
     this.on_change(events, () => {
-      if (this.vega_view == null) {
-        return
-      }
       for (const event of this.model.events) {
         if (this._callbacks.indexOf(event) > -1) {
           continue
@@ -136,29 +129,7 @@ export class VegaPlotView extends LayoutDOMView {
     if ((data == null) || !(window as any).vegaEmbed) {
       return
     }
-    const object_changed = this.model._object_version !== this._last_object_version
-    const data_ref_changed = data !== this._last_data_ref
-    const theme_changed = this.model.theme !== this._last_theme
-    const show_actions_changed = this.model.show_actions !== this._last_show_actions
-    const needs_full_rebuild = object_changed || data_ref_changed || theme_changed || show_actions_changed
-
-    this._last_data_ref = data
-    this._last_theme = this.model.theme
-    this._last_show_actions = this.model.show_actions
-
-    if (object_changed) {
-      if (this.vega_view != null) {
-        this.vega_view.finalize()
-        this.vega_view = null
-      }
-      this._callbacks = []
-      this.container.innerHTML = ""
-      this._last_object_version = this.model._object_version
-    }
-
-    const has_cds_sources = this.model.data_sources && Object.keys(this.model.data_sources).length > 0
-
-    if (has_cds_sources) {
+    if (this.model.data_sources && (Object.keys(this.model.data_sources).length > 0)) {
       const datasets = this._fetch_datasets()
       if ("data" in datasets) {
         data.data.values = datasets.data
@@ -174,24 +145,7 @@ export class VegaPlotView extends LayoutDOMView {
         }
       }
       this.model.data.datasets = datasets
-
-      if (!needs_full_rebuild && this.vega_view != null) {
-        this._update_view_data(datasets)
-        return
-      }
     }
-
-    if (!needs_full_rebuild && this.vega_view != null) {
-      return
-    }
-
-    if (this.vega_view != null) {
-      this.vega_view.finalize()
-      this.vega_view = null
-      this._callbacks = []
-      this.container.innerHTML = ""
-    }
-
     const config: any = {actions: this.model.show_actions, theme: this.model.theme};
 
     (window as any).vegaEmbed(this.container, this.model.data, config).then((result: any) => {
@@ -204,20 +158,6 @@ export class VegaPlotView extends LayoutDOMView {
         this.vega_view.addSignalListener(event, debounce(callback, timeout, false))
       }
     })
-  }
-
-  _update_view_data(datasets: any): void {
-    for (const name in datasets) {
-      try {
-        this.vega_view.data(name, datasets[name])
-      } catch (e) {
-        console.warn(`Failed to update Vega dataset '${name}':`, e)
-      }
-    }
-    this.vega_view.run()
-    if (this._resize != null) {
-      this._resize()
-    }
   }
 
   override after_layout(): void {
@@ -249,7 +189,6 @@ export namespace VegaPlot {
     show_actions: p.Property<boolean>
     theme: p.Property<string | null>
     throttle: p.Property<any>
-    _object_version: p.Property<number>
   }
 }
 
@@ -267,14 +206,13 @@ export class VegaPlot extends LayoutDOM {
   static {
     this.prototype.default_view = VegaPlotView
 
-    this.define<VegaPlot.Props>(({Any, List, Bool, Nullable, Str, Float}) => ({
+    this.define<VegaPlot.Props>(({Any, List, Bool, Nullable, Str}) => ({
       data:         [ Any,                {} ],
       data_sources: [ Any,                {} ],
       events:       [ List(Str),      [] ],
       show_actions: [ Bool,         false ],
       theme:        [ Nullable(Str), null ],
       throttle:     [ Any,                {} ],
-      _object_version: [ Float, 0 ],
     }))
   }
 }
