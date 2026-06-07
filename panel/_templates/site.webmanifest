@@ -28,5 +28,10 @@
   "scope": "/",
   "background_color": "{{ background_color|default('#fdfdfd', true) }}",
   "theme_color": "{{ background_color|default('#0072B5', true) }}",
-  "orientation": "{{ orientation|default('any', true) }}"
+  "orientation": "{{ orientation|default('any', true) }}",
+  "offline_policy": {
+    "static": "cache-only",
+    "runtimeNetwork": [{{ runtime_network }}],
+    "runtimeStrategy": "network-first"
+  }
 }

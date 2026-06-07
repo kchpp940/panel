@@ -564,6 +564,100 @@ def _find_static_resource_remote_urls(content: str) -> list[str]:
     return sorted(u for u in found if u not in nav_urls)
 
 
+def _extract_runtime_network_urls(
+    source: str,
+    static_resource_urls: list[str],
+) -> list[str]:
+    """
+    Scan the user's Python application source for http(s) URLs that look like
+    **runtime business network requests** (as opposed to static resources that
+    Panel should localize).
+
+    Strategy:
+      1. Extract every http(s) URL that appears inside a Python string literal
+         (single-quoted, double-quoted, triple-quoted).
+      2. Also look inside common HTTP-calling patterns:
+         * requests.get / post / put / patch / delete / head / options(url, ...)
+         * urllib.request.urlopen / Request(url, ...)
+         * urllib.urlopen / urlretrieve(url, ...)
+         * httpx.get / post / request(url, ...)
+         * aiohttp.ClientSession().get / post(url, ...)
+         * fetch(url, ...) inside embedded JS (inside triple-quoted strings)
+         * XMLHttpRequest.open(method, url, ...) inside embedded JS
+      3. Subtract every URL that is already in *static_resource_urls* (those
+         are already being handled by the localization pipeline and must not
+         leak into the runtime network list).
+      4. Also subtract known Panel/Bokeh CDN prefixes that are clearly static
+         resources even if they somehow appear in user code.
+
+    Returns a sorted, deduplicated list of URLs. These are written to the
+    asset manifest as ``runtimeNetwork``; the service worker routes matching
+    requests through a network-first strategy with an explicit offline error.
+    """
+    urls: set[str] = set()
+
+    # --- Step 1: pull every http(s) URL out of string literals ----------------
+    # Match Python string literals: single, double, and triple-quoted
+    str_lit_pats = [
+        re.compile(r"""(?<!\\)['"]([^'"]*?)(?<!\\)['"]"""),
+        re.compile(r"""'''(.*?)'''""", re.DOTALL),
+        re.compile(r'"""(.*?)"""', re.DOTALL),
+    ]
+    for pat in str_lit_pats:
+        for m in pat.finditer(source):
+            content = m.group(1)
+            for um in re.finditer(r'https?://[^\s\)\]\};,]+', content):
+                urls.add(um.group(0).rstrip("'\",)]}>"))
+
+    # --- Step 2: explicit HTTP-call patterns (catches URLs built via f-strings too)
+    py_http_pats = [
+        re.compile(r"""(?:requests|urllib\.request|urllib|httpx)\s*\.\s*
+                       (?:get|post|put|patch|delete|head|options|request|
+                          urlopen|urlretrieve|Request)\s*\(\s*
+                       ['\"](https?://[^'\"]+)['\"]""", re.VERBOSE),
+        re.compile(r"""aiohttp\s*\.\s*(?:ClientSession\(\)|get|post|request)
+                       [^'"]*['\"](https?://[^'\"]+)['\"]""", re.VERBOSE),
+    ]
+    for pat in py_http_pats:
+        for m in pat.finditer(source):
+            urls.add(m.group(1))
+
+    # --- Step 2b: embedded JS HTTP-call patterns (matches any variable.open(...))
+    js_in_py_pats = [
+        re.compile(r"""fetch\s*\(\s*['\"](https?://[^'\"]+)['\"]"""),
+        re.compile(r"""\w+\s*\.\s*open\s*\(\s*
+                       ['\"][A-Z]+['\"]\s*,\s*['\"](https?://[^'\"]+)['\"]""", re.VERBOSE),
+        re.compile(r"""axios\s*\.\s*(?:get|post|put|patch|delete|request)\s*\(\s*
+                       ['\"](https?://[^'\"]+)['\"]""", re.VERBOSE),
+    ]
+    for pat in js_in_py_pats:
+        for m in pat.finditer(source):
+            urls.add(m.group(1))
+
+    # --- Step 3: subtract static resources we already handle -----------------
+    static_set = set(static_resource_urls)
+    static_prefixes = (
+        CDN_DIST,
+        CDN_ROOT,
+        'https://cdn.jsdelivr.net/pyodide/',
+        'https://cdn.jsdelivr.net/npm/bokeh',
+        'https://cdn.plot.ly/',
+        'https://cdn.jsdelivr.net/npm/echarts',
+        'https://cdn.jsdelivr.net/npm/tabulator-tables',
+        'https://cdn.jsdelivr.net/npm/holoviews',
+        'https://unpkg.com/',
+        'https://cdnjs.cloudflare.com/ajax/libs/',
+    )
+
+    def _is_static(u: str) -> bool:
+        if u in static_set or u.split('?')[0] in static_set:
+            return True
+        return any(u.startswith(pfx) for pfx in static_prefixes)
+
+    runtime = [u for u in urls if not _is_static(u)]
+    return sorted(runtime)
+
+
 _URL_REWRITE_PATTERNS: list[tuple[re.Pattern, str]] = []
 
 
@@ -1207,12 +1301,24 @@ def convert_app(
         if verbose:
             print(f'  [asset] resources.zip created with {len(app_resources)} entries')
 
+    runtime_network = _extract_runtime_network_urls(app_source, all_resource_urls)
+    if verbose and runtime_network:
+        print(f'  [offline-policy] {len(runtime_network)} runtime network URL(s) detected '
+              f'(network-first, offline → explicit error):')
+        for u in runtime_network:
+            print(f'    • {u}')
+
     manifest_data = {
         'version': 1,
         'extensions': all_ext_names,
         'mapping': url_mapping,
         'wheel_emfs_mapping': wheel_emfs_mapping,
         'assets': local_asset_paths,
+        'offlinePolicy': {
+            'static': 'cache-only',
+            'runtimeNetwork': runtime_network,
+            'runtimeStrategy': 'network-first',
+        },
     }
     manifest_path = dest_path / f'{app_name}.assets.json'
     manifest_path.write_text(
@@ -1273,7 +1379,7 @@ def convert_app(
 
     if verbose:
         print(f'Successfully converted {app} to {runtime} target and wrote output to {filename}.')
-    return (app_name.replace('_', ' '), filename, all_resources)
+    return (app_name.replace('_', ' '), filename, all_resources, runtime_network)
 
 
 def _convert_process_pool(
@@ -1282,14 +1388,16 @@ def _convert_process_pool(
     max_workers: int = 4,
     requirements: list[str] | t.Literal['auto'] | os.PathLike = 'auto',
     **kwargs
-) -> tuple[dict[str, str], list[str]]:
+) -> tuple[dict[str, str], list[str], list[str]]:
     import multiprocessing as mp
 
     from concurrent.futures import ProcessPoolExecutor
 
     files: dict[str, str] = {}
     all_resources: list[str] = []
-    seen: set[str] = set()
+    all_runtime_network: list[str] = []
+    seen_r: set[str] = set()
+    seen_u: set[str] = set()
     groups = [apps[i:i+max_workers] for i in range(0, len(apps), max_workers)]
     for group in groups:
         with ProcessPoolExecutor(
@@ -1308,13 +1416,17 @@ def _convert_process_pool(
             for future in concurrent.futures.as_completed(futures):
                 result = future.result()
                 if result is not None:
-                    name, filename, resources = result
+                    name, filename, resources, runtime_network = result
                     files[name] = filename
                     for r in resources:
-                        if r not in seen:
-                            seen.add(r)
+                        if r not in seen_r:
+                            seen_r.add(r)
                             all_resources.append(r)
-    return files, all_resources
+                    for u in runtime_network:
+                        if u not in seen_u:
+                            seen_u.add(u)
+                            all_runtime_network.append(u)
+    return files, all_resources, all_runtime_network
 
 
 def convert_apps(
@@ -1418,18 +1530,24 @@ def convert_apps(
     if state._is_pyodide:
         files_labels: dict[str, str] = {}
         all_collected_resources: list[str] = []
+        all_runtime_network: list[str] = []
         seen_resources: set[str] = set()
+        seen_runtime: set[str] = set()
         for app in apps:
             result = convert_app(app, dest_path, **kwargs)  # type: ignore
             if result is not None:
-                name, filename, resources = result
+                name, filename, resources, runtime_network = result
                 files_labels[name] = filename
                 for r in resources:
                     if r not in seen_resources:
                         seen_resources.add(r)
                         all_collected_resources.append(r)
+                for u in runtime_network:
+                    if u not in seen_runtime:
+                        seen_runtime.add(u)
+                        all_runtime_network.append(u)
     else:
-        files_labels, all_collected_resources = _convert_process_pool(
+        files_labels, all_collected_resources, all_runtime_network = _convert_process_pool(
             apps, dest_path, max_workers=max_workers, **kwargs  # type: ignore
         )
         seen_resources = set(all_collected_resources)
@@ -1478,7 +1596,12 @@ def convert_apps(
         print('Successfully wrote icons and images.')
 
     # Write manifest
-    manifest_content = build_pwa_manifest(files_labels, title=title, **pwa_config)
+    manifest_content = build_pwa_manifest(
+        files_labels,
+        title=title,
+        runtime_network=runtime_network_str,
+        **pwa_config,
+    )
     with open(dest_path / 'site.webmanifest', 'w', encoding='utf-8') as f:
         f.write(manifest_content)
     _add_global_res('./site.webmanifest')
@@ -1486,10 +1609,12 @@ def convert_apps(
         print('Successfully wrote site.manifest.')
 
     # Write service worker
+    runtime_network_str = ', '.join([repr(u) for u in sorted(all_runtime_network)])
     worker = SERVICE_WORKER_TEMPLATE.render(
         uuid=uuid.uuid4().hex,
         name=title or 'Panel Pyodide App',
-        pre_cache=', '.join([repr(p) for p in all_collected_resources])
+        pre_cache=', '.join([repr(p) for p in all_collected_resources]),
+        runtime_network=runtime_network_str,
     )
     remote_in_sw = _find_static_resource_remote_urls(worker)
     if remote_in_sw:
