@@ -236,6 +236,8 @@ class Vega(ModelPane):
 
     def __init__(self, object=None, **params):
         super().__init__(object, **params)
+        self._last_object_id = id(object)
+        self._last_selection_object_id = id(object)
         self.param.watch(self._update_selections, ['object'])
         self._update_selections()
 
@@ -256,12 +258,16 @@ class Vega(ModelPane):
         return throttle
 
     def _update_selections(self, *args):
+        current_id = id(self.object)
+        object_changed = current_id != self._last_selection_object_id
+        self._last_selection_object_id = current_id
         params = {
             e: param.Dict(allow_refs=False) if stype == 'interval' else param.List(allow_refs=False)
             for e, stype in self._selections.items()
         }
         if self.selection and (set(self.selection.param) - {'name'}) == set(params):
-            self.selection.param.update({p: None for p in params})
+            if object_changed:
+                self.selection.param.update({p: None for p in params})
             return
         self.selection = type('Selection', (param.Parameterized,), params)()
 
@@ -454,6 +460,10 @@ class Vega(ModelPane):
         return model
 
     def _update(self, ref: str, model: Model) -> None:
+        current_id = id(self.object)
+        object_changed = current_id != self._last_object_id
+        self._last_object_id = current_id
         props = self._get_properties(model.document, sources=dict(model.data_sources))
-        props['_object_version'] = model._object_version + 1
+        if object_changed:
+            props['_object_version'] = model._object_version + 1
         model.update(**props)

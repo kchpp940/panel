@@ -116,6 +116,7 @@ class Plotly(ModelPane):
         super().__init__(object, **params)
         self._figure = None
         self._event = None
+        self._last_object_id = id(object)
         self._update_figure()
         self._relayout_data = None
 
@@ -434,24 +435,30 @@ class Plotly(ModelPane):
         )
 
     def _update(self, ref: str, model: Model) -> None:
-        self.click_data = None
-        self.doubleclick_data = None
-        self.clickannotation_data = None
-        self.hover_data = None
-        self.selected_data = None
-        self.viewport = {}
-        self.relayout_data = {}
-        self.restyle_data = []
+        current_id = id(self.object)
+        object_changed = current_id != self._last_object_id
+        self._last_object_id = current_id
 
-        new_version = model._object_version + 1
+        if object_changed:
+            self.click_data = None
+            self.doubleclick_data = None
+            self.clickannotation_data = None
+            self.hover_data = None
+            self.selected_data = None
+            self.viewport = {}
+            self.relayout_data = {}
+            self.restyle_data = []
+            new_version = model._object_version + 1
+        else:
+            new_version = model._object_version
 
         if self.object is None:
             model.update(
                 data=[],
                 layout={},
-                viewport={},
-                relayout_data={},
-                restyle_data=[],
+                viewport={} if object_changed else model.viewport,
+                relayout_data={} if object_changed else model.relayout_data,
+                restyle_data=[] if object_changed else model.restyle_data,
                 _object_version=new_version
             )
             model._render_count += 1
@@ -526,9 +533,10 @@ class Plotly(ModelPane):
         if update_frames:
             updates['frames'] = frames or []
 
-        updates['viewport'] = {}
-        updates['relayout_data'] = {}
-        updates['restyle_data'] = []
+        if object_changed:
+            updates['viewport'] = {}
+            updates['relayout_data'] = {}
+            updates['restyle_data'] = []
         updates['_object_version'] = new_version
 
         if updates:

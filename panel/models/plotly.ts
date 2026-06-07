@@ -251,7 +251,7 @@ export class PlotlyPlotView extends HTMLBoxView {
       this.plot()
     })
     this.on_change(frames, () => {
-      this.plot(true)
+      this.plot()
     })
     this.on_change(viewport, () => {
       this._updateViewportFromProperty()
@@ -275,7 +275,7 @@ export class PlotlyPlotView extends HTMLBoxView {
     set_size(this.container, this.model)
     this._rendered = false
     this.watch_stylesheets()
-    this.plot(true).then(() => {
+    this.plot().then(() => {
       this.shadow_el.appendChild(this.container)
       this._rendered = true
       this.resize_layout()
@@ -411,7 +411,7 @@ export class PlotlyPlotView extends HTMLBoxView {
     })
   }
 
-  async plot(new_plot: boolean=false): Promise<void> {
+  async plot(): Promise<void> {
     if (!(window as any).Plotly || !this.container) {
       return
     }
@@ -430,7 +430,8 @@ export class PlotlyPlotView extends HTMLBoxView {
       this.model.restyle_data = []
       this._last_object_version = this.model._object_version
     }
-    if (new_plot) {
+    const needs_new_plot = object_changed || !this._plotInitialized
+    if (needs_new_plot) {
       const obj = {data, layout: newLayout, config: this.model.config, frames: this.model.frames}
       await (window as any).Plotly.newPlot(this.container, obj)
     } else {

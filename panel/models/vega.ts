@@ -34,6 +34,9 @@ export class VegaPlotView extends LayoutDOMView {
   _resize: any
   _rendered: boolean = false
   _last_object_version: number = -1
+  _last_data_spec: any = null
+  _last_theme: any = null
+  _last_show_actions: any = null
 
   override connect_signals(): void {
     super.connect_signals()
@@ -135,6 +138,15 @@ export class VegaPlotView extends LayoutDOMView {
     }
     const object_changed = this.model._object_version !== this._last_object_version
 
+    const data_spec_changed = data !== this._last_data_spec
+    const theme_changed = this.model.theme !== this._last_theme
+    const show_actions_changed = this.model.show_actions !== this._last_show_actions
+    const structural_changed = data_spec_changed || theme_changed || show_actions_changed
+
+    this._last_data_spec = data
+    this._last_theme = this.model.theme
+    this._last_show_actions = this.model.show_actions
+
     if (object_changed) {
       if (this.vega_view != null) {
         this.vega_view.finalize()
@@ -162,13 +174,17 @@ export class VegaPlotView extends LayoutDOMView {
       }
       this.model.data.datasets = datasets
 
-      if (!object_changed && this.vega_view != null) {
+      if (!object_changed && !structural_changed && this.vega_view != null) {
         this._update_view_data(datasets)
         return
       }
     }
 
-    if (!object_changed && this.vega_view != null) {
+    if (!object_changed && !structural_changed && this.vega_view != null) {
+      return
+    }
+
+    if (this.vega_view != null) {
       this.vega_view.finalize()
       this.vega_view = null
       this._callbacks = []
