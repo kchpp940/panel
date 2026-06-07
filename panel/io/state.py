@@ -4,6 +4,7 @@ Various utilities for recording and embedding state in a rendered app.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import datetime as dt
 import inspect
 import logging
@@ -88,46 +89,90 @@ def curdoc_locked() -> Document | None:
 class _Undefined: pass
 
 
+@dataclasses.dataclass
+class _CleanupFailure:
+    """A single failed cleanup step recorded by the registry."""
+    item: str
+    error: str
+
+
+@dataclasses.dataclass
+class _CleanupResult:
+    """
+    Outcome of a cleanup_document() invocation.
+
+    ``ran`` is True when cleanup actually executed (it will be False when
+    the doc was already cleaned up, i.e. the call was a no-op due to the
+    idempotency guarantee).
+
+    ``failures`` contains every cleanup step that raised an exception.
+    The registry also emits a ``warning``-level log for each failure so
+    the problem is visible even if the caller ignores the return value.
+    """
+    ran: bool = False
+    failures: list[_CleanupFailure] = dataclasses.field(default_factory=list)
+
+    @property
+    def ok(self) -> bool:
+        """True iff cleanup ran and no step failed."""
+        return self.ran and not self.failures
+
+
 class _SessionCleanupRegistry:
     """
-    Idempotent, single-entry-point registry for session/document cleanup.
+    Idempotent, observable, single-entry-point registry for session cleanup.
 
-    Guarantees:
-    1. Each document is registered for session_destroyed exactly once.
-    2. Cleanup runs in a fixed, deterministic order.
-    3. Cleanup is idempotent -- calling it multiple times is safe.
-    4. Exceptions from individual cleanup steps are caught and logged,
-       never aborting the full cleanup sequence.
+    Guarantees
+    ----------
+    1. **Idempotent registration** -- each Document is registered for
+       ``session_destroyed`` exactly once.  Uses weak references so a
+       Document that becomes unreachable is automatically forgotten
+       (no risk of colliding ``id()`` reuse after GC).
+    2. **Fixed, deterministic cleanup order** -- periodic callbacks are
+       stopped *before* tearing down front-end components.
+    3. **Observable failures** -- every failing cleanup step is recorded
+       in the returned ``_CleanupResult`` *and* emitted as a
+       ``warning``-level log message.  The full sequence is never aborted
+       by a single failure.
+    4. **Hot-reload friendly** -- ``prepare_hot_reload()`` stops
+       periodic callbacks but preserves ``_loaded`` / ``_connected``
+       flags so the freshly-loaded session can still detect whether
+       the page was already connected.
     """
 
     def __init__(self, state_obj: '_state') -> None:
         self._state = state_obj
-        self._registered_docs: set[int] = set()
-        self._cleaned_docs: set[int] = set()
+        # WeakKeyDictionary simulates a WeakSet (value unused).
+        # Weak refs ensure that GC'd Documents don't leave stale
+        # entries, and Document identity is preserved regardless of
+        # potential id() reuse.
+        self._registered_docs: WeakKeyDictionary[Document, bool] = WeakKeyDictionary()
+        self._cleaned_docs: WeakKeyDictionary[Document, bool] = WeakKeyDictionary()
         self._lock = threading.Lock()
 
     # ------------------------------------------------------------------
-    # Registration -- idempotent: a doc is registered at most once
+    # Registration -- idempotent; weakref-based so no id() collision risk
     # ------------------------------------------------------------------
 
     def register(self, doc: Document) -> None:
         """
-        Register a document for unified session cleanup.
+        Register *doc* for unified session cleanup.
 
         Safe to call multiple times for the same document -- only the
-        first call registers the session_destroyed callback.
+        first call attaches the canonical ``session_destroyed`` callback.
+        Uses a weak reference so a garbage-collected Document is
+        automatically forgotten.
         """
-        doc_id = id(doc)
         with self._lock:
-            if doc_id in self._registered_docs:
+            if doc in self._registered_docs:
                 return
-            self._registered_docs.add(doc_id)
+            self._registered_docs[doc] = True
         # Attach the single canonical session_destroyed callback.
         # This must be the ONLY place state._destroy_session is registered.
         doc.on_session_destroyed(self._state._destroy_session)
 
     # ------------------------------------------------------------------
-    # Cleanup execution -- fixed order, idempotent
+    # Cleanup execution -- fixed order, observable, idempotent
     # ------------------------------------------------------------------
 
     _STATE_WEAKMAP_ATTRS: tuple[str, ...] = (
@@ -155,18 +200,26 @@ class _SessionCleanupRegistry:
         self,
         doc: Document,
         session_context: SessionContext | None,
-    ) -> bool:
+    ) -> _CleanupResult:
         """
         Run the full deterministic cleanup sequence for *doc*.
 
-        Returns True if cleanup actually ran, False if it was a no-op
-        because this doc was already cleaned up (idempotency).
+        Returns a :class:`_CleanupResult` describing whether cleanup
+        actually ran (it is skipped when already cleaned up) and which
+        (if any) steps failed.  Every failure is also emitted as a
+        ``warning``-level log entry.
         """
-        doc_id = id(doc)
+        result = _CleanupResult()
         with self._lock:
-            if doc_id in self._cleaned_docs:
-                return False
-            self._cleaned_docs.add(doc_id)
+            if doc in self._cleaned_docs:
+                return result
+            self._cleaned_docs[doc] = True
+        result.ran = True
+
+        def _record_failure(item: str, exc: Exception) -> None:
+            msg = f"{item} cleanup failed for doc id={id(doc):#x}: {exc!r}"
+            _state_logger.warning(msg)
+            result.failures.append(_CleanupFailure(item=item, error=str(exc)))
 
         # ---- Phase 1: Objects with explicit _server_destroy hooks ----
         # Order matters: stop running work first, then tear down
@@ -174,49 +227,72 @@ class _SessionCleanupRegistry:
 
         # 1) Periodic callbacks -- stop threads/async tasks before anything else
         if doc in self._state._periodic:
-            for cb in list(self._state._periodic[doc]):
+            for i, cb in enumerate(list(self._state._periodic[doc])):
                 try:
                     cb._cleanup(session_context)
                 except Exception as e:
-                    _state_logger.debug('Error cleaning up PeriodicCallback: %s', e)
-            del self._state._periodic[doc]
+                    _record_failure(f'PeriodicCallback[{i}]', e)
+            try:
+                del self._state._periodic[doc]
+            except Exception as e:
+                _record_failure('state._periodic dict removal', e)
 
         # 2) Location -- URL sync must stop before we clear state
         if doc in self._state._locations:
-            loc = self._state._locations[doc]
             try:
-                loc._server_destroy(session_context)
+                loc = self._state._locations[doc]
+                try:
+                    loc._server_destroy(session_context)
+                except Exception as e:
+                    _record_failure('Location._server_destroy', e)
+                try:
+                    del self._state._locations[doc]
+                except Exception as e:
+                    _record_failure('state._locations dict removal', e)
             except Exception as e:
-                _state_logger.debug('Error cleaning up Location: %s', e)
-            del self._state._locations[doc]
+                _record_failure('state._locations access', e)
 
         # 3) Notifications -- unwatch notification param changes
         if doc in self._state._notifications:
-            notification = self._state._notifications[doc]
             try:
-                notification._server_destroy(session_context)
+                notification = self._state._notifications[doc]
+                try:
+                    notification._server_destroy(session_context)
+                except Exception as e:
+                    _record_failure('NotificationArea._server_destroy', e)
+                try:
+                    del self._state._notifications[doc]
+                except Exception as e:
+                    _record_failure('state._notifications dict removal', e)
             except Exception as e:
-                _state_logger.debug('Error cleaning up NotificationArea: %s', e)
-            del self._state._notifications[doc]
+                _record_failure('state._notifications access', e)
 
         # 4) BrowserInfo -- stop syncing browser state
         if doc in self._state._browsers:
-            browser = self._state._browsers[doc]
             try:
-                browser._server_destroy(session_context)
+                browser = self._state._browsers[doc]
+                try:
+                    browser._server_destroy(session_context)
+                except Exception as e:
+                    _record_failure('BrowserInfo._server_destroy', e)
+                try:
+                    del self._state._browsers[doc]
+                except Exception as e:
+                    _record_failure('state._browsers dict removal', e)
             except Exception as e:
-                _state_logger.debug('Error cleaning up BrowserInfo: %s', e)
-            del self._state._browsers[doc]
+                _record_failure('state._browsers access', e)
 
         # ---- Phase 2: Plain WeakKeyDictionary state maps ----
         # These have no lifecycle hooks -- just drop the references.
         for attr in self._STATE_WEAKMAP_ATTRS:
+            if attr in ('_periodic', '_locations', '_notifications', '_browsers'):
+                continue  # already handled in Phase 1
             mapping = getattr(self._state, attr, None)
             if isinstance(mapping, WeakKeyDictionary) and doc in mapping:
                 try:
                     del mapping[doc]
                 except Exception as e:
-                    _state_logger.debug('Error clearing state.%s for doc: %s', attr, e)
+                    _record_failure(f'state.{attr} dict removal', e)
 
         # ---- Phase 3: Pop-only state (uses .pop for safety) ----
         for attr in self._STATE_POP_ATTRS:
@@ -225,43 +301,56 @@ class _SessionCleanupRegistry:
                 try:
                     mapping.pop(doc, None)
                 except Exception as e:
-                    _state_logger.debug('Error popping state.%s for doc: %s', attr, e)
+                    _record_failure(f'state.{attr} pop', e)
 
-        return True
+        return result
 
     def reset(self) -> None:
         """Wipe all bookkeeping (called by state.reset())."""
         with self._lock:
-            self._registered_docs.clear()
-            self._cleaned_docs.clear()
+            self._registered_docs = WeakKeyDictionary()
+            self._cleaned_docs = WeakKeyDictionary()
 
     # ------------------------------------------------------------------
-    # Hot-reload support -- lighter-weight cleanup that preserves the
-    # Location (so we can signal the browser to reload).
+    # Hot-reload support -- stops callbacks but PRESERVES loaded/connected
     # ------------------------------------------------------------------
 
-    def prepare_hot_reload(self, doc: Document) -> None:
+    def prepare_hot_reload(self, doc: Document) -> list[_CleanupFailure]:
         """
         Prepare *doc* for a hot reload:
 
-        * Stop all periodic callbacks (so they don't fire during/after reload)
-        * Clear ``_loaded`` / ``_connected`` flags
-        * Preserve the Location object (caller is responsible for
-          flipping ``location.reload = True``).
+        * **Stop** all periodic callbacks (so they do not fire after
+          module code has been reloaded).
+        * **Preserve** ``_loaded`` and ``_connected`` flags -- the
+          replacement session needs to be able to tell whether the
+          browser had already connected / finished loading so it can
+          correctly decide whether to flip ``location.reload``
+          immediately or wait for ``document_ready``.
 
-        Safe to call multiple times.
+        Returns a list of failed steps (also logged as warnings).
+        The Location object is intentionally left untouched so the
+        caller can set ``location.reload = True``.
         """
-        # 1) Stop periodic callbacks
+        failures: list[_CleanupFailure] = []
+
+        # 1) Stop periodic callbacks (do not remove from the dict --
+        #    the full cleanup via session_destroyed will do that).
         if doc in self._state._periodic:
-            for cb in list(self._state._periodic[doc]):
+            for i, cb in enumerate(list(self._state._periodic[doc])):
                 try:
                     cb.stop()
                 except Exception as e:
-                    _state_logger.debug('Error stopping PeriodicCallback on hot reload: %s', e)
+                    item = f'PeriodicCallback[{i}] stop on hot reload'
+                    _state_logger.warning('%s failed: %r', item, e)
+                    failures.append(_CleanupFailure(item=item, error=str(e)))
 
-        # 2) Clear loaded/connected flags so the new session starts fresh
-        self._state._loaded.pop(doc, None)
-        self._state._connected.pop(doc, None)
+        # NOTE: intentionally NOT clearing _loaded / _connected here.
+        # The caller of prepare_hot_reload reads state._loaded *before*
+        # calling us so it can decide whether to flip location.reload
+        # immediately.  The eventual session_destroyed / document
+        # destroy flow will clear these flags via cleanup_document().
+
+        return failures
 
 Tat: t.TypeAlias = dt.datetime | Callable[[dt.datetime], dt.datetime] | TIterator[dt.datetime]
 
