@@ -34,7 +34,7 @@ export class VegaPlotView extends LayoutDOMView {
   _resize: any
   _rendered: boolean = false
   _last_object_version: number = -1
-  _last_structural_signature: string | null = null
+  _last_data_ref: any = null
   _last_theme: any = null
   _last_show_actions: any = null
 
@@ -131,64 +131,18 @@ export class VegaPlotView extends LayoutDOMView {
     this.shadow_el.append(this.container)
   }
 
-  _is_data_row_array(arr: any[]): boolean {
-    if (arr.length === 0) return false
-    const sample = arr[0]
-    if (sample == null || typeof sample !== "object") return false
-    if (Array.isArray(sample)) return false
-    const structural_keys = ["mark", "encoding", "layer", "concat", "vconcat",
-      "hconcat", "facet", "repeat", "transform", "signal", "param",
-      "resolve", "projection", "selection", "data", "scale", "axis",
-      "legend", "title", "config", "name", "type", "expr", "init"]
-    const keys = Object.keys(sample)
-    return keys.length > 0 && !keys.some(k => structural_keys.indexOf(k) >= 0)
-  }
-
-  _strip_structural_spec(obj: any): any {
-    if (obj == null) return obj
-    if (Array.isArray(obj)) {
-      if (this._is_data_row_array(obj)) return "__DATA_ROWS__"
-      return obj.map(item => this._strip_structural_spec(item))
-    }
-    if (typeof obj === "object") {
-      const result: any = {}
-      for (const key of Object.keys(obj)) {
-        if (key === "values") {
-          const val = obj[key]
-          if (typeof val === "string") {
-            result[key] = val
-          } else if (Array.isArray(val)) {
-            result[key] = "__VALUES__"
-          } else {
-            result[key] = this._strip_structural_spec(val)
-          }
-        } else if (key === "datasets") {
-          const val = obj[key] || {}
-          result[key] = Object.keys(val).sort()
-        } else {
-          result[key] = this._strip_structural_spec(obj[key])
-        }
-      }
-      return result
-    }
-    return obj
-  }
-
-  _structural_signature(data: any, theme: any, show_actions: any): string {
-    const stripped = this._strip_structural_spec(JSON.parse(JSON.stringify(data)))
-    return JSON.stringify({spec: stripped, theme, show_actions})
-  }
-
   _plot(): void {
     const data = this.model.data
     if ((data == null) || !(window as any).vegaEmbed) {
       return
     }
     const object_changed = this.model._object_version !== this._last_object_version
+    const data_ref_changed = data !== this._last_data_ref
+    const theme_changed = this.model.theme !== this._last_theme
+    const show_actions_changed = this.model.show_actions !== this._last_show_actions
+    const needs_full_rebuild = object_changed || data_ref_changed || theme_changed || show_actions_changed
 
-    const current_signature = this._structural_signature(data, this.model.theme, this.model.show_actions)
-    const structural_changed = object_changed || current_signature !== this._last_structural_signature
-    this._last_structural_signature = current_signature
+    this._last_data_ref = data
     this._last_theme = this.model.theme
     this._last_show_actions = this.model.show_actions
 
@@ -202,7 +156,9 @@ export class VegaPlotView extends LayoutDOMView {
       this._last_object_version = this.model._object_version
     }
 
-    if (this.model.data_sources && (Object.keys(this.model.data_sources).length > 0)) {
+    const has_cds_sources = this.model.data_sources && Object.keys(this.model.data_sources).length > 0
+
+    if (has_cds_sources) {
       const datasets = this._fetch_datasets()
       if ("data" in datasets) {
         data.data.values = datasets.data
@@ -219,13 +175,13 @@ export class VegaPlotView extends LayoutDOMView {
       }
       this.model.data.datasets = datasets
 
-      if (!structural_changed && this.vega_view != null) {
+      if (!needs_full_rebuild && this.vega_view != null) {
         this._update_view_data(datasets)
         return
       }
     }
 
-    if (!structural_changed && this.vega_view != null) {
+    if (!needs_full_rebuild && this.vega_view != null) {
       return
     }
 

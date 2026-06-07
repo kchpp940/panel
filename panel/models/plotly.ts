@@ -200,6 +200,7 @@ export class PlotlyPlotView extends HTMLBoxView {
   container: PlotlyHTMLElement
   _watched_sources: string[]
   _last_object_version: number = -1
+  _last_frames_ref: any = null
   _end_relayouting = debounce(() => {
     this._relayouting = false
   }, 2000, false)
@@ -418,6 +419,8 @@ export class PlotlyPlotView extends HTMLBoxView {
     const data = this._trace_data()
     const newLayout = this._layout_data()
     const object_changed = this.model._object_version !== this._last_object_version
+    const frames_changed = this.model.frames !== this._last_frames_ref
+    this._last_frames_ref = this.model.frames
     this._reacting = true
     if (object_changed) {
       this._hoverdata = null
@@ -435,6 +438,13 @@ export class PlotlyPlotView extends HTMLBoxView {
       const obj = {data, layout: newLayout, config: this.model.config, frames: this.model.frames}
       await (window as any).Plotly.newPlot(this.container, obj)
     } else {
+      if (frames_changed && this.model.frames != null) {
+        try {
+          await (window as any).Plotly.animate(this.container, null, {mode: "immediate"})
+        } catch (e) {
+          // ignore animation stop errors
+        }
+      }
       const obj = {data, layout: newLayout, config: this.model.config, frames: this.model.frames}
       await (window as any).Plotly.react(this.container, obj)
     }
