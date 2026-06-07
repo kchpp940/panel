@@ -237,10 +237,21 @@ def _reload(module_paths, changes):
         if module in sys.modules:
             del sys.modules[module]
 
-    for doc, loc in state._locations.items():
+    for doc, loc in list(state._locations.items()):
         if not doc.session_context:
             continue
-        elif state._loaded.get(doc):
+        # Stop periodic callbacks before reload to avoid duplicate execution
+        for cb in list(state._periodic.get(doc, [])):
+            try:
+                cb.stop()
+            except Exception:
+                pass
+        # Check loaded flag BEFORE clearing it
+        already_loaded = state._loaded.get(doc, False)
+        # Clear loaded/connected flags so the new session starts fresh
+        state._loaded.pop(doc, None)
+        state._connected.pop(doc, None)
+        if already_loaded:
             loc.reload = True
         else:
             def reload_session(event, loc=loc):

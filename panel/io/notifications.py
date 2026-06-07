@@ -115,6 +115,16 @@ class NotificationArea(NotificationAreaBase, ReactiveHTML):
 
     _clear = param.Integer(default=0)
 
+    def _server_destroy(self, session_context):
+        for notification, watcher in list(self._notification_watchers.items()):
+            try:
+                notification.param.unwatch(watcher)
+            except Exception:
+                pass
+        self._notification_watchers.clear()
+        self.notifications.clear()
+        super()._server_destroy(session_context)
+
     types = param.List(default=[
         {'type': 'warning',
          'background': '#ffc107',

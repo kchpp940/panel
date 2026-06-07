@@ -6,7 +6,6 @@ import dataclasses
 import json
 import os
 import pathlib
-import re
 import typing as t
 import uuid
 
@@ -75,624 +74,10 @@ PWA_IMAGES = [
     ICON_DIR / 'icon-192x192.png',
     ICON_DIR / 'icon-512x512.png',
     ICON_DIR / 'apple-touch-icon.png',
-    ICON_DIR / 'index_background.png',
-    ICON_DIR / 'logo_horizontal.png',
+    ICON_DIR / 'index_background.png'
 ]
 
 Runtimes = t.Literal['pyodide', 'pyscript', 'pyodide-worker', 'pyscript-worker']
-
-_SCRIPT_SRC_RE = re.compile(r'<script[^>]+src=["\']([^"\']+)["\']')
-_LINK_HREF_RE = re.compile(r'<link[^>]+href=["\']([^"\']+)["\']')
-
-
-def _extract_urls_from_tags(tag_strings: list[str] | tuple[str, ...]) -> list[str]:
-    """Extract resource URLs from HTML <script> and <link> tags."""
-    urls: list[str] = []
-    for tag in tag_strings:
-        if not isinstance(tag, str):
-            continue
-        for m in _SCRIPT_SRC_RE.finditer(tag):
-            url = m.group(1)
-            if url and url not in urls:
-                urls.append(url)
-        for m in _LINK_HREF_RE.finditer(tag):
-            url = m.group(1)
-            if url and url not in urls:
-                urls.append(url)
-    return urls
-
-
-def _collect_bundle_urls(bundle, extra_js_tags: list[str], extra_css_tags: list[str]) -> list[str]:
-    """
-    Collect all external JS/CSS URLs from a resource Bundle and extra tag strings.
-    Returns a deduplicated list of URLs suitable for service worker pre-caching.
-    """
-    urls: list[str] = []
-    seen: set[str] = set()
-
-    def _add(u: str):
-        if not u or u in seen or u.startswith('data:'):
-            return
-        seen.add(u)
-        urls.append(u)
-
-    if bundle is not None:
-        for jsf in getattr(bundle, 'js_files', []) or []:
-            _add(str(jsf))
-        for jsf in getattr(bundle, 'js_modules', []) or []:
-            _add(str(jsf))
-        for cssf in getattr(bundle, 'css_files', []) or []:
-            _add(str(cssf))
-
-    for url in _extract_urls_from_tags(extra_js_tags):
-        _add(url)
-    for url in _extract_urls_from_tags(extra_css_tags):
-        _add(url)
-
-    return urls
-
-
-def _collect_document_stylesheet_urls(document) -> list[str]:
-    """
-    Collect all external stylesheet URLs from ImportedStyleSheet objects
-    attached to models in the document. This catches design/theme stylesheets
-    that are applied at the model level rather than in the global bundle.
-    """
-    from bokeh.models import ImportedStyleSheet
-    urls: list[str] = []
-    seen: set[str] = set()
-    for model in document.models:
-        stylesheets = getattr(model, 'stylesheets', None)
-        if not stylesheets:
-            continue
-        for ss in stylesheets:
-            if isinstance(ss, ImportedStyleSheet) and ss.url:
-                url = ss.url.split('?')[0]
-                if url and url not in seen and not url.startswith('data:'):
-                    seen.add(url)
-                    urls.append(url)
-    return urls
-
-
-def _parse_extension_calls_from_source(source: str) -> list[str]:
-    """
-    Parse Python source code and extract extension names passed to
-    ``pn.extension(...)`` or ``panel.extension(...)`` calls.
-    Handles positional string args and some keyword-argument usages.
-    """
-    names: list[str] = []
-    seen: set[str] = set()
-    patterns = [
-        re.compile(r'''(?:pn|panel)\s*\.\s*extension\s*\(\s*((?:['"][^'"]+['"]\s*,?\s*)+)'''),
-        re.compile(r'''(?:pn|panel)\s*\.\s*extension\s*\(\s*\[((?:\s*['"][^'"]+['"]\s*,?\s*)+)\]'''),
-    ]
-    str_pattern = re.compile(r'''['"]([^'"]+)['"]''')
-    for pat in patterns:
-        for m in pat.finditer(source):
-            for sm in str_pattern.finditer(m.group(1)):
-                name = sm.group(1)
-                if name and name not in seen:
-                    seen.add(name)
-                    names.append(name)
-    return names
-
-
-def _detect_extensions_from_document(document) -> list[str]:
-    """
-    Scan all models in a document and infer which Panel extensions are used.
-    Maps model class module paths to extension names using the panel_extension
-    import registry plus the ReactiveHTML extension-name registry.
-    """
-    from ..config import panel_extension
-    from ..reactive import ReactiveHTML
-    module_to_ext = {v: k for k, v in panel_extension._imports.items()}
-    names: list[str] = []
-    seen: set[str] = set()
-
-    def _add(name: str):
-        if name and name not in seen:
-            seen.add(name)
-            names.append(name)
-
-    for model in document.models:
-        module = type(model).__module__
-        ext = module_to_ext.get(module)
-        if ext:
-            _add(ext)
-        if isinstance(model, ReactiveHTML) and getattr(model, '_extension_name', None):
-            _add(model._extension_name)
-
-    for ext in getattr(state, '_extensions', []) or []:
-        _add(ext)
-    state_exts = getattr(state, '_extensions_', {}) or {}
-    for exts in state_exts.values():
-        for e in exts:
-            _add(e)
-    for e in panel_extension._loaded_extensions:
-        _add(e)
-    return names
-
-
-def _resolve_extension_resource_urls(extension_names: list[str]) -> dict[str, list[str]]:
-    """
-    Given a list of Panel extension names, resolve the JS and CSS URLs
-    that each extension requires by importing its model module and using
-    the bundled_files helper plus the Resources class.
-    Returns dict with keys 'js', 'css', 'js_modules'.
-    """
-    from bokeh.model import Model
-    from ..config import panel_extension
-    from ..io.resources import bundled_files
-
-    result: dict[str, list[str]] = {'js': [], 'css': [], 'js_modules': []}
-    seen_js: set[str] = set()
-    seen_css: set[str] = set()
-
-    def _add_js(url: str):
-        if url and url not in seen_js and not url.startswith('data:'):
-            seen_js.add(url)
-            result['js'].append(url)
-
-    def _add_css(url: str):
-        if url and url not in seen_css and not url.startswith('data:'):
-            seen_css.add(url)
-            result['css'].append(url)
-
-    for ext in extension_names:
-        module_path = panel_extension._imports.get(ext)
-        if not module_path:
-            continue
-        try:
-            import importlib
-            module = importlib.import_module(module_path)
-        except Exception:
-            continue
-        for obj in vars(module).values():
-            if isinstance(obj, type) and issubclass(obj, Model) and obj is not Model:
-                try:
-                    for url in bundled_files(obj, 'javascript'):
-                        _add_js(url)
-                except Exception:
-                    pass
-                try:
-                    for url in bundled_files(obj, 'css'):
-                        _add_css(url)
-                except Exception:
-                    pass
-                ext_name = getattr(obj, '_extension_name', None)
-                if ext_name:
-                    for attr in ('__javascript__',):
-                        urls = getattr(obj, attr, None)
-                        if isinstance(urls, (list, tuple)):
-                            for u in urls:
-                                _add_js(str(u))
-                    for attr in ('__css__',):
-                        urls = getattr(obj, attr, None)
-                        if isinstance(urls, (list, tuple)):
-                            for u in urls:
-                                _add_css(str(u))
-    return result
-
-
-def _resolve_design_theme_resource_urls() -> dict[str, list[str]]:
-    """Resolve Design/Theme CSS and JS URLs from the global config."""
-    result: dict[str, list[str]] = {'js': [], 'css': [], 'js_modules': []}
-    if config.design:
-        try:
-            res = config.design().resolve_resources(cdn=True, include_theme=True)
-            for rtype in ('js', 'css', 'js_modules'):
-                for url in res.get(rtype, {}).values():
-                    if url and not url.startswith('data:') and url not in result[rtype]:
-                        result[rtype].append(url)
-        except Exception:
-            pass
-        font_css = list(config.design._resources.get('font', {}).values())
-        for url in font_css:
-            if url and not url.startswith('data:') and url not in result['css']:
-                result['css'].append(url)
-    for url in config.css_files:
-        if not os.path.isfile(url) and url not in result['css']:
-            result['css'].append(url)
-    for url in config.js_files.values() if hasattr(config.js_files, 'values') else config.js_files:
-        if isinstance(url, str) and not url.startswith('data:') and url not in result['js']:
-            result['js'].append(url)
-    return result
-
-
-def _resolve_runtime_resource_urls(
-    runtime: Runtimes,
-    compiled: bool = False,
-) -> dict[str, list[str]]:
-    """Resolve Pyodide/PyScript JS and CSS URLs."""
-    result: dict[str, list[str]] = {'js': [], 'css': [], 'js_modules': []}
-    if runtime.startswith('pyscript'):
-        result['js'].append(f'https://pyscript.net/releases/{PYSCRIPT_VERSION}/core.js')
-        result['css'].append(f'https://pyscript.net/releases/{PYSCRIPT_VERSION}/core.css')
-        result['css'].append(f'{CDN_DIST}css/pyscript.css')
-    else:
-        if compiled:
-            result['js'].append(PYODIDE_PYC_URL)
-        else:
-            result['js'].append(PYODIDE_URL)
-    result['css'].append(f'{CDN_DIST}css/loading.css')
-    return result
-
-
-def _safe_filename(url: str) -> str:
-    """Convert a URL into a safe flat filename for local storage."""
-    parsed = urlparse(url)
-    path = parsed.path
-    if not path:
-        path = parsed.netloc
-    basename = os.path.basename(path) or 'resource'
-    base, ext = os.path.splitext(basename)
-    if not ext:
-        ext = '.bin'
-    cleaned_base = re.sub(r'[^A-Za-z0-9._-]', '_', base)[:80]
-    url_hash = hex(abs(hash(url)))[2:10]
-    return f'{cleaned_base}_{url_hash}{ext}'
-
-
-def _download_or_copy_url(url: str, dest_path: pathlib.Path) -> tuple[bool, str | None]:
-    """
-    Try to get the content for a URL from (in order):
-    1. A local panel bundled file (if it matches CDN_DIST path)
-    2. A local file path
-    3. A remote HTTP download
-
-    Returns
-    -------
-    (success, error_message)
-        success: True if the file was written successfully.
-        error_message: None on success, or a description of the failure.
-    """
-    from ..io.resources import BUNDLE_DIR
-
-    try:
-        if url.startswith(CDN_DIST):
-            rel = url[len(CDN_DIST):].split('?')[0]
-            candidate = DIST_DIR / rel
-            if candidate.is_file():
-                dest_path.write_bytes(candidate.read_bytes())
-                return True, None
-            bundled_rel = rel.replace('bundled/', '', 1) if 'bundled/' in rel else rel
-            candidate2 = BUNDLE_DIR / bundled_rel
-            if candidate2.is_file():
-                dest_path.write_bytes(candidate2.read_bytes())
-                return True, None
-            return False, f'CDN_DIST match failed, no bundled file at {candidate} or {candidate2}'
-
-        parsed = urlparse(url)
-        if parsed.scheme in ('', 'file'):
-            local_path = pathlib.Path(parsed.path or url).expanduser().resolve()
-            if local_path.is_file():
-                dest_path.write_bytes(local_path.read_bytes())
-                return True, None
-            return False, f'Local file not found: {local_path}'
-
-        if parsed.scheme in ('http', 'https'):
-            import urllib.request
-            import ssl
-            ctx = ssl.create_default_context()
-            req = urllib.request.Request(url, headers={'User-Agent': 'panel-convert/1.0'})
-            with urllib.request.urlopen(req, timeout=30, context=ctx) as resp:
-                if resp.status == 200:
-                    dest_path.write_bytes(resp.read())
-                    return True, None
-                return False, f'HTTP {resp.status} for {url}'
-            return False, f'Failed HTTP request for {url}'
-
-        return False, f'Unsupported URL scheme: {parsed.scheme!r} for {url}'
-    except Exception as exc:
-        return False, f'{type(exc).__name__}: {exc}'
-
-
-class AssetLocalizationError(RuntimeError):
-    """Raised when a required asset cannot be localized to disk."""
-
-
-def build_local_assets(
-    resource_urls: list[str],
-    dest_dir: str | os.PathLike,
-    assets_subdir: str = 'assets',
-    verbose: bool = True,
-    strict: bool = True,
-) -> tuple[dict[str, str], pathlib.Path, list[str]]:
-    """
-    Download / copy a list of resource URLs into a local assets directory.
-
-    Parameters
-    ----------
-    resource_urls : list[str]
-        All URLs (CDN, local file paths, http, https) to localize.
-    dest_dir : path-like
-        Output directory for the converted app.
-    assets_subdir : str
-        Sub-directory name under dest_dir to store assets.
-    verbose : bool
-        Print progress.
-    strict : bool
-        If True (default), raise AssetLocalizationError on the first resource
-        that fails to localize. If False, warn and continue (the URL will NOT
-        be added to url_mapping).
-
-    Returns
-    -------
-    (url_mapping, assets_path, local_asset_paths)
-        url_mapping: dict mapping original URL -> './assets/filename' (relative for HTML)
-        assets_path: absolute path to the assets directory
-        local_asset_paths: list of relative paths ('.\\/assets/...') for service worker caching
-    """
-    dest_path = pathlib.Path(dest_dir)
-    assets_path = dest_path / assets_subdir
-    assets_path.mkdir(parents=True, exist_ok=True)
-
-    url_mapping: dict[str, str] = {}
-    local_rel_paths: list[str] = []
-    seen_local: set[str] = set()
-    failures: list[tuple[str, str]] = []
-
-    for url in resource_urls:
-        if not url or url.startswith('data:'):
-            continue
-        if url in url_mapping:
-            continue
-        filename = _safe_filename(url)
-        target = assets_path / filename
-        ok, err = _download_or_copy_url(url, target)
-        if ok:
-            rel = f'./{assets_subdir}/{filename}'
-            url_mapping[url] = rel
-            if rel not in seen_local:
-                seen_local.add(rel)
-                local_rel_paths.append(rel)
-            if verbose:
-                print(f'  [asset] localized: {os.path.basename(url)} -> {rel}')
-        else:
-            failures.append((url, err or 'unknown error'))
-            if verbose:
-                print(f'  [asset] FAILED: could not localize {url}: {err}')
-
-    if strict and failures:
-        lines = [f'  - {url!r}: {msg}' for url, msg in failures]
-        raise AssetLocalizationError(
-            f'Failed to localize {len(failures)} required asset(s); '
-            f'aborting convert.\n' + '\n'.join(lines)
-        )
-
-    return url_mapping, assets_path, local_rel_paths
-
-
-def _find_remaining_known_urls(content: str, known_resource_urls: list[str]) -> list[str]:
-    """
-    Strict, authoritative check: scan *content* for any http(s) URLs from
-    *known_resource_urls* (i.e. the exact list of static resources we tried to
-    localize: extension JS/CSS, theme CSS, Pyodide/PyScript JS/CSS, wheels,
-    user resources). This CANNOT produce false positives because every URL we
-    check was explicitly added to the localization manifest.
-
-    Used per-app after rewriting HTML and worker content.
-    """
-    remaining: list[str] = []
-    for url in known_resource_urls:
-        if not url or urlparse(url).scheme not in ('http', 'https'):
-            continue
-        if url in content or url.split('?')[0] in content:
-            remaining.append(url)
-    return remaining
-
-
-# Resource-bearing <link rel> values. Other values (preconnect, dns-prefetch,
-# canonical, alternate, author, ...) are business-level optimizations/metadata
-# and MUST NOT trigger a convert-time failure.
-_STATIC_LINK_RELS = {
-    'stylesheet', 'icon', 'manifest', 'preload', 'modulepreload',
-    'apple-touch-icon', 'apple-touch-startup-image',
-}
-
-
-def _find_static_resource_remote_urls(content: str) -> list[str]:
-    """
-    Conservative secondary safety-net scan: look for http(s) URLs ONLY in
-    unambiguous STATIC-RESOURCE loading contexts. Business API calls, remote
-    data URLs, external image references inside user code etc. are explicitly
-    NOT flagged.
-
-    Patterns checked:
-      * <script src="https://...">
-      * <link href="https://..." rel="stylesheet|icon|manifest|preload|...">
-        (only resource-bearing <link rel> values — see _STATIC_LINK_RELS)
-      * importScripts("https://...")    — worker static imports
-      * new Worker("https://...")        — worker source URL
-      * micropip.install(["https://...whl", ...])  — wheel requirements
-
-    Navigational <a href="https://..."> links are always excluded.
-
-    Used only for files that don't go through the per-app localization pipeline
-    (index.html, serviceWorker.js) and for the pre-cache list sanity check.
-    """
-    found: list[str] = []
-    seen: set[str] = set()
-
-    def _add(u: str):
-        u_clean = u.strip().rstrip('"').rstrip("'")
-        if (u_clean and u_clean not in seen
-                and urlparse(u_clean).scheme in ('http', 'https')):
-            seen.add(u_clean)
-            found.append(u_clean)
-
-    script_pat = re.compile(r"""<script[^>]+src\s*=\s*["']([^"']+)["']""", re.IGNORECASE)
-    for m in script_pat.finditer(content):
-        _add(m.group(1))
-
-    link_pat = re.compile(
-        r"""<link(?=[^>]*href\s*=\s*["']([^"']+)["'])[^>]*rel\s*=\s*["']([^"']+)["'][^>]*>""",
-        re.IGNORECASE,
-    )
-    link_pat2 = re.compile(
-        r"""<link(?=[^>]*rel\s*=\s*["']([^"']+)["'])[^>]*href\s*=\s*["']([^"']+)["'][^>]*>""",
-        re.IGNORECASE,
-    )
-    for m in link_pat.finditer(content):
-        href, rel = m.group(1), m.group(2).lower()
-        if any(r in _STATIC_LINK_RELS for r in re.split(r'\s+', rel)):
-            _add(href)
-    for m in link_pat2.finditer(content):
-        rel, href = m.group(1).lower(), m.group(2)
-        if any(r in _STATIC_LINK_RELS for r in re.split(r'\s+', rel)):
-            _add(href)
-
-    for pat in [
-        re.compile(r"""importScripts\s*\(\s*["']([^"']+)["']"""),
-        re.compile(r"""new\s+Worker\s*\(\s*["']([^"']+)["']"""),
-    ]:
-        for m in pat.finditer(content):
-            _add(m.group(1))
-
-    micropip_pat = re.compile(r"""micropip\.install\s*\(\s*\[([^\]]+)\]""")
-    for m in micropip_pat.finditer(content):
-        for piece in re.split(r''',\s*''', m.group(1)):
-            piece = piece.strip().strip('"').strip("'")
-            _add(piece)
-
-    nav_pattern = re.compile(r"""<a[^>]+href\s*=\s*["']([^"']+)["']""", re.IGNORECASE)
-    nav_urls = {
-        m.group(1).strip() for m in nav_pattern.finditer(content)
-        if urlparse(m.group(1).strip()).scheme in ('http', 'https')
-    }
-
-    return sorted(u for u in found if u not in nav_urls)
-
-
-def _extract_runtime_network_urls(
-    source: str,
-    static_resource_urls: list[str],
-) -> list[str]:
-    """
-    Scan the user's Python application source for http(s) URLs that look like
-    **runtime business network requests** (as opposed to static resources that
-    Panel should localize).
-
-    Strategy:
-      1. Extract every http(s) URL that appears inside a Python string literal
-         (single-quoted, double-quoted, triple-quoted).
-      2. Also look inside common HTTP-calling patterns:
-         * requests.get / post / put / patch / delete / head / options(url, ...)
-         * urllib.request.urlopen / Request(url, ...)
-         * urllib.urlopen / urlretrieve(url, ...)
-         * httpx.get / post / request(url, ...)
-         * aiohttp.ClientSession().get / post(url, ...)
-         * fetch(url, ...) inside embedded JS (inside triple-quoted strings)
-         * XMLHttpRequest.open(method, url, ...) inside embedded JS
-      3. Subtract every URL that is already in *static_resource_urls* (those
-         are already being handled by the localization pipeline and must not
-         leak into the runtime network list).
-      4. Also subtract known Panel/Bokeh CDN prefixes that are clearly static
-         resources even if they somehow appear in user code.
-
-    Returns a sorted, deduplicated list of URLs. These are written to the
-    asset manifest as ``runtimeNetwork``; the service worker routes matching
-    requests through a network-first strategy with an explicit offline error.
-    """
-    urls: set[str] = set()
-
-    # --- Step 1: pull every http(s) URL out of string literals ----------------
-    # Match Python string literals: single, double, and triple-quoted
-    str_lit_pats = [
-        re.compile(r"""(?<!\\)['"]([^'"]*?)(?<!\\)['"]"""),
-        re.compile(r"""'''(.*?)'''""", re.DOTALL),
-        re.compile(r'"""(.*?)"""', re.DOTALL),
-    ]
-    for pat in str_lit_pats:
-        for m in pat.finditer(source):
-            content = m.group(1)
-            for um in re.finditer(r'https?://[^\s\)\]\};,]+', content):
-                urls.add(um.group(0).rstrip("'\",)]}>"))
-
-    # --- Step 2: explicit HTTP-call patterns (catches URLs built via f-strings too)
-    py_http_pats = [
-        re.compile(r"""(?:requests|urllib\.request|urllib|httpx)\s*\.\s*
-                       (?:get|post|put|patch|delete|head|options|request|
-                          urlopen|urlretrieve|Request)\s*\(\s*
-                       ['\"](https?://[^'\"]+)['\"]""", re.VERBOSE),
-        re.compile(r"""aiohttp\s*\.\s*(?:ClientSession\(\)|get|post|request)
-                       [^'"]*['\"](https?://[^'\"]+)['\"]""", re.VERBOSE),
-    ]
-    for pat in py_http_pats:
-        for m in pat.finditer(source):
-            urls.add(m.group(1))
-
-    # --- Step 2b: embedded JS HTTP-call patterns (matches any variable.open(...))
-    js_in_py_pats = [
-        re.compile(r"""fetch\s*\(\s*['\"](https?://[^'\"]+)['\"]"""),
-        re.compile(r"""\w+\s*\.\s*open\s*\(\s*
-                       ['\"][A-Z]+['\"]\s*,\s*['\"](https?://[^'\"]+)['\"]""", re.VERBOSE),
-        re.compile(r"""axios\s*\.\s*(?:get|post|put|patch|delete|request)\s*\(\s*
-                       ['\"](https?://[^'\"]+)['\"]""", re.VERBOSE),
-    ]
-    for pat in js_in_py_pats:
-        for m in pat.finditer(source):
-            urls.add(m.group(1))
-
-    # --- Step 3: subtract static resources we already handle -----------------
-    static_set = set(static_resource_urls)
-    static_prefixes = (
-        CDN_DIST,
-        CDN_ROOT,
-        'https://cdn.jsdelivr.net/pyodide/',
-        'https://cdn.jsdelivr.net/npm/bokeh',
-        'https://cdn.plot.ly/',
-        'https://cdn.jsdelivr.net/npm/echarts',
-        'https://cdn.jsdelivr.net/npm/tabulator-tables',
-        'https://cdn.jsdelivr.net/npm/holoviews',
-        'https://unpkg.com/',
-        'https://cdnjs.cloudflare.com/ajax/libs/',
-    )
-
-    def _is_static(u: str) -> bool:
-        if u in static_set or u.split('?')[0] in static_set:
-            return True
-        return any(u.startswith(pfx) for pfx in static_prefixes)
-
-    runtime = [u for u in urls if not _is_static(u)]
-    return sorted(runtime)
-
-
-_URL_REWRITE_PATTERNS: list[tuple[re.Pattern, str]] = []
-
-
-def _build_rewrite_patterns(mapping: dict[str, str]) -> None:
-    """Build and cache regex patterns for URL rewriting in HTML/JS content."""
-    global _URL_REWRITE_PATTERNS
-    sorted_keys = sorted(mapping.keys(), key=len, reverse=True)
-    patterns: list[tuple[re.Pattern, str]] = []
-    for key in sorted_keys:
-        escaped = re.escape(key)
-        pat = re.compile(r'(?<=[\(\'"=,\s])' + escaped + r'(?=[\?\s\'"\),>])')
-        patterns.append((pat, mapping[key]))
-        without_qs = key.split('?')[0]
-        if without_qs != key and without_qs in mapping:
-            continue
-        if without_qs != key:
-            pat2 = re.compile(r'(?<=[\(\'"=,\s])' + re.escape(without_qs) + r'(?=[\?\s\'"\),>])')
-            patterns.append((pat2, mapping[key]))
-    _URL_REWRITE_PATTERNS = patterns
-
-
-def rewrite_local_urls(content: str, url_mapping: dict[str, str]) -> str:
-    """Rewrite all known CDN/remote URLs in content to their local asset paths."""
-    if not url_mapping:
-        return content
-    _build_rewrite_patterns(url_mapping)
-    for pat, replacement in _URL_REWRITE_PATTERNS:
-        content = pat.sub(replacement, content)
-    for original, local in url_mapping.items():
-        for variant in (original, original.split('?')[0]):
-            if variant in content and variant not in (original, original.split('?')[0] if original != original.split('?')[0] else ''):
-                continue
-            if variant in content:
-                content = content.replace(variant, local)
-    return content
 
 PRE = """
 import asyncio
@@ -764,29 +149,16 @@ class DummyRequirement:
 
 def make_index(files, title=None, manifest=True):
     if manifest:
-        manifest = './site.webmanifest'
-        favicon = './images/favicon.ico'
-        apple_icon = './images/apple-touch-icon.png'
+        manifest = 'site.webmanifest'
+        favicon = 'images/favicon.ico'
+        apple_icon = 'images/apple-touch-icon.png'
     else:
         manifest = favicon = apple_icon = None
     items = {label: './'+os.path.basename(f) for label, f in sorted(files.items())}
-    html = INDEX_TEMPLATE.render(
+    return INDEX_TEMPLATE.render(
         items=items, manifest=manifest, apple_icon=apple_icon,
-        favicon=favicon, title=title, PANEL_CDN='./images/'
+        favicon=favicon, title=title, PANEL_CDN=CDN_DIST
     )
-    html = re.sub(
-        r'<link\s+rel="preconnect"\s+href="https://fonts\.googleapis\.com"\s*>',
-        '', html
-    )
-    html = re.sub(
-        r'<link\s+rel="preconnect"\s+href="https://fonts\.gstatic\.com"[^>]*>',
-        '', html
-    )
-    html = re.sub(
-        r'<link\s+href="https://fonts\.googleapis\.com[^"]*"\s+rel="stylesheet"[^>]*>',
-        '', html
-    )
-    return html
 
 def build_pwa_manifest(files, title=None, **kwargs) -> str:
     if len(files) > 1:
@@ -949,7 +321,7 @@ def script_to_html(
     manifest: str | None = None,
     inline: bool = False,
     compiled: bool = True
-) -> tuple[str, str | None, list[str]]:
+) -> tuple[str, str | None]:
     """
     Converts a Panel or Bokeh script to a standalone WASM Python
     application.
@@ -1082,28 +454,12 @@ def script_to_html(
 
     # Collect resources
     resources = Resources(mode='inline' if inline else 'cdn')
-    css_resource_tags = loading_resources(template, inline)
-    css_resources = list(css_resources) + css_resource_tags if isinstance(css_resources, list) else css_resource_tags
+    css_resources += loading_resources(template, inline)
     with set_curdoc(document):
-        bundle = bundle_resources(document.roots, resources)
-    bokeh_js_str = bundle._render_js()
-    bokeh_css_str = bundle._render_css()
-    extra_js_tags = [INIT_SERVICE_WORKER, bokeh_js_str] if manifest else [bokeh_js_str]
-    bokeh_js = '\n'.join(js_resources + extra_js_tags)
-    bokeh_css = '\n'.join([bokeh_css_str] + css_resources)
-
-    collected_urls = _collect_bundle_urls(bundle, js_resources + extra_js_tags, css_resources)
-    collected_urls.extend(_collect_document_stylesheet_urls(document))
-
-    if config.design:
-        try:
-            design_res = config.design().resolve_resources(cdn=True, include_theme=True)
-            for rtype in ('js', 'css', 'js_modules'):
-                for url in design_res.get(rtype, {}).values():
-                    if url and url not in collected_urls and not url.startswith('data:'):
-                        collected_urls.append(url)
-        except Exception:
-            pass
+        bokeh_js, bokeh_css = bundle_resources(document.roots, resources)
+    extra_js = [INIT_SERVICE_WORKER, bokeh_js] if manifest else [bokeh_js]
+    bokeh_js = '\n'.join(js_resources+extra_js)
+    bokeh_css = '\n'.join([bokeh_css]+css_resources)
 
     # Configure template
     template_variables = document._template_variables
@@ -1134,7 +490,7 @@ def script_to_html(
             .replace('<link rel="stylesheet"', '<link rel="stylesheet" crossorigin="anonymous"')
             .replace('<link rel="icon"', '<link rel="icon" crossorigin="anonymous"')
         )
-    return html, web_worker, collected_urls
+    return html, web_worker
 
 
 def convert_app(
@@ -1151,7 +507,7 @@ def convert_app(
     inline: bool = False,
     compiled: bool = False,
     verbose: bool = True,
-) -> tuple[str, str, list[str]] | None:
+):
     if dest_path is None:
         dest_path = pathlib.Path('./')
     elif not isinstance(dest_path, pathlib.PurePath):
@@ -1161,21 +517,12 @@ def convert_app(
     app_name = '.'.join(os.path.basename(app).split('.')[:-1])
 
     # Obtain source
-    app_source = ''
-    try:
-        app_path = pathlib.Path(app)
-        if app_path.is_file() and app_path.suffix == '.py':
-            app_source = app_path.read_text(encoding='utf-8')
-    except Exception:
-        pass
-    source_exts = _parse_extension_calls_from_source(app_source) if app_source else []
-
     parsed_requirements = collect_python_requirements(
         app, requirements, panel_version=panel_version, http_patch=http_patch
     )
+    # prepare wheels to be available via emscripten MEMFS
     parsed_requirements_rewritten = []
     wheels2pack: dict[str | os.PathLike, str] = {}
-    cdn_wheel_urls: list[str] = []
 
     for req in parsed_requirements:
         try:
@@ -1185,14 +532,13 @@ def convert_app(
                 emfs_wheel_path = 'packed_wheels' + '/' + wheel_name
                 parsed_requirements_rewritten.append(f'emfs:{emfs_wheel_path}')
                 wheels2pack[req_as_url.path] = emfs_wheel_path
-            elif req_as_url.scheme in ('http', 'https') and req.endswith('.whl'):
-                cdn_wheel_urls.append(req)
-                parsed_requirements_rewritten.append(req)
             else:
                 parsed_requirements_rewritten.append(req)
         except ValueError:
+            # no url, so must be a properly formatted requirement
             parsed_requirements_rewritten.append(req)
 
+    # make a zip out of resources
     resources_validated: dict[str | os.PathLike, str] = {}
     for resourcepath in ([] if resources is None else resources):
         commonpath = pathlib.Path(
@@ -1207,14 +553,18 @@ def convert_app(
         else:
             raise ValueError('resources have to be in a folder rootable at the app-directory')
 
-    app_resources_preliminary = {**wheels2pack, **resources_validated}
-    app_resources_packfile = (
-        f'{app_name}.resources.zip' if app_resources_preliminary or cdn_wheel_urls else None
-    )
+    # resources unpacked into emscripten MEMFS
+    app_resources = {**wheels2pack, **resources_validated}
+    if app_resources:
+        app_resources_packfile = f'{app_name}.resources.zip'
+        pack_files(app_resources, os.path.join(dest_path, app_resources_packfile))
+    else:
+        app_resources_packfile = None
 
+    # try to convert the app to a standalone package
     try:
         with set_resource_mode('inline' if inline else 'cdn'):
-            html, worker, collected_urls = script_to_html(
+            html, worker = script_to_html(
                 app,
                 requirements=parsed_requirements_rewritten,
                 app_resources=app_resources_packfile,
@@ -1232,154 +582,18 @@ def convert_app(
         print(f'Failed to convert {app} to {runtime} target: {e}')
         return
 
-    if verbose:
-        print(f'  [assets] Detecting extensions for {app_name}...')
-
-    doc_exts = _detect_extensions_from_document(state.curdoc) if state.curdoc else []
-    all_ext_names: list[str] = []
-    seen_ext: set[str] = set()
-    for e in source_exts + doc_exts:
-        if e not in seen_ext:
-            seen_ext.add(e)
-            all_ext_names.append(e)
-
-    if verbose and all_ext_names:
-        print(f'  [assets] Detected extensions: {", ".join(all_ext_names)}')
-
-    all_resource_urls: list[str] = list(collected_urls)
-    seen_urls: set[str] = set(all_resource_urls)
-
-    def _merge_urls(group: dict[str, list[str]]):
-        for rtype in ('js', 'css', 'js_modules'):
-            for url in group.get(rtype, []):
-                if url and url not in seen_urls and not url.startswith('data:'):
-                    seen_urls.add(url)
-                    all_resource_urls.append(url)
-
-    _merge_urls(_resolve_extension_resource_urls(all_ext_names))
-    _merge_urls(_resolve_design_theme_resource_urls())
-    _merge_urls(_resolve_runtime_resource_urls(runtime, compiled=compiled))
-
-    for req in parsed_requirements:
-        try:
-            req_url = urlparse(req)
-            if req_url.scheme in ('https', 'http') and req not in seen_urls:
-                seen_urls.add(req)
-                all_resource_urls.append(req)
-        except ValueError:
-            pass
-
-    if verbose:
-        print(f'  [assets] Localizing {len(all_resource_urls)} required resource URLs (strict mode)...')
-
-    url_mapping, _assets_path, local_asset_paths = build_local_assets(
-        all_resource_urls,
-        dest_path,
-        assets_subdir='assets',
-        verbose=verbose,
-        strict=True,
-    )
-
-    wheel_emfs_mapping: dict[str, str] = {}
-    for url in cdn_wheel_urls:
-        local_rel = url_mapping.get(url)
-        if not local_rel:
-            raise AssetLocalizationError(
-                f'CDN wheel {url!r} was localized but missing from url_mapping; aborting convert.'
-            )
-        local_abs = str(dest_path / local_rel[2:])
-        wheel_name = os.path.basename(urlparse(url).path)
-        emfs_path = 'packed_wheels' + '/' + wheel_name
-        wheels2pack[local_abs] = emfs_path
-        wheel_emfs_mapping[url] = f'emfs:{emfs_path}'
-        if verbose:
-            print(f'  [asset] wheel packed into MEMFS: {wheel_name} -> {emfs_path}')
-
-    app_resources = {**wheels2pack, **resources_validated}
-    if app_resources and app_resources_packfile:
-        pack_files(app_resources, os.path.join(dest_path, app_resources_packfile))
-        if verbose:
-            print(f'  [asset] resources.zip created with {len(app_resources)} entries')
-
-    runtime_network = _extract_runtime_network_urls(app_source, all_resource_urls)
-    if verbose and runtime_network:
-        print(f'  [offline-policy] {len(runtime_network)} runtime network URL(s) detected '
-              f'(network-first, offline → explicit error):')
-        for u in runtime_network:
-            print(f'    • {u}')
-
-    manifest_data = {
-        'version': 1,
-        'extensions': all_ext_names,
-        'mapping': url_mapping,
-        'wheel_emfs_mapping': wheel_emfs_mapping,
-        'assets': local_asset_paths,
-        'offlinePolicy': {
-            'static': 'cache-only',
-            'runtimeNetwork': runtime_network,
-            'runtimeStrategy': 'network-first',
-        },
-    }
-    manifest_path = dest_path / f'{app_name}.assets.json'
-    manifest_path.write_text(
-        json.dumps(manifest_data, indent=2, sort_keys=True),
-        encoding='utf-8',
-    )
-
-    html = rewrite_local_urls(html, wheel_emfs_mapping)
-    html = rewrite_local_urls(html, url_mapping)
-    if worker:
-        worker = rewrite_local_urls(worker, wheel_emfs_mapping)
-        worker = rewrite_local_urls(worker, url_mapping)
-
-    remaining_html = _find_remaining_known_urls(html, all_resource_urls)
-    remaining_worker = (
-        _find_remaining_known_urls(worker, all_resource_urls) if worker else []
-    )
-    if remaining_html or remaining_worker:
-        remaining = sorted(set(remaining_html) | set(remaining_worker))
-        raise AssetLocalizationError(
-            f'Strict check failed: {len(remaining)} CDN URL(s) still present in output '
-            f'after rewriting:\n' + '\n'.join(f'  - {u!r}' for u in remaining)
-        )
-    if verbose:
-        print('  [assets] Strict CDN check passed — no remote URLs remain in HTML/worker.')
-
-    # Collect all resources that should be cached by the service worker
-    # (now only local paths — no remote CDN URLs)
-    all_resources: list[str] = list(local_asset_paths)
-    seen = set(all_resources)
-
-    def _add_res(path: str):
-        if path and path not in seen:
-            seen.add(path)
-            all_resources.append(path)
-
     # write out the app
     filename = f'{app_name}.html'
-    _add_res(f'./{filename}')
-    _add_res(f'./{app_name}.assets.json')
 
     with open(dest_path / filename, 'w', encoding='utf-8') as out:
         out.write(html)
     if 'worker' in runtime and worker:
         ext = 'py' if runtime.startswith('pyscript') else 'js'
-        worker_filename = f'{app_name}.{ext}'
-        _add_res(f'./{worker_filename}')
-        with open(dest_path / worker_filename, 'w', encoding="utf-8") as out:
+        with open(dest_path / f'{app_name}.{ext}', 'w', encoding="utf-8") as out:
             out.write(worker)
-
-    # Add resources zip to cache list
-    if app_resources_packfile:
-        _add_res(f'./{app_resources_packfile}')
-
-    # Add user-specified resource files (relative paths)
-    for rel_path in resources_validated.values():
-        _add_res(f'./{rel_path}')
-
     if verbose:
         print(f'Successfully converted {app} to {runtime} target and wrote output to {filename}.')
-    return (app_name.replace('_', ' '), filename, all_resources, runtime_network)
+    return (app_name.replace('_', ' '), filename)
 
 
 def _convert_process_pool(
@@ -1388,16 +602,12 @@ def _convert_process_pool(
     max_workers: int = 4,
     requirements: list[str] | t.Literal['auto'] | os.PathLike = 'auto',
     **kwargs
-) -> tuple[dict[str, str], list[str], list[str]]:
+):
     import multiprocessing as mp
 
     from concurrent.futures import ProcessPoolExecutor
 
-    files: dict[str, str] = {}
-    all_resources: list[str] = []
-    all_runtime_network: list[str] = []
-    seen_r: set[str] = set()
-    seen_u: set[str] = set()
+    files = {}
     groups = [apps[i:i+max_workers] for i in range(0, len(apps), max_workers)]
     for group in groups:
         with ProcessPoolExecutor(
@@ -1416,17 +626,9 @@ def _convert_process_pool(
             for future in concurrent.futures.as_completed(futures):
                 result = future.result()
                 if result is not None:
-                    name, filename, resources, runtime_network = result
+                    name, filename = result
                     files[name] = filename
-                    for r in resources:
-                        if r not in seen_r:
-                            seen_r.add(r)
-                            all_resources.append(r)
-                    for u in runtime_network:
-                        if u not in seen_u:
-                            seen_u.add(u)
-                            all_runtime_network.append(u)
-    return files, all_resources, all_runtime_network
+    return files
 
 
 def convert_apps(
@@ -1528,59 +730,24 @@ def convert_apps(
     }
 
     if state._is_pyodide:
-        files_labels: dict[str, str] = {}
-        all_collected_resources: list[str] = []
-        all_runtime_network: list[str] = []
-        seen_resources: set[str] = set()
-        seen_runtime: set[str] = set()
-        for app in apps:
-            result = convert_app(app, dest_path, **kwargs)  # type: ignore
-            if result is not None:
-                name, filename, resources, runtime_network = result
-                files_labels[name] = filename
-                for r in resources:
-                    if r not in seen_resources:
-                        seen_resources.add(r)
-                        all_collected_resources.append(r)
-                for u in runtime_network:
-                    if u not in seen_runtime:
-                        seen_runtime.add(u)
-                        all_runtime_network.append(u)
+        files = {
+            app: convert_app(app, dest_path, **kwargs)  # type: ignore
+            for app in apps
+        }
     else:
-        files_labels, all_collected_resources, all_runtime_network = _convert_process_pool(
+        files = _convert_process_pool(
             apps, dest_path, max_workers=max_workers, **kwargs  # type: ignore
         )
-        seen_resources = set(all_collected_resources)
 
-    def _add_global_res(path: str):
-        if path and path not in seen_resources:
-            seen_resources.add(path)
-            all_collected_resources.append(path)
-
-    if build_index and len(files_labels) >= 1:
-        index = make_index(files_labels, manifest=build_pwa, title=title)
-        remote_in_index = _find_static_resource_remote_urls(index)
-        if remote_in_index:
-            raise AssetLocalizationError(
-                f'Strict check failed: {len(remote_in_index)} CDN URL(s) still present '
-                f'in index.html:\n' + '\n'.join(f'  - {u!r}' for u in remote_in_index)
-            )
+    if build_index and len(files) >= 1:
+        index = make_index(files, manifest=build_pwa, title=title)
         with open(dest_path / 'index.html', 'w') as f:
             f.write(index)
-        _add_global_res('./index.html')
         if verbose:
             print('Successfully wrote index.html.')
 
     if not build_pwa:
         return
-
-    remote_res = [p for p in all_collected_resources
-                  if urlparse(p).scheme in ('http', 'https')]
-    if remote_res:
-        raise AssetLocalizationError(
-            f'Strict check failed: {len(remote_res)} CDN URL(s) leaked into '
-            f'service worker pre-cache list:\n' + '\n'.join(f'  - {u!r}' for u in remote_res)
-        )
 
     # Write icons
     imgs_path = (dest_path / 'images')
@@ -1589,39 +756,23 @@ def convert_apps(
     for img in PWA_IMAGES:
         with open(imgs_path / img.name, 'wb') as f:
             f.write(img.read_bytes())
-        img_path = f'images/{img.name}'
-        img_rel.append(img_path)
-        _add_global_res(f'./{img_path}')
+        img_rel.append(f'images/{img.name}')
     if verbose:
         print('Successfully wrote icons and images.')
 
     # Write manifest
-    manifest_content = build_pwa_manifest(
-        files_labels,
-        title=title,
-        runtime_network=runtime_network_str,
-        **pwa_config,
-    )
+    manifest = build_pwa_manifest(files, title=title, **pwa_config)
     with open(dest_path / 'site.webmanifest', 'w', encoding='utf-8') as f:
-        f.write(manifest_content)
-    _add_global_res('./site.webmanifest')
+        f.write(manifest)
     if verbose:
         print('Successfully wrote site.manifest.')
 
     # Write service worker
-    runtime_network_str = ', '.join([repr(u) for u in sorted(all_runtime_network)])
     worker = SERVICE_WORKER_TEMPLATE.render(
         uuid=uuid.uuid4().hex,
         name=title or 'Panel Pyodide App',
-        pre_cache=', '.join([repr(p) for p in all_collected_resources]),
-        runtime_network=runtime_network_str,
+        pre_cache=', '.join([repr(p) for p in img_rel])
     )
-    remote_in_sw = _find_static_resource_remote_urls(worker)
-    if remote_in_sw:
-        raise AssetLocalizationError(
-            f'Strict check failed: {len(remote_in_sw)} CDN URL(s) still present '
-            f'in serviceWorker.js:\n' + '\n'.join(f'  - {u!r}' for u in remote_in_sw)
-        )
     with open(dest_path / 'serviceWorker.js', 'w', encoding='utf-8') as f:
         f.write(worker)
     if verbose:

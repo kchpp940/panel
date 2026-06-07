@@ -1067,12 +1067,14 @@ class Viewable(Renderable, Layoutable, ServableMixin):
                 if notification:
                     notification_model = notification.get_root(doc)
                     notification_model.name = 'notifications'
+                    doc.on_session_destroyed(notification._server_destroy)
                     doc.add_root(notification_model)
             if config.browser_info and doc is state.curdoc:
                 browser = state.browser_info
                 if browser:
                     browser_model = browser._get_model(doc, model)
                     browser_model.name = 'browser_info'
+                    doc.on_session_destroyed(browser._server_destroy)
                     doc.add_root(browser_model)
         return doc
 

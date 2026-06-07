@@ -365,19 +365,28 @@ class _state(param.Parameterized):
         self.param.trigger('session_info')
 
     def _destroy_session(self, session_context):
-        session_id = session_context.id
-        sessions = self.session_info['sessions']
-        if session_id in sessions and sessions[session_id]['ended'] is None:
-            session = sessions[session_id]
-            if session['rendered'] is not None:
-                self.session_info['live'] -= 1
-            session['ended'] = dt.datetime.now().timestamp()
-            self.param.trigger('session_info')
-        doc = session_context._document
+        doc = None
+        if session_context is not None and hasattr(session_context, 'id'):
+            session_id = session_context.id
+            sessions = self.session_info['sessions']
+            if session_id in sessions and sessions[session_id]['ended'] is None:
+                session = sessions[session_id]
+                if session['rendered'] is not None:
+                    self.session_info['live'] -= 1
+                session['ended'] = dt.datetime.now().timestamp()
+                self.param.trigger('session_info')
+            doc = getattr(session_context, '_document', None)
+
+        # Fall back to curdoc if session_context did not provide a document
+        if doc is None:
+            doc = self.curdoc
+
+        if doc is None:
+            return
 
         # Cleanup periodic callbacks
         if doc in self._periodic:
-            for cb in self._periodic[doc]:
+            for cb in list(self._periodic[doc]):
                 try:
                     cb._cleanup(session_context)
                 except Exception:
@@ -387,18 +396,64 @@ class _state(param.Parameterized):
         # Cleanup Locations
         if doc in self._locations:
             loc = state._locations[doc]
-            loc._server_destroy(session_context)
+            try:
+                loc._server_destroy(session_context)
+            except Exception:
+                pass
             del state._locations[doc]
 
         # Cleanup Notifications
         if doc in self._notifications:
             notification = self._notifications[doc]
-            notification._server_destroy(session_context)
+            try:
+                notification._server_destroy(session_context)
+            except Exception:
+                pass
             del state._notifications[doc]
+
+        # Cleanup BrowserInfo
+        if doc in self._browsers:
+            browser = self._browsers[doc]
+            try:
+                browser._server_destroy(session_context)
+            except Exception:
+                pass
+            del self._browsers[doc]
 
         # Clean up templates
         if doc in self._templates:
             del self._templates[doc]
+
+        # Cleanup change callbacks
+        if doc in self._change_callbacks:
+            del self._change_callbacks[doc]
+
+        # Cleanup onload callbacks
+        if doc in self._onload:
+            del self._onload[doc]
+
+        # Cleanup loaded and connected flags
+        self._loaded.pop(doc, None)
+        self._connected.pop(doc, None)
+
+        # Cleanup stylesheets cache
+        if doc in self._stylesheets:
+            del self._stylesheets[doc]
+
+        # Cleanup extensions
+        if doc in self._extensions_:
+            del self._extensions_[doc]
+
+        # Cleanup session outputs (notebook)
+        if doc in self._session_outputs:
+            del self._session_outputs[doc]
+
+        # Cleanup rel_paths and base_urls
+        self._rel_paths.pop(doc, None)
+        self._base_urls.pop(doc, None)
+
+        # Cleanup thread id
+        self._thread_id_.pop(doc, None)
 
     @property
     def _current_stack(self):
@@ -877,12 +932,18 @@ class _state(param.Parameterized):
         self.kill_all_servers()
         self._curdoc = ContextVar('curdoc', default=None)
         self._indicators.clear()
+        self._browser = None
+        self._browsers.clear()
         self._location = None
         self._locations.clear()
+        self._notification = None
+        self._notifications.clear()
         self._templates.clear()
         self._views.clear()
         self._connected.clear()
         self._loaded.clear()
+        self._onload.clear()
+        self._change_callbacks.clear()
         self.cache.clear()
         self._busy_cleanup_scheduled = None
         with edit_readonly(self):
@@ -896,6 +957,11 @@ class _state(param.Parameterized):
         self._on_session_created.clear()
         self._on_session_destroyed.clear()
         self._stylesheets.clear()
+        self._extensions_.clear()
+        self._session_outputs.clear()
+        self._rel_paths.clear()
+        self._base_urls.clear()
+        self._thread_id_.clear()
         self._scheduled.clear()
         self._periodic.clear()
 

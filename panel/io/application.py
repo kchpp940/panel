@@ -175,6 +175,10 @@ class Application(BkApplication):
             logger.info(LOG_SESSION_DESTROYED, id(doc))
         doc.destroy = partial(_destroy_document, doc) # type: ignore
         doc.on_event('document_ready', partial(state._schedule_on_load, doc))
+        # Register state._destroy_session first to ensure cleanup runs before
+        # any user-registered callbacks
+        if state._destroy_session not in doc.session_destroyed_callbacks:
+            doc.on_session_destroyed(state._destroy_session)
         doc.on_session_destroyed(_log_session_destroyed)
 
     def process_request(self, request) -> dict[str, t.Any]:

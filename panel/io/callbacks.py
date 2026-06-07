@@ -172,6 +172,8 @@ class PeriodicCallback(param.Parameterized):
         self._start_time = time.time()
         if state.curdoc and state.curdoc.session_context and not state._is_pyodide and self.session_scoped:
             self._doc = state.curdoc
+            if self._cleanup not in self._doc.session_destroyed_callbacks:
+                self._doc.on_session_destroyed(self._cleanup)
             if state._unblocked(state.curdoc):
                 self._cb = self._doc.add_periodic_callback(self._periodic_callback, self.period)
             else:
@@ -202,17 +204,35 @@ class PeriodicCallback(param.Parameterized):
             self.counter = 0
         self._timeout = None
         if self._doc and self._cb and not state._is_pyodide:
-            if self._doc._session_context:
-                self._doc.callbacks.remove_session_callback(self._cb)
+            session_context = self._doc._session_context
+            if callable(session_context):
+                try:
+                    session_context = session_context()
+                except Exception:
+                    session_context = None
+            if session_context:
+                try:
+                    self._doc.callbacks.remove_session_callback(self._cb)
+                except Exception:
+                    pass
             elif self._cb in self._doc.callbacks.session_callbacks:
-                self._doc.callbacks._session_callbacks.remove(self._cb)
+                try:
+                    self._doc.callbacks._session_callbacks.remove(self._cb)
+                except Exception:
+                    pass
         elif self._cb:
-            self._cb.cancel()
+            try:
+                self._cb.cancel()
+            except Exception:
+                pass
         self._cb = None
         doc = self._doc or curdoc_locked()
         if doc and self.session_scoped:
-            doc.callbacks.session_destroyed_callbacks = {
-                cb for cb in doc.callbacks.session_destroyed_callbacks
-                if cb is not self._cleanup
-            }
+            try:
+                doc.callbacks.session_destroyed_callbacks = {
+                    cb for cb in doc.callbacks.session_destroyed_callbacks
+                    if cb is not self._cleanup
+                }
+            except Exception:
+                pass
             self._doc = None
