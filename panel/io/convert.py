@@ -463,61 +463,103 @@ def build_local_assets(
     return url_mapping, assets_path, local_rel_paths
 
 
-def _find_remaining_remote_urls(content: str, known_urls: list[str]) -> list[str]:
+def _find_remaining_known_urls(content: str, known_resource_urls: list[str]) -> list[str]:
     """
-    Scan *content* for any remaining http(s) URLs that appear in *known_urls*
-    (i.e. resources we tried to localize). Returns the list of URLs still present.
+    Strict, authoritative check: scan *content* for any http(s) URLs from
+    *known_resource_urls* (i.e. the exact list of static resources we tried to
+    localize: extension JS/CSS, theme CSS, Pyodide/PyScript JS/CSS, wheels,
+    user resources). This CANNOT produce false positives because every URL we
+    check was explicitly added to the localization manifest.
+
+    Used per-app after rewriting HTML and worker content.
     """
     remaining: list[str] = []
-    for url in known_urls:
-        if not url or not urlparse(url).scheme in ('http', 'https'):
+    for url in known_resource_urls:
+        if not url or urlparse(url).scheme not in ('http', 'https'):
             continue
         if url in content or url.split('?')[0] in content:
             remaining.append(url)
     return remaining
 
 
-def _find_any_remote_resource_urls(content: str) -> list[str]:
+# Resource-bearing <link rel> values. Other values (preconnect, dns-prefetch,
+# canonical, alternate, author, ...) are business-level optimizations/metadata
+# and MUST NOT trigger a convert-time failure.
+_STATIC_LINK_RELS = {
+    'stylesheet', 'icon', 'manifest', 'preload', 'modulepreload',
+    'apple-touch-icon', 'apple-touch-startup-image',
+}
+
+
+def _find_static_resource_remote_urls(content: str) -> list[str]:
     """
-    Scan *content* for ANY http(s) URLs that appear to be used as web resources:
-    - inside <script src="...">
-    - inside <link href="..."> (except purely navigational rels)
-    - inside fetch('...'), importScripts('...'), new Worker('...')
-    - inside micropip.install(['...'])
-    - inside JSON string values that look like URLs in config blobs
-    - Navigational <a href="..."> links are explicitly excluded.
-    Returns a sorted list of unique URLs found.
+    Conservative secondary safety-net scan: look for http(s) URLs ONLY in
+    unambiguous STATIC-RESOURCE loading contexts. Business API calls, remote
+    data URLs, external image references inside user code etc. are explicitly
+    NOT flagged.
+
+    Patterns checked:
+      * <script src="https://...">
+      * <link href="https://..." rel="stylesheet|icon|manifest|preload|...">
+        (only resource-bearing <link rel> values — see _STATIC_LINK_RELS)
+      * importScripts("https://...")    — worker static imports
+      * new Worker("https://...")        — worker source URL
+      * micropip.install(["https://...whl", ...])  — wheel requirements
+
+    Navigational <a href="https://..."> links are always excluded.
+
+    Used only for files that don't go through the per-app localization pipeline
+    (index.html, serviceWorker.js) and for the pre-cache list sanity check.
     """
     found: list[str] = []
     seen: set[str] = set()
 
     def _add(u: str):
         u_clean = u.strip().rstrip('"').rstrip("'")
-        if u_clean and u_clean not in seen and urlparse(u_clean).scheme in ('http', 'https'):
+        if (u_clean and u_clean not in seen
+                and urlparse(u_clean).scheme in ('http', 'https')):
             seen.add(u_clean)
             found.append(u_clean)
 
-    for pattern in [
-        re.compile(r"""<script[^>]+src\s*=\s*["']([^"']+)["']""", re.IGNORECASE),
-        re.compile(r"""<link[^>]+href\s*=\s*["']([^"']+)["']""", re.IGNORECASE),
+    script_pat = re.compile(r"""<script[^>]+src\s*=\s*["']([^"']+)["']""", re.IGNORECASE)
+    for m in script_pat.finditer(content):
+        _add(m.group(1))
+
+    link_pat = re.compile(
+        r"""<link(?=[^>]*href\s*=\s*["']([^"']+)["'])[^>]*rel\s*=\s*["']([^"']+)["'][^>]*>""",
+        re.IGNORECASE,
+    )
+    link_pat2 = re.compile(
+        r"""<link(?=[^>]*rel\s*=\s*["']([^"']+)["'])[^>]*href\s*=\s*["']([^"']+)["'][^>]*>""",
+        re.IGNORECASE,
+    )
+    for m in link_pat.finditer(content):
+        href, rel = m.group(1), m.group(2).lower()
+        if any(r in _STATIC_LINK_RELS for r in re.split(r'\s+', rel)):
+            _add(href)
+    for m in link_pat2.finditer(content):
+        rel, href = m.group(1).lower(), m.group(2)
+        if any(r in _STATIC_LINK_RELS for r in re.split(r'\s+', rel)):
+            _add(href)
+
+    for pat in [
         re.compile(r"""importScripts\s*\(\s*["']([^"']+)["']"""),
-        re.compile(r"""fetch\s*\(\s*["']([^"']+)["']"""),
         re.compile(r"""new\s+Worker\s*\(\s*["']([^"']+)["']"""),
-        re.compile(r"""micropip\.install\s*\(\s*\[([^\]]+)\]"""),
-        re.compile(r"""(?<=[\(\'"=,\s])https?://[^\s\)\'"<>,]+"""),
     ]:
-        for m in pattern.finditer(content):
-            val = m.group(1) if m.groups() else m.group(0)
-            if ',' in val:
-                for piece in re.split(r''',\s*''', val):
-                    piece = piece.strip().strip('"').strip("'")
-                    _add(piece)
-            else:
-                _add(val)
+        for m in pat.finditer(content):
+            _add(m.group(1))
+
+    micropip_pat = re.compile(r"""micropip\.install\s*\(\s*\[([^\]]+)\]""")
+    for m in micropip_pat.finditer(content):
+        for piece in re.split(r''',\s*''', m.group(1)):
+            piece = piece.strip().strip('"').strip("'")
+            _add(piece)
 
     nav_pattern = re.compile(r"""<a[^>]+href\s*=\s*["']([^"']+)["']""", re.IGNORECASE)
-    nav_urls = {m.group(1).strip() for m in nav_pattern.finditer(content)
-                if urlparse(m.group(1).strip()).scheme in ('http', 'https')}
+    nav_urls = {
+        m.group(1).strip() for m in nav_pattern.finditer(content)
+        if urlparse(m.group(1).strip()).scheme in ('http', 'https')
+    }
 
     return sorted(u for u in found if u not in nav_urls)
 
@@ -1184,9 +1226,9 @@ def convert_app(
         worker = rewrite_local_urls(worker, wheel_emfs_mapping)
         worker = rewrite_local_urls(worker, url_mapping)
 
-    remaining_html = _find_remaining_remote_urls(html, all_resource_urls)
+    remaining_html = _find_remaining_known_urls(html, all_resource_urls)
     remaining_worker = (
-        _find_remaining_remote_urls(worker, all_resource_urls) if worker else []
+        _find_remaining_known_urls(worker, all_resource_urls) if worker else []
     )
     if remaining_html or remaining_worker:
         remaining = sorted(set(remaining_html) | set(remaining_worker))
@@ -1399,7 +1441,7 @@ def convert_apps(
 
     if build_index and len(files_labels) >= 1:
         index = make_index(files_labels, manifest=build_pwa, title=title)
-        remote_in_index = _find_any_remote_resource_urls(index)
+        remote_in_index = _find_static_resource_remote_urls(index)
         if remote_in_index:
             raise AssetLocalizationError(
                 f'Strict check failed: {len(remote_in_index)} CDN URL(s) still present '
@@ -1449,7 +1491,7 @@ def convert_apps(
         name=title or 'Panel Pyodide App',
         pre_cache=', '.join([repr(p) for p in all_collected_resources])
     )
-    remote_in_sw = _find_any_remote_resource_urls(worker)
+    remote_in_sw = _find_static_resource_remote_urls(worker)
     if remote_in_sw:
         raise AssetLocalizationError(
             f'Strict check failed: {len(remote_in_sw)} CDN URL(s) still present '
