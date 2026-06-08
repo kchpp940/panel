@@ -36,7 +36,30 @@ function updateURLParameter(url, param, paramVal) {
   return baseURL + '?' + newAdditionalURL + rows_txt
 }
 
+function findTemplateActionsModel() {
+  if (typeof Bokeh !== 'undefined' && Bokeh.documents && Bokeh.documents.length > 0) {
+    const doc = Bokeh.documents[0]
+    for (const root of doc.roots()) {
+      if (root.properties && (root.properties.toggle_theme !== undefined || root.properties.set_theme_name !== undefined)) {
+        return root
+      }
+      if (root.model && root.model.name && root.model.name === 'TemplateActions') {
+        return root
+      }
+    }
+  }
+  return null
+}
+
 function toggleLightDarkTheme(theme) {
+  const actions = findTemplateActionsModel()
+  if (actions) {
+    if (actions.toggle_theme !== undefined) {
+      actions.toggle_theme = actions.toggle_theme + 1
+      return
+    }
+  }
+  // Fallback to page reload if no TemplateActions found
   var href = window.location.href
   if (theme === 'default') {
     theme = 'dark'
@@ -62,7 +85,7 @@ function isFullScreen() {
   return (
     document.fullscreenElement ||
     document.webkitFullscreenElement ||
-    document.mozFullScreenElement ||
+    document.mozFullscreenElement ||
     document.msFullscreenElement
   )
 }

@@ -3,6 +3,7 @@ from __future__ import annotations
 import functools
 import os
 import pathlib
+import re
 import typing as t
 
 import param
@@ -92,7 +93,7 @@ class DarkTheme(Theme):
 
 class Design(param.Parameterized, ResourceComponent):
 
-    theme = param.ClassSelector(class_=Theme, constant=True)
+    theme = param.ClassSelector(class_=Theme)
 
     # Defines parameter overrides to apply to each model
     modifiers: t.ClassVar[dict[type[Viewable], dict[str, t.Any]]] = {}
@@ -115,6 +116,208 @@ class Design(param.Parameterized, ResourceComponent):
             theme = 'default'
         theme = self._themes[theme]()
         super().__init__(theme=theme, **params)
+
+    #----------------------------------------------------------------
+    # Theme extraction helpers
+    #----------------------------------------------------------------
+
+    @staticmethod
+    def _extract_css_variables_from_text(css_text: str) -> dict[str, str]:
+        variables: dict[str, str] = {}
+        pattern = re.compile(r'(--[\w-]+)\s*:\s*([^;]+);?')
+        for match in pattern.finditer(css_text):
+            name = match.group(1)
+            value = match.group(2).strip()
+            variables[name] = value
+        return variables
+
+    def get_css_variables(self) -> dict[str, str]:
+        """
+        Extracts CSS custom properties (variables) from the current theme's
+        base_css and css files.
+
+        Returns
+        -------
+        Dict mapping CSS variable names to their values.
+        """
+        variables: dict[str, str] = {}
+        theme = self.theme
+        if theme is None:
+            return variables
+        for attr in ('base_css', 'css'):
+            css_path = getattr(theme, attr, None)
+            if css_path is None:
+                continue
+            css_file = pathlib.Path(css_path)
+            if css_file.is_file():
+                try:
+                    css_text = css_file.read_text(encoding='utf-8')
+                    variables.update(self._extract_css_variables_from_text(css_text))
+                except Exception:
+                    pass
+        return variables
+
+    def get_base_css_text(self) -> str:
+        """
+        Returns the base CSS text for the current theme.
+        """
+        theme = self.theme
+        if theme is None or theme.base_css is None:
+            return ''
+        css_file = pathlib.Path(theme.base_css)
+        if css_file.is_file():
+            try:
+                return css_file.read_text(encoding='utf-8')
+            except Exception:
+                return ''
+        return ''
+
+    def get_theme_css_text(self) -> str:
+        """
+        Returns the theme-specific CSS text (not the base) for the current theme.
+        """
+        theme = self.theme
+        if theme is None or theme.css is None:
+            return ''
+        css_file = pathlib.Path(theme.css)
+        if css_file.is_file():
+            try:
+                return css_file.read_text(encoding='utf-8')
+            except Exception:
+                return ''
+        return ''
+
+    def is_dark_theme(self) -> bool:
+        """
+        Returns whether the current theme is a dark theme.
+        """
+        return isinstance(self.theme, DarkTheme)
+
+    def get_design_name(self) -> str:
+        """
+        Returns the lowercase name of this design (e.g. 'fast', 'bootstrap').
+        """
+        return type(self).__name__.lower()
+
+    def get_theme_name(self) -> str:
+        """
+        Returns the short name of the current theme ('default' or 'dark').
+        """
+        theme = self.theme
+        if theme is None:
+            return 'default'
+        return getattr(theme, '_name', 'default')
+
+    def get_bokeh_theme_json(self) -> dict[str, t.Any]:
+        """
+        Returns a JSON-serializable dict representation of the Bokeh theme.
+        """
+        bokeh_theme = getattr(self.theme, 'bokeh_theme', None)
+        if bokeh_theme is None:
+            return {}
+        if isinstance(bokeh_theme, str):
+            bokeh_theme_obj = built_in_themes.get(bokeh_theme)
+            if bokeh_theme_obj is not None:
+                return dict(bokeh_theme_obj._json)
+            return {}
+        return dict(bokeh_theme._json)
+
+    #----------------------------------------------------------------
+    # Runtime theme switching
+    #----------------------------------------------------------------
+
+    def set_theme(self, theme: t.Union[str, type[Theme], Theme]) -> None:
+        """
+        Switches the theme at runtime. Updates the internal theme and
+        reapplies it to all components that are using this Design.
+
+        Parameters
+        ----------
+        theme : str, Theme class, or Theme instance
+            - If a string, must be a key in the Design's _themes dict
+              (e.g. 'default', 'dark').
+            - If a class, must be a subclass of Theme.
+            - If an instance, must be an instance of Theme.
+        """
+        if isinstance(theme, Theme):
+            new_theme = theme
+        elif isinstance(theme, type) and issubclass(theme, Theme):
+            new_theme = theme()
+        elif isinstance(theme, str):
+            if theme not in self._themes:
+                raise ValueError(
+                    f"Theme '{theme}' is not valid for {type(self).__name__}. "
+                    f"Valid themes: {list(self._themes.keys())}"
+                )
+            new_theme = self._themes[theme]()
+        else:
+            raise TypeError(
+                f"theme must be str, Theme class, or Theme instance, got {type(theme).__name__}"
+            )
+
+        with param.edit_constant(self):
+            self.theme = new_theme
+
+        self._reapply_to_active_documents()
+
+    def _reapply_to_active_documents(self) -> None:
+        """
+        Reapplies the design with the new theme to all active documents
+        where this design is being used.
+        """
+        from ..io.state import state
+
+        for doc, template in state._templates.items():
+            if not hasattr(template, '_design') or template._design is not self:
+                continue
+            self._reapply_to_document(doc, template)
+
+    def _reapply_to_document(self, doc: Document, template) -> None:
+        """
+        Reapplies the design with the new theme to a specific document.
+        """
+        from ..io.state import state
+
+        if doc in state._stylesheets:
+            cache = state._stylesheets[doc]
+        else:
+            state._stylesheets[doc] = cache = {}
+
+        if self.theme and self.theme.bokeh_theme and doc:
+            doc.theme = self.theme.bokeh_theme
+
+        for ref, (root_view, root_model, view_doc, comm) in list(state._views.items()):
+            if view_doc is not doc:
+                continue
+            if ref in state._fake_roots:
+                continue
+            with doc.models.freeze():
+                try:
+                    self._reapply(root_view, root_model, isolated=False, cache=cache, document=doc)
+                except Exception:
+                    pass
+
+        theme_manager = getattr(template, '_theme_manager', None)
+        if theme_manager is not None:
+            self._sync_theme_manager(theme_manager)
+
+    def _sync_theme_manager(self, theme_manager_model) -> None:
+        """
+        Syncs the current design/theme state to a ThemeManager model
+        that will propagate changes to the frontend.
+        """
+        try:
+            theme_manager_model.design = self.get_design_name()
+            theme_manager_model.theme = self.get_theme_name()
+            theme_manager_model.theme_name = type(self.theme).__name__ if self.theme else ''
+            theme_manager_model.base_css = self.get_base_css_text()
+            theme_manager_model.theme_css = self.get_theme_css_text()
+            theme_manager_model.css_variables = self.get_css_variables()
+            theme_manager_model.design_name = type(self).__name__
+            theme_manager_model.is_dark = self.is_dark_theme()
+            theme_manager_model.bokeh_theme_json = self.get_bokeh_theme_json()
+        except Exception:
+            pass
 
     def _reapply(
         self, viewable: Viewable, root: Model, old_models: list[Model] | None = None,

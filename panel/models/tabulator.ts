@@ -63,20 +63,6 @@ export class SelectionEvent extends ModelEvent {
   }
 }
 
-export class ColumnProfileEvent extends ModelEvent {
-  constructor(readonly action: string, readonly profile?: any, readonly name?: string) {
-    super()
-  }
-
-  protected override get event_values(): Attrs {
-    return {model: this.origin, action: this.action, profile: this.profile, name: this.name}
-  }
-
-  static {
-    this.prototype.event_name = "column-profile"
-  }
-}
-
 declare const Tabulator: any
 
 function find_group(key: any, value: string, records: any[]): any {
@@ -412,37 +398,30 @@ export class DataTabulatorView extends HTMLBoxView {
   _automatic_page_size: boolean = false
   _last_after_resize_el_width: number | null = null
   _last_after_resize_el_height: number | null = null
-  _updating_column_state: boolean = false
-  _updating_profile: boolean = false
-  _profile_toolbar: HTMLDivElement | null = null
-  _profile_select: HTMLSelectElement | null = null
-  _profile_name_input: HTMLInputElement | null = null
-  _profile_save_btn: HTMLButtonElement | null = null
-  _profile_delete_btn: HTMLButtonElement | null = null
-  _profile_groupby_select: HTMLSelectElement | null = null
+
+  _theme_bound: (() => void) | null = null
+
+  _on_panel_theme_change(e: CustomEvent): void {
+    const detail = (e as any).detail
+    if (detail && detail.is_dark !== undefined) {
+      this._updating_scroll = true
+      this.tabulator?.redraw(true)
+      this._updating_scroll = false
+      this.setStyles()
+    }
+  }
 
   override connect_signals(): void {
     super.connect_signals()
     const {
       configuration, layout, columns, groupby, visible, download,
       children, expanded, cell_styles, hidden_columns, page_size,
-      page, max_page, frozen_rows, sorters, filters, theme_classes,
-      column_widths, column_order, column_profiles, active_profile,
+      page, max_page, frozen_rows, sorters, theme_classes,
     } = this.model.properties
 
-    this.on_change([configuration, layout], debounce(() => {
+    this.on_change([configuration, layout, groupby], debounce(() => {
       this.invalidate_render()
     }, 20, false))
-
-    this.on_change(groupby, debounce(() => {
-      this.invalidate_render()
-      this.syncColumnStateFromFrontend()
-      this.renderProfileToolbar()
-    }, 20, false))
-
-    this.on_change(column_profiles, () => {
-      this.renderProfileToolbar()
-    })
 
     this.on_change(visible, () => {
       if (this.model.visible) {
@@ -495,26 +474,8 @@ export class DataTabulatorView extends HTMLBoxView {
       this.setStyles()
     })
     this.on_change(hidden_columns, () => {
-      if (!this._updating_column_state) {
-        this.setHidden()
-        this.tabulator.redraw(true)
-      }
-    })
-    this.on_change(column_widths, () => {
-      if (!this._updating_column_state) {
-        this.setColumnWidths()
-      }
-    })
-    this.on_change(column_order, () => {
-      if (!this._updating_column_state) {
-        this.setColumnOrder()
-      }
-    })
-    this.on_change(active_profile, () => {
-      this.renderProfileToolbar()
-      if (!this._updating_profile) {
-        this.applyActiveProfile()
-      }
+      this.setHidden()
+      this.tabulator.redraw(true)
     })
     this.on_change(page_size, () => this.setPageSize())
     this.on_change(page, () => {
@@ -526,7 +487,6 @@ export class DataTabulatorView extends HTMLBoxView {
     this.on_change(max_page, () => this.setMaxPage())
     this.on_change(frozen_rows, () => this.setFrozen())
     this.on_change(sorters, () => this.setSorters())
-    this.on_change(filters, () => this.setFilters())
     this.on_change(theme_classes, () => this.setCSSClasses(this.tabulator.element))
 
     this.on_change(this.model.source.properties.data, () => {
@@ -731,6 +691,10 @@ export class DataTabulatorView extends HTMLBoxView {
     this._resize_pending = false
     this._last_after_resize_el_width = null
     this._last_after_resize_el_height = null
+    if (this._theme_bound != null) {
+      document.removeEventListener('panel:themechange', this._theme_bound as EventListener)
+      this._theme_bound = null
+    }
     this.tabulator?.destroy()
     super.remove()
   }
@@ -742,14 +706,17 @@ export class DataTabulatorView extends HTMLBoxView {
     this._last_after_resize_el_height = null
     this._initializing = true
     this._building = true
-    const container = div({style: {display: "flex", flexDirection: "column", width: "100%", height: "100%"}})
-    this._profile_toolbar = this.createProfileToolbar()
-    container.appendChild(this._profile_toolbar)
-    const el = div({style: {width: "100%", height: "100%", visibility: "hidden", flex: "1 1 auto", minHeight: 0}})
+    const container = div({style: {display: "contents"}})
+    const el = div({style: {width: "100%", height: "100%", visibility: "hidden"}})
     this.container = el
     this.setCSSClasses(el)
     container.appendChild(el)
     this.shadow_el.appendChild(container)
+
+    if (this._theme_bound == null) {
+      this._theme_bound = this._on_panel_theme_change.bind(this)
+      document.addEventListener('panel:themechange', this._theme_bound as EventListener)
+    }
 
     const configuration = this.getConfiguration()
     this.tabulator = new Tabulator(el, configuration)
@@ -803,13 +770,7 @@ export class DataTabulatorView extends HTMLBoxView {
     this.tabulator.on("cellEdited", (cell: any) => this.cellEdited(cell))
     this.tabulator.on("dataFiltering", (filters: any) => {
       this.record_scroll()
-      this._updating_column_state = true
-      try {
-        this.model.filters = filters
-      } finally {
-        this._updating_column_state = false
-      }
-      this.syncColumnStateFromFrontend()
+      this.model.filters = filters
     })
     this.tabulator.on("dataFiltered", (_: any, rows: any[]) => {
       if (this._building) {
@@ -840,27 +801,11 @@ export class DataTabulatorView extends HTMLBoxView {
           sorts.push({field: s.field, dir: s.dir})
         }
       }
-      this._updating_sort = true
-      this._updating_column_state = true
-      try {
+      if (this.model.pagination !== "remote") {
+        this._updating_sort = true
         this.model.sorters = sorts.reverse()
-      } finally {
         this._updating_sort = false
-        this._updating_column_state = false
       }
-      this.syncColumnStateFromFrontend()
-    })
-    this.tabulator.on("columnResized", (column: any) => {
-      this.syncColumnStateFromFrontend()
-    })
-    this.tabulator.on("columnVisibilityChanged", (column: any, visible: boolean) => {
-      this.syncColumnStateFromFrontend()
-    })
-    this.tabulator.on("columnMoved", (column: any, columns: any[]) => {
-      this.syncColumnStateFromFrontend()
-    })
-    this.tabulator.on("groupVisibilityChanged", (group: any, visible: boolean) => {
-      this.syncColumnStateFromFrontend()
     })
   }
 
@@ -888,11 +833,6 @@ export class DataTabulatorView extends HTMLBoxView {
       this.tabulator.setPage(this.model.page)
     }
     this._initializing = this._building = false
-    this.syncColumnStateFromFrontend()
-    this.renderProfileToolbar()
-    if (this.model.active_profile) {
-      this.applyActiveProfile()
-    }
     this._request_resize_redraw()
   }
 
@@ -1460,21 +1400,6 @@ export class DataTabulatorView extends HTMLBoxView {
     this.tabulator.setSort(this.sorters)
   }
 
-  setFilters(): void {
-    if (this._updating_column_state) {
-      return
-    }
-    if (this._building || this._initializing) {
-      return
-    }
-    const filters = this.model.filters
-    if (!filters || filters.length === 0) {
-      this.tabulator.clearFilter(true)
-    } else {
-      this.tabulator.setFilter(filters)
-    }
-  }
-
   setStyles(): void {
     const style_data = this.model.cell_styles.data
     if (this.tabulator == null || this.tabulator.getDataCount() == 0 || style_data == null || !style_data.size) {
@@ -1518,334 +1443,6 @@ export class DataTabulatorView extends HTMLBoxView {
         column.hide()
       } else {
         column.show()
-      }
-    }
-  }
-
-  getColumnState(): any {
-    const column_widths: any = {}
-    const hidden_columns: string[] = []
-    const column_order: string[] = []
-    for (const column of this.tabulator.getColumns()) {
-      const col = column._column
-      if (col.field == "_index") {
-        continue
-      }
-      column_order.push(col.field)
-      if (!column.isVisible()) {
-        hidden_columns.push(col.field)
-      }
-      const width = column.getWidth()
-      if (width != null) {
-        column_widths[col.field] = width
-      }
-    }
-    const sorters: any[] = []
-    for (const sort of this.model.sorters) {
-      sorters.push({field: sort.field, dir: sort.dir})
-    }
-    const filters: any[] = []
-    for (const filt of this.model.filters) {
-      filters.push({...filt})
-    }
-    const groupby = [...this.model.groupby]
-    return {
-      column_widths,
-      hidden_columns,
-      column_order,
-      sorters,
-      filters,
-      groupby,
-    }
-  }
-
-  syncColumnStateFromFrontend(): void {
-    if (this._updating_column_state || this._building || this._initializing) {
-      return
-    }
-    this._updating_column_state = true
-    try {
-      const state = this.getColumnState()
-      this.model.column_widths = state.column_widths
-      this.model.hidden_columns = state.hidden_columns
-      this.model.column_order = state.column_order
-    } finally {
-      this._updating_column_state = false
-    }
-  }
-
-  setColumnWidths(): void {
-    const widths = this.model.column_widths
-    if (!widths) {
-      return
-    }
-    for (const column of this.tabulator.getColumns()) {
-      const col = column._column
-      if (col.field in widths) {
-        try {
-          this.tabulator.setColumnWidth(col.field, widths[col.field], true)
-        } catch (e) {}
-      }
-    }
-  }
-
-  setColumnOrder(): void {
-    const order = this.model.column_order
-    if (!order || order.length === 0) {
-      return
-    }
-    const current_columns = this.tabulator.getColumns()
-    const current_order: string[] = []
-    for (const col of current_columns) {
-      const field = col._column.field
-      if (field !== "_index") {
-        current_order.push(field)
-      }
-    }
-    if (JSON.stringify(current_order) === JSON.stringify(order)) {
-      return
-    }
-    try {
-      for (let i = 0; i < order.length; i++) {
-        const field = order[i]
-        this.tabulator.moveColumn(field, i + 1, true)
-      }
-    } catch (e) {}
-  }
-
-  applyActiveProfile(): void {
-    const active_name = this.model.active_profile
-    if (!active_name) {
-      return
-    }
-    const profiles = this.model.column_profiles
-    if (!profiles || !(active_name in profiles)) {
-      return
-    }
-    const profile = profiles[active_name]
-    this._updating_profile = true
-    this._updating_column_state = true
-    this._updating_sort = true
-    try {
-      if (profile.hidden_columns != null) {
-        this.model.hidden_columns = profile.hidden_columns
-        this.setHidden()
-      }
-      if (profile.column_widths != null) {
-        this.model.column_widths = profile.column_widths
-        this.setColumnWidths()
-      }
-      if (profile.column_order != null) {
-        this.model.column_order = profile.column_order
-        this.setColumnOrder()
-      }
-      if (profile.sorters != null) {
-        this.model.sorters = profile.sorters
-        this.setSorters()
-        if (this.model.pagination === "remote") {
-          this.requestPage(this.model.page)
-        }
-      }
-      if (profile.filters != null) {
-        this.model.filters = profile.filters
-        this.setFilters()
-        if (this.model.pagination === "remote") {
-          this.requestPage(this.model.page)
-        }
-      }
-      if (profile.groupby != null) {
-        this.model.groupby = profile.groupby
-        this.setGroupBy()
-      }
-      this.tabulator.redraw(true)
-      this.renderProfileToolbar()
-    } finally {
-      this._updating_profile = false
-      this._updating_column_state = false
-      this._updating_sort = false
-    }
-  }
-
-  createProfileToolbar(): HTMLDivElement {
-    const toolbar = document.createElement("div")
-    toolbar.className = "pnx-tabulator-profile-toolbar"
-    toolbar.style.display = "flex"
-    toolbar.style.alignItems = "center"
-    toolbar.style.gap = "8px"
-    toolbar.style.padding = "6px 8px"
-    toolbar.style.borderBottom = "1px solid var(--border-subtle, #e0e0e0)"
-    toolbar.style.background = "var(--background-subtle, #fafafa)"
-    toolbar.style.fontSize = "12px"
-    toolbar.style.minHeight = "0"
-    toolbar.style.flex = "0 0 auto"
-    toolbar.style.flexWrap = "wrap"
-
-    const groupby_label = document.createElement("span")
-    groupby_label.textContent = "Group by:"
-    groupby_label.style.color = "var(--text-secondary, #666)"
-    toolbar.appendChild(groupby_label)
-
-    const groupby_select = document.createElement("select")
-    groupby_select.multiple = true
-    groupby_select.className = "pnx-tabulator-profile-groupby"
-    groupby_select.style.padding = "2px 4px"
-    groupby_select.style.border = "1px solid var(--border-subtle, #ccc)"
-    groupby_select.style.borderRadius = "4px"
-    groupby_select.style.background = "var(--background, #fff)"
-    groupby_select.style.color = "var(--text, #333)"
-    groupby_select.style.minWidth = "160px"
-    groupby_select.style.maxHeight = "60px"
-    groupby_select.title = "Hold Ctrl/Cmd to select multiple columns"
-    groupby_select.addEventListener("change", () => {
-      const selected: string[] = []
-      for (const opt of Array.from(groupby_select.selectedOptions)) {
-        selected.push(opt.value)
-      }
-      this._updating_column_state = true
-      try {
-        this.model.groupby = selected
-      } finally {
-        this._updating_column_state = false
-      }
-      this.setGroupBy()
-      this.syncColumnStateFromFrontend()
-    })
-    this._profile_groupby_select = groupby_select
-    toolbar.appendChild(groupby_select)
-
-    const sep = document.createElement("div")
-    sep.style.width = "1px"
-    sep.style.height = "18px"
-    sep.style.background = "var(--border-subtle, #ddd)"
-    sep.style.margin = "0 4px"
-    toolbar.appendChild(sep)
-
-    const label = document.createElement("span")
-    label.textContent = "Profile:"
-    label.style.color = "var(--text-secondary, #666)"
-    toolbar.appendChild(label)
-
-    const select = document.createElement("select")
-    select.className = "pnx-tabulator-profile-select"
-    select.style.padding = "4px 8px"
-    select.style.border = "1px solid var(--border-subtle, #ccc)"
-    select.style.borderRadius = "4px"
-    select.style.background = "var(--background, #fff)"
-    select.style.color = "var(--text, #333)"
-    select.style.minWidth = "140px"
-    select.addEventListener("change", () => {
-      const name = select.value
-      if (name) {
-        this.model.trigger_event(new ColumnProfileEvent("load", undefined, name))
-      }
-    })
-    this._profile_select = select
-    toolbar.appendChild(select)
-
-    const name_input = document.createElement("input")
-    name_input.type = "text"
-    name_input.placeholder = "Profile name..."
-    name_input.className = "pnx-tabulator-profile-name-input"
-    name_input.style.padding = "4px 8px"
-    name_input.style.border = "1px solid var(--border-subtle, #ccc)"
-    name_input.style.borderRadius = "4px"
-    name_input.style.background = "var(--background, #fff)"
-    name_input.style.color = "var(--text, #333)"
-    name_input.style.minWidth = "140px"
-    this._profile_name_input = name_input
-    toolbar.appendChild(name_input)
-
-    const save_btn = document.createElement("button")
-    save_btn.textContent = "Save"
-    save_btn.className = "pnx-tabulator-profile-save"
-    save_btn.style.padding = "4px 12px"
-    save_btn.style.border = "1px solid var(--border-subtle, #ccc)"
-    save_btn.style.borderRadius = "4px"
-    save_btn.style.background = "var(--background, #fff)"
-    save_btn.style.color = "var(--text, #333)"
-    save_btn.style.cursor = "pointer"
-    save_btn.addEventListener("click", () => {
-      const name = name_input.value.trim() || select.value
-      if (name) {
-        const state = this.getColumnState()
-        this.model.trigger_event(new ColumnProfileEvent("save", state, name))
-        name_input.value = ""
-      }
-    })
-    this._profile_save_btn = save_btn
-    toolbar.appendChild(save_btn)
-
-    const delete_btn = document.createElement("button")
-    delete_btn.textContent = "Delete"
-    delete_btn.className = "pnx-tabulator-profile-delete"
-    delete_btn.style.padding = "4px 12px"
-    delete_btn.style.border = "1px solid var(--border-subtle, #ccc)"
-    delete_btn.style.borderRadius = "4px"
-    delete_btn.style.background = "var(--background, #fff)"
-    delete_btn.style.color = "var(--text, #333)"
-    delete_btn.style.cursor = "pointer"
-    delete_btn.addEventListener("click", () => {
-      const name = select.value
-      if (name) {
-        this.model.trigger_event(new ColumnProfileEvent("delete", undefined, name))
-        name_input.value = ""
-      }
-    })
-    this._profile_delete_btn = delete_btn
-    toolbar.appendChild(delete_btn)
-
-    this.renderProfileToolbar()
-    return toolbar
-  }
-
-  renderProfileToolbar(): void {
-    if (!this._profile_select) {
-      return
-    }
-    const profiles = this.model.column_profiles || {}
-    const active = this.model.active_profile
-    const select = this._profile_select
-    const current = select.value
-    select.innerHTML = ""
-    const empty_opt = document.createElement("option")
-    empty_opt.value = ""
-    empty_opt.textContent = "-- Select profile --"
-    select.appendChild(empty_opt)
-    for (const name of Object.keys(profiles).sort()) {
-      const opt = document.createElement("option")
-      opt.value = name
-      opt.textContent = name
-      select.appendChild(opt)
-    }
-    if (active && active in profiles) {
-      select.value = active
-    } else if (current && current in profiles) {
-      select.value = current
-    } else {
-      select.value = ""
-    }
-
-    const groupby_select = this._profile_groupby_select
-    if (groupby_select && this.tabulator && this.tabulator.getColumns) {
-      const current_groupby = new Set(this.model.groupby || [])
-      const columns = this.tabulator.getColumns()
-      const selected_values: string[] = []
-      for (const opt of Array.from(groupby_select.selectedOptions)) {
-        selected_values.push(opt.value)
-      }
-      groupby_select.innerHTML = ""
-      for (const column of columns) {
-        const col = column._column
-        if (col.field == "_index") {
-          continue
-        }
-        const opt = document.createElement("option")
-        opt.value = col.field
-        opt.textContent = col.title || col.field
-        if (current_groupby.has(col.field)) {
-          opt.selected = true
-        }
-        groupby_select.appendChild(opt)
       }
     }
   }
@@ -2084,10 +1681,6 @@ export namespace DataTabulator {
     cell_styles: p.Property<any>
     theme_classes: p.Property<string[]>
     container_popup: p.Property<boolean>
-    column_order: p.Property<string[]>
-    column_profiles: p.Property<any>
-    column_widths: p.Property<any>
-    active_profile: p.Property<string | null>
   }
 }
 
@@ -2135,10 +1728,6 @@ export class DataTabulator extends HTMLBox {
       cell_styles:    [ Any,                     {} ],
       theme_classes:  [ List(Str),           [] ],
       container_popup: [ Bool, true ],
-      column_order:   [ List(Str),             [] ],
-      column_profiles:[ Any,                     {} ],
-      column_widths:  [ Any,                     {} ],
-      active_profile: [ Nullable(Str),       null ],
     }))
   }
 }

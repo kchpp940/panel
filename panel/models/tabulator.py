@@ -98,23 +98,6 @@ class CellClickEvent(ModelEvent):
         )
 
 
-class ColumnProfileEvent(ModelEvent):
-
-    event_name = 'column-profile'
-
-    def __init__(self, model, action, profile=None, name=None):
-        self.action = action
-        self.profile = profile
-        self.name = name
-        super().__init__(model=model)
-
-    def __repr__(self):
-        return (
-            f'{type(self).__name__}(action={self.action}, name={self.name}, '
-            f'profile={self.profile})'
-        )
-
-
 CSS_URLS = []
 for theme in TABULATOR_THEMES:
     if theme == 'default':
@@ -169,14 +152,6 @@ class DataTabulator(HTMLBox):
     source = Instance(ColumnDataSource)
 
     cell_styles = Dict(String, Either(String, Dict(Int, Dict(Int, List(Either(String, Tuple(String, String)))))))
-
-    column_order = List(String)
-
-    column_profiles = Dict(String, Any)
-
-    column_widths = Dict(String, Any)
-
-    active_profile = Nullable(String)
 
     pagination = Nullable(String)
 

@@ -39,6 +39,7 @@ from ..pane import (
 )
 from ..pane.image import ImageBase
 from ..reactive import ReactiveHTML
+from ..models.theme_manager import ThemeManager
 from ..theme.base import (
     THEMES, DefaultTheme, Design, Theme,
 )
@@ -87,7 +88,7 @@ class BaseTemplate(param.Parameterized, MimeRenderMixin, ServableMixin, Resource
         the location root with : {{ embed(roots.location) }}.""")
 
     theme = param.ClassSelector(class_=Theme, default=DefaultTheme,
-                                constant=True, is_instance=False, instantiate=False)
+                                is_instance=False, instantiate=False)
 
     # Dictionary of property overrides by Viewable type
     modifiers: t.ClassVar[dict[type[Viewable], dict[str, t.Any]]] = {}
@@ -144,9 +145,121 @@ class BaseTemplate(param.Parameterized, MimeRenderMixin, ServableMixin, Resource
         self._layout = self._build_layout()
         self._setup_design()
 
-    @param.depends('design', watch=True)
+    @param.depends('design', 'theme', watch=True)
     def _setup_design(self):
-        self._design = self.design(theme=self.theme)
+        if hasattr(self, '_design') and self._design is not None:
+            old_theme_name = self._design.get_theme_name()
+        else:
+            old_theme_name = None
+        theme_name = self.theme._name if isinstance(self.theme, type) else getattr(self.theme, '_name', 'default')
+        self._design = self.design(theme=theme_name)
+        if hasattr(self, '_theme_manager') and self._theme_manager is not None:
+            self._design._sync_theme_manager(self._theme_manager)
+        if old_theme_name is not None and old_theme_name != theme_name:
+            self._design._reapply_to_active_documents()
+
+    def _init_theme_manager(self, doc: Document) -> None:
+        """
+        Initializes the ThemeManager model for the given document and
+        syncs the current design/theme state to it.
+        """
+        if not hasattr(self, '_theme_manager') or self._theme_manager is None:
+            self._theme_manager = ThemeManager()
+        self._design._sync_theme_manager(self._theme_manager)
+        if self._theme_manager.document is None:
+            doc.add_root(self._theme_manager)
+
+    #----------------------------------------------------------------
+    # Runtime theme/design switching (Public API)
+    #----------------------------------------------------------------
+
+    def set_theme(self, theme: t.Union[str, type[Theme], Theme]) -> None:
+        """
+        Switches the color theme at runtime without page reload.
+        Updates all rendered components, CSS variables, and Bokeh plots.
+
+        Parameters
+        ----------
+        theme : str, Theme class, or Theme instance
+            - If a string, must be one of: 'default' (light), 'dark'
+            - If a class, must be a subclass of Theme (e.g. DarkTheme)
+            - If an instance, must be an instance of Theme
+
+        Examples
+        --------
+        >>> template.set_theme('dark')
+        >>> template.set_theme('default')
+        >>> from panel.theme import DarkTheme
+        >>> template.set_theme(DarkTheme)
+        """
+        if isinstance(theme, str):
+            if theme not in THEMES:
+                raise ValueError(
+                    f"Theme '{theme}' is not valid. "
+                    f"Valid themes: {list(THEMES.keys())}"
+                )
+            theme_cls = THEMES[theme]
+        elif isinstance(theme, type) and issubclass(theme, Theme):
+            theme_cls = theme
+        elif isinstance(theme, Theme):
+            theme_cls = type(theme)
+        else:
+            raise TypeError(
+                f"theme must be str, Theme class, or Theme instance, got {type(theme).__name__}"
+            )
+        self.theme = theme_cls
+
+    def set_design(self, design: t.Union[str, type[Design], Design]) -> None:
+        """
+        Switches the design system at runtime without page reload.
+        Supports switching between Fast, Bootstrap, Material, Native,
+        and custom Design systems.
+
+        Parameters
+        ----------
+        design : str, Design class, or Design instance
+            - If a string, must be one of: 'fast', 'bootstrap', 'material', 'native'
+            - If a class, must be a subclass of Design
+            - If an instance, must be an instance of Design
+
+        Examples
+        --------
+        >>> template.set_design('fast')
+        >>> template.set_design('bootstrap')
+        >>> from panel.theme import Material
+        >>> template.set_design(Material)
+        """
+        from ..theme import Bootstrap, Fast, Material, Native
+        design_map = {
+            'fast': Fast,
+            'bootstrap': Bootstrap,
+            'material': Material,
+            'native': Native,
+        }
+        if isinstance(design, str):
+            if design not in design_map:
+                raise ValueError(
+                    f"Design '{design}' is not valid. "
+                    f"Valid designs: {list(design_map.keys())}"
+                )
+            design_cls = design_map[design]
+        elif isinstance(design, type) and issubclass(design, Design):
+            design_cls = design
+        elif isinstance(design, Design):
+            design_cls = type(design)
+        else:
+            raise TypeError(
+                f"design must be str, Design class, or Design instance, got {type(design).__name__}"
+            )
+        self.design = design_cls
+
+    def toggle_theme(self) -> None:
+        """
+        Toggles between the default (light) and dark themes.
+        """
+        current_theme_name = self._design.get_theme_name()
+        new_theme = 'dark' if current_theme_name == 'default' else 'default'
+        self.set_theme(new_theme)
 
     def _update_vars(self, *args) -> None:
         """
@@ -274,6 +387,9 @@ class BaseTemplate(param.Parameterized, MimeRenderMixin, ServableMixin, Resource
         col._preprocess(preprocess_root)
         col._documents[document] = preprocess_root
         document.on_session_destroyed(col._server_destroy) # type: ignore
+
+        # Initialize ThemeManager for runtime theme switching
+        self._init_theme_manager(document)
 
         # Apply the jinja2 template and update template variables
         if notebook:
@@ -575,7 +691,7 @@ class BaseTemplate(param.Parameterized, MimeRenderMixin, ServableMixin, Resource
 class TemplateActions(ReactiveHTML):
     """
     A component added to templates that allows triggering events such
-    as opening and closing a modal.
+    as opening and closing a modal, and toggling the theme.
     """
 
     open_modal = param.Integer(default=0, doc="""
@@ -585,6 +701,13 @@ class TemplateActions(ReactiveHTML):
     close_modal = param.Integer(default=0, doc="""
         The number of times the close modal action has been triggered.
         This is used to trigger the close modal script.""")
+
+    toggle_theme = param.Integer(default=0, doc="""
+        The number of times the theme toggle has been triggered.
+        Used to trigger a theme change (dark/light) without page reload.""")
+
+    set_theme_name = param.String(default='', doc="""
+        Set to a theme name ('default' or 'dark') to trigger a theme switch.""")
 
     _template: t.ClassVar[str] = ""
 
@@ -760,10 +883,19 @@ class BasicTemplate(BaseTemplate):
         self.modal.param.watch(self._update_render_items, ['objects'])
         self.sidebar.param.watch(self._update_render_items, ['objects'])
         self.header.param.watch(self._update_render_items, ['objects'])
+
+        # Watch for theme toggle/set actions
+        self._actions.param.watch(lambda e: self.toggle_theme(), 'toggle_theme')
+        self._actions.param.watch(self._on_set_theme_name, 'set_theme_name')
+
         self.main.param.trigger('objects')
         self.sidebar.param.trigger('objects')
         self.header.param.trigger('objects')
         self.modal.param.trigger('objects')
+
+    def _on_set_theme_name(self, event: param.parameterized.Event) -> None:
+        if event.new and event.new != event.old:
+            self.set_theme(event.new)
 
     def _init_doc(
         self, doc: Document | None = None, comm: Comm | None = None,

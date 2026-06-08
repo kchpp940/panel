@@ -199,10 +199,21 @@ export class PlotlyPlotView extends HTMLBoxView {
   _hoverdata: any = null
   container: PlotlyHTMLElement
   _watched_sources: string[]
+  _theme_bound: (() => void) | null = null
   _end_relayouting = debounce(() => {
     this._relayouting = false
   }, 2000, false)
   _throttled_resize: any
+
+  _on_panel_theme_change(e: CustomEvent): void {
+    const detail = (e as any).detail
+    if (detail && detail.bokeh_theme_json && this.container != null && (window as any).Plotly) {
+      const template = detail.is_dark ? 'plotly_dark' : 'plotly_white'
+      const currentLayout = this.container.layout || {}
+      const newLayout = {...currentLayout, template}
+      void (window as any).Plotly.relayout(this.container, newLayout)
+    }
+  }
 
   override initialize(): void {
     super.initialize()
@@ -262,6 +273,10 @@ export class PlotlyPlotView extends HTMLBoxView {
   }
 
   override remove(): void {
+    if (this._theme_bound != null) {
+      document.removeEventListener('panel:themechange', this._theme_bound as EventListener)
+      this._theme_bound = null
+    }
     if (this.container != null) {
       (window as any).Plotly.purge(this.container)
     }
@@ -273,6 +288,12 @@ export class PlotlyPlotView extends HTMLBoxView {
     this.container = div() as PlotlyHTMLElement
     set_size(this.container, this.model)
     this._rendered = false
+
+    if (this._theme_bound == null) {
+      this._theme_bound = this._on_panel_theme_change.bind(this)
+      document.addEventListener('panel:themechange', this._theme_bound as EventListener)
+    }
+
     this.watch_stylesheets()
     this.plot(true).then(() => {
       this.shadow_el.appendChild(this.container)
