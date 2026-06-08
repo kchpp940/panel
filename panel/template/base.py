@@ -41,7 +41,7 @@ from ..pane.image import ImageBase
 from ..reactive import ReactiveHTML
 from ..models.theme_manager import ThemeManager
 from ..theme.base import (
-    THEMES, DefaultTheme, Design, Theme,
+    THEMES, DarkTheme, DefaultTheme, Design, Theme,
 )
 from ..theme.native import Native
 from ..util import isurl
@@ -162,12 +162,85 @@ class BaseTemplate(param.Parameterized, MimeRenderMixin, ServableMixin, Resource
         """
         Initializes the ThemeManager model for the given document and
         syncs the current design/theme state to it.
+
+        On page load, restores design/theme from URL query parameters
+        (set by the cross-design soft-reload flow) so that the user's
+        chosen design persists after the reload.
         """
         if not hasattr(self, '_theme_manager') or self._theme_manager is None:
             self._theme_manager = ThemeManager()
-        self._design._sync_theme_manager(self._theme_manager)
+
+        restored = self._restore_from_url_params(doc)
+        if not restored:
+            self._design._sync_theme_manager(self._theme_manager)
+
         if self._theme_manager.document is None:
             doc.add_root(self._theme_manager)
+
+    def _get_theme_manager(self, doc: Document) -> ThemeManager | None:
+        """
+        Returns the ThemeManager model associated with the given document,
+        creating one if it doesn't exist yet.
+        """
+        if hasattr(self, '_theme_manager') and self._theme_manager is not None:
+            return self._theme_manager
+        self._init_theme_manager(doc)
+        return self._theme_manager if hasattr(self, '_theme_manager') else None
+
+    def _restore_from_url_params(self, doc: Document) -> bool:
+        """
+        Checks URL query parameters for ?design= and ?theme= (set by
+        the frontend cross-design soft-reload flow) and applies them
+        to this template. Returns True if any restoration occurred.
+
+        The design/theme are set at template construction time so that
+        the Jinja template renders with the correct DOM shell for the
+        target design (Fast Web Components vs. Bootstrap classes etc.).
+        """
+        from ..io.state import state
+        from ..theme import Bootstrap, Fast, Material, Native
+
+        design_map = {
+            'fast': Fast,
+            'bootstrap': Bootstrap,
+            'material': Material,
+            'native': Native,
+        }
+
+        try:
+            location = getattr(state, 'location', None)
+            if location is None:
+                return False
+
+            href = getattr(location, 'href', None) or ''
+            if not href:
+                return False
+
+            from urllib.parse import parse_qs, urlparse
+            parsed = urlparse(href)
+            params = parse_qs(parsed.query)
+
+            restored_any = False
+
+            if 'design' in params and params['design']:
+                design_name = params['design'][0].lower()
+                if design_name in design_map and design_map[design_name] is not self.design:
+                    self.design = design_map[design_name]
+                    restored_any = True
+
+            if 'theme' in params and params['theme']:
+                theme_name = params['theme'][0].lower()
+                if theme_name in ('default', 'dark'):
+                    theme_cls = DarkTheme if theme_name == 'dark' else self.design._themes['default']
+                    self.theme = theme_cls
+                    restored_any = True
+
+            if restored_any:
+                self._design._sync_theme_manager(self._theme_manager)
+
+            return restored_any
+        except Exception:
+            return False
 
     #----------------------------------------------------------------
     # Runtime theme/design switching (Public API)
@@ -211,10 +284,17 @@ class BaseTemplate(param.Parameterized, MimeRenderMixin, ServableMixin, Resource
 
     def set_design(self, design: t.Union[str, type[Design], Design]) -> None:
         """
-        Switches the design system at runtime without page reload.
-        Supports switching between Fast, Bootstrap, Material, Native,
-        and custom Design systems. This is the unified entry point
-        that recalculates the full resource/modifier/provider chain.
+        Switches the design system at runtime. Uses a two-tier strategy:
+
+        1. Same Design class (e.g. Fast→Fast): performs a no-reload
+           switch via apply_runtime_to_document() — only applies for
+           subclasses or design parameter adjustments that share the
+           same template DOM structure.
+        2. Cross Design (e.g. Fast→Bootstrap, Native→Material): since
+           Fast/Bootstrap/Material templates have incompatible DOM shells
+           (Web Components vs. BS5 classes vs. MDC components), a soft
+           page reload is triggered while preserving widget state via
+           URL parameters and sessionStorage.
 
         Parameters
         ----------
@@ -246,10 +326,13 @@ class BaseTemplate(param.Parameterized, MimeRenderMixin, ServableMixin, Resource
                     f"Valid designs: {list(design_map.keys())}"
                 )
             design_cls = design_map[design]
+            design_name = design
         elif isinstance(design, type) and issubclass(design, Design):
             design_cls = design
+            design_name = design_cls.__name__.lower().replace('design', '')
         elif isinstance(design, Design):
             design_cls = type(design)
+            design_name = design_cls.__name__.lower().replace('design', '')
         else:
             raise TypeError(
                 f"design must be str, Design class, or Design instance, got {type(design).__name__}"
@@ -258,14 +341,33 @@ class BaseTemplate(param.Parameterized, MimeRenderMixin, ServableMixin, Resource
         if design_cls is self.design:
             return
 
+        same_design_family = (
+            (issubclass(design_cls, Fast) and issubclass(self.design, Fast)) or
+            (issubclass(design_cls, Bootstrap) and issubclass(self.design, Bootstrap)) or
+            (issubclass(design_cls, Material) and issubclass(self.design, Material)) or
+            (issubclass(design_cls, Native) and issubclass(self.design, Native))
+        )
+
         current_theme_name = self._design.get_theme_name() if hasattr(self, '_design') and self._design else 'default'
+
+        if same_design_family:
+            self.design = design_cls
+            new_design = self._design
+            for doc, tpl in state._templates.items():
+                if tpl is not self:
+                    continue
+                new_design.apply_runtime_to_document(doc, self)
+            return
+
         self.design = design_cls
-        new_design = self._design
 
         for doc, tpl in state._templates.items():
             if tpl is not self:
                 continue
-            new_design.apply_runtime_to_document(doc, self)
+            theme_mgr = self._get_theme_manager(doc)
+            if theme_mgr is not None:
+                theme_mgr.reload_design = design_name
+                theme_mgr.reload_theme = current_theme_name
 
     def toggle_theme(self) -> None:
         """

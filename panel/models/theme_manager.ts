@@ -18,6 +18,8 @@ export namespace PanelThemeManager {
     extension_themes: p.Property<{[key: string]: any}>
     fast_style: p.Property<{[key: string]: any}>
     bs_theme: p.Property<string>
+    reload_design: p.Property<string>
+    reload_theme: p.Property<string>
   }
 }
 
@@ -30,15 +32,46 @@ export class PanelThemeManagerView extends View {
 
   override connect_signals(): void {
     super.connect_signals()
-    const {design, theme, theme_name, base_css, theme_css, css_variables, is_dark, bokeh_theme_json, resources, extension_themes, fast_style, bs_theme} = this.model.properties
+    const {design, theme, theme_name, base_css, theme_css, css_variables, is_dark, bokeh_theme_json, resources, extension_themes, fast_style, bs_theme, reload_design, reload_theme} = this.model.properties
     this.on_change([design, theme, theme_name, base_css, theme_css, css_variables, is_dark, bokeh_theme_json, resources, extension_themes, fast_style, bs_theme], () => {
       this._apply_theme()
+    })
+    this.on_change([reload_design, reload_theme], () => {
+      this._handle_design_reload()
     })
   }
 
   override render(): void {
     super.render()
     this._apply_theme()
+    this._restore_preserved_state()
+  }
+
+  _restore_preserved_state(): void {
+    try {
+      const raw = sessionStorage.getItem('panel_design_switch_state')
+      if (!raw) return
+      const snapshot: any = JSON.parse(raw)
+      sessionStorage.removeItem('panel_design_switch_state')
+
+      if (snapshot.location_hash) {
+        window.location.hash = snapshot.location_hash
+      }
+
+      const applyScroll = () => {
+        if (typeof snapshot.scroll_y === 'number') {
+          window.scrollTo(snapshot.scroll_x || 0, snapshot.scroll_y)
+        }
+      }
+
+      if (document.readyState === 'complete') {
+        applyScroll()
+      } else {
+        window.addEventListener('load', applyScroll, { once: true })
+      }
+    } catch (e) {
+      // ignore restore errors
+    }
   }
 
   _apply_theme(): void {
@@ -198,6 +231,41 @@ export class PanelThemeManagerView extends View {
     }
   }
 
+  _handle_design_reload(): void {
+    if (!this.model.reload_design) return
+
+    const newDesign = this.model.reload_design
+    const newTheme = this.model.reload_theme || this.model.theme
+
+    const url = new URL(window.location.href)
+    url.searchParams.set('design', newDesign)
+    if (newTheme) {
+      url.searchParams.set('theme', newTheme)
+    }
+
+    try {
+      const snapshot: any = {}
+      snapshot.location_hash = window.location.hash
+      snapshot.scroll_y = window.scrollY
+      snapshot.scroll_x = window.scrollX
+      if (typeof Bokeh !== 'undefined' && Bokeh.documents && Bokeh.documents.length > 0) {
+        snapshot.widgets = {}
+        const doc = Bokeh.documents[0]
+        for (const root of doc.roots()) {
+          if ((root as any).properties && (root as any).properties.value !== undefined) {
+            const id = (root as any).id
+            snapshot.widgets[id] = {value: (root as any).value}
+          }
+        }
+      }
+      sessionStorage.setItem('panel_design_switch_state', JSON.stringify(snapshot))
+    } catch (e) {
+      // ignore state save errors, reload anyway
+    }
+
+    window.location.href = url.toString()
+  }
+
   _dispatch_theme_event(): void {
     const event = new CustomEvent('panel:themechange', {
       detail: {
@@ -239,6 +307,8 @@ export class PanelThemeManager extends Model {
       extension_themes:   [ Dict(Str), {} ],
       fast_style:         [ Dict(Str), {} ],
       bs_theme:           [ Str,      'light' ],
+      reload_design:      [ Str,      '' ],
+      reload_theme:       [ Str,      '' ],
     }))
   }
 }

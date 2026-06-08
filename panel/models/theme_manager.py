@@ -56,3 +56,13 @@ class ThemeManager(Model):
 
     bs_theme = String(default='light', help="""
         Bootstrap theme attribute: 'light' or 'dark'. Only populated for Bootstrap design.""")
+
+    reload_design = String(default='', help="""
+        Set to a design name to trigger a soft page reload that
+        switches to that design while preserving widget state.
+        Setting this field signals the frontend to perform a
+        location-preserving reload.""")
+
+    reload_theme = String(default='', help="""
+        Set to a theme name ('default' or 'dark') alongside reload_design
+        to preserve the color mode across the design switch reload.""")
