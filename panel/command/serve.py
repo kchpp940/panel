@@ -491,7 +491,7 @@ class Serve(_BkServe):
 
         if args.snapshots:
             from ..io.snapshot_api import snapshot_rest_provider
-            from ..io.snapshot import SNAPSHOT_BASE_URL, apply_url_snapshot
+            from ..io.snapshot import SNAPSHOT_BASE_URL
 
             endpoint = args.snapshot_endpoint or SNAPSHOT_BASE_URL
             patterns += snapshot_rest_provider(endpoint)
@@ -499,19 +499,45 @@ class Serve(_BkServe):
             def _snapshot_session_created(session_context):
                 doc = session_context._document
                 with set_curdoc(doc):
-                    state.onload(lambda: apply_url_snapshot())
-
                     try:
-                        template = state.template
+                        from ..widgets.snapshot import SnapshotManager
+                        sm = SnapshotManager(name="Snapshots")
+                    except Exception as e:
+                        state.log(
+                            f"Failed to instantiate SnapshotManager: {e}",
+                            level='warning',
+                        )
+                        return
+
+                    injected = False
+                    try:
+                        tpl = state.template
                     except Exception:
-                        template = None
-                    if template is not None and hasattr(template, 'sidebar'):
+                        tpl = None
+                    if tpl is not None and hasattr(tpl, 'sidebar'):
                         try:
-                            from ..widgets.snapshot import SnapshotManager
-                            sm = SnapshotManager(name="Snapshots")
-                            template.sidebar.append(sm)
+                            tpl.sidebar.append(sm)
+                            injected = True
                         except Exception as e:
-                            state.log(f"Failed to add SnapshotManager to sidebar: {e}", level='warning')
+                            state.log(
+                                f"Failed to add SnapshotManager to sidebar: {e}",
+                                level='warning',
+                            )
+
+                    if not injected and doc is not None:
+                        try:
+                            existing_roots = list(getattr(doc, 'roots', []) or [])
+                            for root in existing_roots:
+                                viewable = getattr(root, '_panel_viewable', None)
+                                if viewable is not None and hasattr(viewable, 'append'):
+                                    viewable.append(sm)
+                                    injected = True
+                                    break
+                        except Exception as e:
+                            state.log(
+                                f"Failed to inject SnapshotManager into layout: {e}",
+                                level='warning',
+                            )
 
             state._on_session_created_internal.append(_snapshot_session_created)
 

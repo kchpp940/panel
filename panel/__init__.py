@@ -60,11 +60,11 @@ from .config import __version__, config, panel_extension as extension  # noqa
 from .depends import bind, depends  # noqa
 from .interact import interact  # noqa
 from .io import (  # noqa
-    SNAPSHOT_BASE_URL, SNAPSHOT_QUERY_PARAM, _jupyter_server_extension_paths,
-    apply_state, apply_url_snapshot, cache, collect_state, decode_snapshot,
-    delete_named_snapshot, encode_snapshot, get_snapshot_from_url, ipywidget,
-    list_named_snapshots, load_named_snapshot, save_named_snapshot, serve,
-    state,
+    SNAPSHOT_BASE_URL, SNAPSHOT_QUERY_PARAM, SNAPSHOT_VERSION,
+    _jupyter_server_extension_paths, apply_state, apply_url_snapshot, cache,
+    collect_state, decode_snapshot, delete_named_snapshot, encode_snapshot,
+    get_snapshot_from_url, ipywidget, list_named_snapshots, load_named_snapshot,
+    save_named_snapshot, serve, state,
 )
 from .layout import (  # noqa
     Accordion, Card, Column, Feed, FlexBox, FloatPanel, GridBox, GridSpec,
@@ -98,6 +98,7 @@ __all__ = (
     "Row",
     "SNAPSHOT_BASE_URL",
     "SNAPSHOT_QUERY_PARAM",
+    "SNAPSHOT_VERSION",
     "Spacer",
     "Swipe",
     "Tabs",

@@ -21,10 +21,10 @@ from .notebook import (  # noqa
 from .profile import profile  # noqa
 from .resources import Resources  # noqa
 from .snapshot import (  # noqa
-    SNAPSHOT_BASE_URL, SNAPSHOT_QUERY_PARAM, apply_state, apply_url_snapshot,
-    collect_state, decode_snapshot, delete_named_snapshot, encode_snapshot,
-    get_snapshot_from_url, list_named_snapshots, load_named_snapshot,
-    save_named_snapshot,
+    SNAPSHOT_BASE_URL, SNAPSHOT_QUERY_PARAM, SNAPSHOT_VERSION, apply_state,
+    apply_url_snapshot, collect_state, decode_snapshot, delete_named_snapshot,
+    encode_snapshot, get_snapshot_from_url, list_named_snapshots,
+    load_named_snapshot, save_named_snapshot,
 )
 from .state import state  # noqa
 
@@ -44,6 +44,7 @@ __all__ = (
     "Resources",
     "SNAPSHOT_BASE_URL",
     "SNAPSHOT_QUERY_PARAM",
+    "SNAPSHOT_VERSION",
     "apply_state",
     "apply_url_snapshot",
     "collect_state",

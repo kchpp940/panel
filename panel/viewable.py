@@ -732,6 +732,12 @@ class Viewable(Renderable, Layoutable, ServableMixin):
         Whether or not the Viewable is loading. If True a loading spinner
         is shown on top of the Viewable.""")
 
+    snapshot_key = param.String(default=None, allow_None=True, doc="""
+        A unique key used to identify this component in state snapshots.
+        If None (default), this component will not be included in
+        state.snapshot() output. Set to a string to opt into
+        snapshot collection and restoration.""")
+
     _preprocessing_hooks: t.ClassVar[list[Callable[[Viewable, Model], None]]] = []
 
     def __init__(self, **params):
