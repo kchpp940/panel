@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+import os
 import pathlib
 import re
 import typing as t
@@ -283,12 +284,37 @@ class ManifestValidator:
                 self._add_warning(msg, location="service_worker")
                 sw.status.add_warning(msg)
 
-        cache_refs = re.findall(r"['\"]([^'\"]+\.(?:html|js|css|png|svg|ico|json))['\"]", content)
+        cache_refs = re.findall(
+            r"['\"]([^'\"]+\.(?:html|js|css|png|svg|ico|json|zip))['\"]",
+            content,
+        )
         if not cache_refs:
             self._add_warning(
                 "No static assets referenced in service worker pre-cache list",
                 location="service_worker",
             )
+        else:
+            dest = m.dest_path
+            for ref in cache_refs:
+                candidate = dest / ref
+                if not candidate.is_file():
+                    alt_candidate = dest / os.path.basename(ref)
+                    if not alt_candidate.is_file():
+                        self._add_warning(
+                            f"Service worker pre-cache asset not found on disk: {ref}",
+                            location=f"service_worker:cache:{ref}",
+                        )
+                        sw.status.add_warning(f"missing cache asset: {ref}")
+
+        scope_match = re.search(r"scope:\s*['\"]([^'\"]+)['\"]", content)
+        if scope_match and m.html_output:
+            scope = scope_match.group(1)
+            html_name = m.html_output.name
+            if scope not in ('/', './', html_name, f'./{html_name}'):
+                self._add_warning(
+                    f"Service worker scope '{scope}' may not match HTML output '{html_name}'",
+                    location="service_worker:scope",
+                )
 
         if sw.output_path and sw.output_path.is_file():
             sw.status.validated = True

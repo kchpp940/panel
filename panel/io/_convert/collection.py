@@ -42,10 +42,124 @@ BOKEH_CDN_WHL = f'{CDN_ROOT}wheels/bokeh-{BOKEH_VERSION}-py3-none-any.whl'
 
 
 @dataclasses.dataclass
-class _DummyRequirement:
+class DummyRequirement:
     url: str
     name: str = 'DUMMY'
     specifier: str = ''
+
+
+def _resolve_panel_bokeh_reqs(
+    panel_version: t.Literal['auto', 'local'] | str,
+    bokeh_version: str = BOKEH_VERSION,
+) -> tuple[str, str]:
+    if panel_version == 'local':
+        panel_req = './' + str(PANEL_LOCAL_WHL.as_posix()).split('/')[-1]
+        bokeh_req = './' + str(BOKEH_LOCAL_WHL.as_posix()).split('/')[-1]
+    elif panel_version == 'auto':
+        panel_req = PANEL_CDN_WHL
+        bokeh_req = BOKEH_CDN_WHL
+    else:
+        panel_req = f'panel=={panel_version}'
+        bokeh_req = f'bokeh=={bokeh_version}'
+    return panel_req, bokeh_req
+
+
+def _extract_source(
+    code: str | os.PathLike | t.IO,
+) -> tuple[str, pathlib.Path | None]:
+    if hasattr(code, 'read'):
+        source = code.read()
+        return source, None
+    else:
+        path = pathlib.Path(code)
+        application = build_single_handler_application(path.absolute())
+        source = application._handlers[0]._runner.source
+        return source, path
+
+
+def collect_python_requirements(
+    code: str | os.PathLike | t.IO,
+    requirements: list[str] | t.Literal['auto'] | os.PathLike = 'auto',
+    panel_version: t.Literal['auto', 'local'] | str = 'auto',
+    http_patch: bool = True,
+) -> list[str]:
+    """
+    Make sense of python requirements for our Panel script.
+
+    Arguments
+    ---------
+    code: str | os.PathLike | IO,
+        The filename of the Panel/Bokeh application to convert,
+        or a file-like object with a .read() method.
+    requirements: list[str] | os.PathLike | Literal['auto']
+        The list of requirements to include (in addition to Panel).
+    panel_version: Literal['auto', 'local'] | str
+        The panel release version to use in the exported HTML.
+    http_patch: bool
+        Whether to patch the HTTP request stack with the pyodide-http library
+        to allow urllib3 and requests to work.
+    """
+    panel_req, bokeh_req = _resolve_panel_bokeh_reqs(panel_version)
+    collected_requirements = [bokeh_req, panel_req]
+    if http_patch:
+        collected_requirements.append('pyodide-http')
+
+    requirements_root = os.getcwd()
+    resolved_reqs: list[str]
+    if requirements == 'auto':
+        source, _ = _extract_source(code)
+        resolved_reqs = find_requirements(source)
+    elif (
+        isinstance(requirements, (str, os.PathLike))
+        and pathlib.Path(requirements).is_file()
+    ):
+        requirements_root = os.path.dirname(requirements)
+        resolved_reqs = (
+            pathlib.Path(requirements).read_text(encoding='utf-8').splitlines()
+        )
+    elif isinstance(requirements, list):
+        resolved_reqs = requirements
+    else:
+        raise ValueError(
+            f'Requirements {requirements!r} could not be resolved. '
+            'Provide a list of requirement specs, a path to a requirements.txt '
+            'file that exists on disk or \'auto\' as a literal.'
+        )
+
+    for raw_req in resolved_reqs:
+        stripped_req = raw_req.split('#')[0].strip()
+        if not len(stripped_req) > 0:
+            continue
+        try:
+            req = Requirement(stripped_req)
+        except ValueError as e:
+            if stripped_req.endswith('.whl'):
+                req = t.cast('Requirement', DummyRequirement(stripped_req))
+            else:
+                raise ValueError(f'Requirements parser raised following error: {e}') from e
+
+        if req.name in ('panel', 'bokeh'):
+            continue
+        elif req.url is not None:
+            parsed_req = urlparse(req.url)
+            if parsed_req.scheme in ('https', 'http'):
+                collected_requirements.append(req.url)
+            elif parsed_req.scheme in ('file', ''):
+                check_path = parsed_req.path
+                check_path = os.path.normpath(
+                    os.path.join(requirements_root, check_path)
+                )
+                if os.path.exists(check_path):
+                    collected_requirements.append(f'file:{check_path}')
+                else:
+                    raise ValueError(
+                        f'Could not verify path for {req}. '
+                        'Make sure the file is available if it is a local wheel.'
+                    )
+        else:
+            collected_requirements.append(f'{req.name}{req.specifier}')
+
+    return collected_requirements
 
 
 class ManifestCollector:
@@ -64,7 +178,8 @@ class ManifestCollector:
         http_patch: bool = True,
         build_pwa: bool = False,
     ) -> None:
-        self._app_path = pathlib.Path(app)
+        self._app = app
+        self._app_path = pathlib.Path(app) if not hasattr(app, 'read') else pathlib.Path('./')
         self._dest_path = pathlib.Path(dest_path)
         self._runtime = runtime
         self._requirements_input = requirements
@@ -77,7 +192,10 @@ class ManifestCollector:
         self._build_pwa = build_pwa
 
         self._app_folder = os.path.dirname(self._app_path)
-        self._app_name = '.'.join(os.path.basename(self._app_path).split('.')[:-1])
+        if hasattr(app, 'read'):
+            self._app_name = f'app-{str(__import__("uuid").uuid4())}'
+        else:
+            self._app_name = '.'.join(os.path.basename(self._app_path).split('.')[:-1])
 
     def build(self) -> AppConversionManifest:
         manifest = AppConversionManifest(
@@ -101,7 +219,12 @@ class ManifestCollector:
 
     def _collect_requirements(self, manifest: AppConversionManifest) -> None:
         try:
-            collected = self._resolve_requirements()
+            collected = collect_python_requirements(
+                self._app,
+                requirements=self._requirements_input,
+                panel_version=self._panel_version,
+                http_patch=self._http_patch,
+            )
         except Exception as exc:
             manifest.add_issue(
                 IssueSeverity.ERROR,
@@ -111,83 +234,6 @@ class ManifestCollector:
             return
 
         manifest.requirements = collected
-
-    def _resolve_requirements(self) -> list[str]:
-        if self._panel_version == 'local':
-            panel_req = './' + str(PANEL_LOCAL_WHL.as_posix()).split('/')[-1]
-            bokeh_req = './' + str(BOKEH_LOCAL_WHL.as_posix()).split('/')[-1]
-        elif self._panel_version == 'auto':
-            panel_req = PANEL_CDN_WHL
-            bokeh_req = BOKEH_CDN_WHL
-        else:
-            panel_req = f'panel=={self._panel_version}'
-            bokeh_req = f'bokeh=={BOKEH_VERSION}'
-
-        collected_requirements = [bokeh_req, panel_req]
-        if self._http_patch:
-            collected_requirements.append('pyodide-http')
-
-        requirements_root = os.getcwd()
-        resolved_reqs: list[str]
-
-        if self._requirements_input == 'auto':
-            path = pathlib.Path(self._app_path)
-            application = build_single_handler_application(path.absolute())
-            source = application._handlers[0]._runner.source
-            resolved_reqs = find_requirements(source)
-        elif (
-            isinstance(self._requirements_input, (str, os.PathLike))
-            and pathlib.Path(self._requirements_input).is_file()
-        ):
-            requirements_root = os.path.dirname(self._requirements_input)
-            resolved_reqs = (
-                pathlib.Path(self._requirements_input).read_text(encoding='utf-8').splitlines()
-            )
-        elif isinstance(self._requirements_input, list):
-            resolved_reqs = self._requirements_input
-        else:
-            raise ValueError(
-                f'Requirements {self._requirements_input!r} could not be resolved. '
-                'Provide a list of requirement specs, a path to a requirements.txt '
-                'file that exists on disk or \'auto\' as a literal.'
-            )
-
-        for raw_req in resolved_reqs:
-            stripped_req = raw_req.split('#')[0].strip()
-            if not len(stripped_req) > 0:
-                continue
-            try:
-                req = Requirement(stripped_req)
-            except ValueError as e:
-                if stripped_req.endswith('.whl'):
-                    req = t.cast('Requirement', _DummyRequirement(stripped_req))
-                else:
-                    raise ValueError(
-                        f'Requirements parser raised following error: {e}'
-                    ) from e
-
-            if req.name in ('panel', 'bokeh'):
-                continue
-            elif req.url is not None:
-                parsed_req = urlparse(req.url)
-                if parsed_req.scheme in ('https', 'http'):
-                    collected_requirements.append(req.url)
-                elif parsed_req.scheme in ('file', ''):
-                    check_path = parsed_req.path
-                    check_path = os.path.normpath(
-                        os.path.join(requirements_root, check_path)
-                    )
-                    if os.path.exists(check_path):
-                        collected_requirements.append(f'file:{check_path}')
-                    else:
-                        raise ValueError(
-                            f'Could not verify path for {req}. '
-                            'Make sure the file is available if it is a local wheel.'
-                        )
-            else:
-                collected_requirements.append(f'{req.name}{req.specifier}')
-
-        return collected_requirements
 
     def _collect_wheels(self, manifest: AppConversionManifest) -> None:
         for req in manifest.requirements:

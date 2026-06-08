@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import json as _json
 import os
 import pathlib
 import typing as t
@@ -29,16 +30,18 @@ from ..resources import (
     BASE_TEMPLATE,
     CDN_DIST,
     DIST_DIR,
+    INDEX_TEMPLATE,
     Resources,
     _env as _pn_env,
     bundle_resources,
     loading_css,
-    set_resource_mode,
 )
 from ..state import set_curdoc, state
 from .manifest import (
     AppConversionManifest,
+    AssetStatus,
     IssueSeverity,
+    Runtimes,
     WorkerType,
 )
 
@@ -135,6 +138,217 @@ PWA_IMAGES: list[pathlib.Path] = [
 ]
 
 
+def make_index(files, title=None, manifest=True):
+    manifest_ref = 'site.webmanifest' if manifest else None
+    favicon = 'images/favicon.ico' if manifest else None
+    apple_icon = 'images/apple-touch-icon.png' if manifest else None
+    items = {label: './'+os.path.basename(f) for label, f in sorted(files.items())}
+    return INDEX_TEMPLATE.render(
+        items=items, manifest=manifest_ref, apple_icon=apple_icon,
+        favicon=favicon, title=title, PANEL_CDN=CDN_DIST,
+    )
+
+
+def build_pwa_manifest(files, title=None, **kwargs) -> str:
+    if len(files) > 1:
+        title = title or 'Panel Applications'
+        path = 'index.html'
+    else:
+        title = title or 'Panel Applications'
+        path = list(files.values())[0]
+    return PWA_MANIFEST_TEMPLATE.render(
+        name=title,
+        path=path,
+        **kwargs,
+    )
+
+
+def pack_files(filemap: dict, destination: str | os.PathLike | t.IO):
+    """
+    Pack files into a zipfile for distribution
+    """
+    with ZipFile(destination, 'w') as packfile:
+        for fname, arcname in filemap.items():
+            packfile.write(fname, arcname=arcname)
+
+
+def loading_resources(template, inline) -> list[str]:
+    css_resources = []
+    if template in (BASE_TEMPLATE, FILE):
+        if inline:
+            svg_name = f'{config.loading_spinner}_spinner.svg'
+            svg_b64 = base64.b64encode((DIST_DIR / 'assets' / svg_name).read_bytes()).decode('utf-8')
+            loading_base = (
+                DIST_DIR / "css" / "loading.css"
+            ).read_text(encoding='utf-8').replace(
+                f'../assets/{svg_name}', f'data:image/svg+xml;base64,{svg_b64}'
+            )
+            loading_style = f'<style type="text/css">\n{loading_base}\n</style>'
+        else:
+            loading_style = f'<link rel="stylesheet" href="{CDN_DIST}css/loading.css" type="text/css" />'
+        css_resources.append(loading_style)
+    spinner_css = loading_css(
+        config.loading_spinner, config.loading_color, config.loading_max_height
+    )
+    css_resources.append(
+        f'<style type="text/css">\n{spinner_css}\n</style>'
+    )
+    return css_resources
+
+
+def script_to_html(
+    filename: str | os.PathLike | t.IO,
+    requirements: list[str] = [],
+    app_resources: str | os.PathLike | None = None,
+    js_resources: t.Literal['auto'] | list[str] = 'auto',
+    css_resources: t.Literal['auto'] | list[str] | None = 'auto',
+    runtime: Runtimes = 'pyodide',
+    prerender: bool = True,
+    panel_version: t.Literal['auto', 'local'] | str = 'auto',
+    local_prefix: str = LOCAL_PREFIX,
+    manifest: str | None = None,
+    inline: bool = False,
+    compiled: bool = True,
+) -> tuple[str, str | None]:
+    """
+    Converts a Panel or Bokeh script to a standalone WASM Python
+    application.
+    """
+    if hasattr(filename, 'read'):
+        handler = CodeHandler(source=filename.read(), filename='convert.py')
+        app_name = f'app-{str(uuid.uuid4())}'
+        app = Application(handler)
+    else:
+        path = pathlib.Path(filename)
+        app_name = '.'.join(path.name.split('.')[:-1])
+        app = build_single_handler_application(str(path.absolute()))
+    document = Document()
+    document._session_context = lambda: MockSessionContext(document=document)
+    with set_curdoc(document):
+        app.initialize_document(document)
+        state._on_load(None)
+    source = app._handlers[0]._runner.source
+
+    if not document.roots:
+        raise RuntimeError(
+            f'The file {filename} does not publish any Panel contents. '
+            'Ensure you have marked items as servable or added models to '
+            'the bokeh document manually.'
+        )
+
+    post_code = POST_PYSCRIPT if runtime == 'pyscript' else POST
+    source = source.replace('${', '&#36;{')
+    code = '\n'.join([PRE, source, post_code])
+    web_worker = None
+    if css_resources is None:
+        css_resources = []
+    if runtime.startswith('pyscript'):
+        if js_resources == 'auto':
+            js_resources = [PYSCRIPT_JS]
+        if css_resources == 'auto':
+            css_resources = [PYSCRIPT_CSS, PYSCRIPT_CSS_OVERRIDES]
+        elif not css_resources:
+            css_resources = []
+        pyconfig = _json.dumps({
+            'packages': requirements,
+            'plugins': ['!error'],
+            'files': {app_resources: './*'} if app_resources else {},
+        })
+        css_resources.append('<style type="text/css">.py-error { display: none; }</style>')
+        if 'worker' in runtime:
+            plot_script = f'<script type="py" async worker config=\'{pyconfig}\' src="{app_name}.py"></script>'
+            web_worker = code
+        else:
+            plot_script = f'<script type=\'py\' config=\'{pyconfig}\'>{code}</script>'
+    else:
+        if css_resources == 'auto':
+            css_resources = []
+        data_archives = f'{repr(app_resources)}' if app_resources else ''
+        env_spec = ', '.join([repr(req) for req in requirements])
+        code = code.encode('unicode_escape').decode('utf-8').replace('`', r'\`')
+        if runtime == 'pyodide-worker':
+            if js_resources == 'auto':
+                js_resources = []
+            worker_handler = WORKER_HANDLER_TEMPLATE.render({
+                'name': app_name,
+                'loading_spinner': config.loading_spinner,
+            })
+            web_worker = WEB_WORKER_TEMPLATE.render({
+                'PYODIDE_URL': PYODIDE_PYC_URL if compiled else PYODIDE_URL,
+                'data_archives': data_archives,
+                'env_spec': env_spec,
+                'code': code,
+            })
+            plot_script = wrap_in_script_tag(worker_handler)
+        else:
+            if js_resources == 'auto':
+                js_resources = [PYODIDE_PYC_JS if compiled else PYODIDE_JS]
+            script_template = _pn_env.from_string(PYODIDE_SCRIPT)
+            plot_script = script_template.render({
+                'data_archives': data_archives,
+                'env_spec': env_spec,
+                'code': code,
+            })
+
+    if prerender:
+        json_id = make_id()
+        docs_json, render_items = standalone_docs_json_and_render_items(document)
+        render_item = render_items[0]
+        escaped_json = escape(serialize_json(docs_json), quote=False)
+        plot_script += wrap_in_script_tag(escaped_json, "application/json", json_id)
+        plot_script += wrap_in_script_tag(script_for_render_items(json_id, render_items))
+    else:
+        render_item = RenderItem(
+            token='',
+            roots=document.roots,
+            use_for_title=False,
+        )
+        render_items = [render_item]
+
+    template = document.template
+    if template is None:
+        template = BASE_TEMPLATE
+    elif isinstance(template, str):
+        template = get_env().from_string("{% extends base %}\n" + template)
+
+    resources = Resources(mode='inline' if inline else 'cdn')
+    css_resources = css_resources or []
+    css_resources += loading_resources(template, inline)
+    with set_curdoc(document):
+        bokeh_js, bokeh_css = bundle_resources(document.roots, resources)
+    extra_js = [INIT_SERVICE_WORKER, bokeh_js] if manifest else [bokeh_js]
+    bokeh_js = '\n'.join(js_resources + extra_js) if isinstance(js_resources, list) else extra_js[0]
+    bokeh_css = '\n'.join([bokeh_css] + list(css_resources))
+
+    template_variables = document._template_variables
+    context = template_variables.copy()
+    context.update(dict(
+        title=document.title,
+        bokeh_js=bokeh_js,
+        bokeh_css=bokeh_css,
+        plot_script=plot_script,
+        docs=render_items,
+        base=BASE_TEMPLATE,
+        macros=MACROS,
+        doc=render_item,
+        roots=render_item.roots,
+        manifest=manifest,
+        dist_url=CDN_DIST,
+    ))
+
+    html = template.render(context)
+    html = (html
+        .replace('<body>', f'<body class="{LOADING_INDICATOR_CSS_CLASS} pn-{config.loading_spinner}">')
+    )
+    if runtime == 'pyscript-worker':
+        html = (html
+            .replace('<script type="text/javascript"', '<script type="text/javascript" crossorigin="anonymous"')
+            .replace('<link rel="stylesheet"', '<link rel="stylesheet" crossorigin="anonymous"')
+            .replace('<link rel="icon"', '<link rel="icon" crossorigin="anonymous"')
+        )
+    return html, web_worker
+
+
 class ManifestPersistence:
     def __init__(
         self,
@@ -198,193 +412,41 @@ class ManifestPersistence:
         zip_path = manifest.dest_path / zip_name
         manifest.dest_path.mkdir(parents=True, exist_ok=True)
 
-        with ZipFile(zip_path, 'w') as packfile:
-            for fname, arcname in filemap.items():
-                packfile.write(fname, arcname=arcname)
-
+        pack_files(filemap, zip_path)
         manifest.resources_zip = zip_path
-
-    def _loading_resources(self, template, inline: bool) -> list[str]:
-        css_resources = []
-        if template in (BASE_TEMPLATE, FILE):
-            if inline:
-                svg_name = f'{config.loading_spinner}_spinner.svg'
-                svg_b64 = base64.b64encode(
-                    (DIST_DIR / 'assets' / svg_name).read_bytes()
-                ).decode('utf-8')
-                loading_base = (
-                    DIST_DIR / "css" / "loading.css"
-                ).read_text(encoding='utf-8').replace(
-                    f'../assets/{svg_name}', f'data:image/svg+xml;base64,{svg_b64}'
-                )
-                loading_style = f'<style type="text/css">\n{loading_base}\n</style>'
-            else:
-                loading_style = (
-                    f'<link rel="stylesheet" href="{CDN_DIST}css/loading.css" '
-                    f'type="text/css" />'
-                )
-            css_resources.append(loading_style)
-        spinner_css = loading_css(
-            config.loading_spinner, config.loading_color, config.loading_max_height
-        )
-        css_resources.append(
-            f'<style type="text/css">\n{spinner_css}\n</style>'
-        )
-        return css_resources
 
     def generate_html_and_worker(self) -> None:
         manifest = self._manifest
-        filename = manifest.app_path
 
-        if hasattr(filename, 'read'):
-            handler = CodeHandler(source=filename.read(), filename='convert.py')
-            app = Application(handler)
-        else:
-            path = pathlib.Path(filename)
-            app = build_single_handler_application(str(path.absolute()))
-
-        document = Document()
-        document._session_context = lambda: MockSessionContext(document=document)
-        with set_curdoc(document):
-            app.initialize_document(document)
-            state._on_load(None)
-
-        source = app._handlers[0]._runner.source
-
-        if not document.roots:
-            raise RuntimeError(
-                f'The file {filename} does not publish any Panel contents. '
-                'Ensure you have marked items as servable or added models to '
-                'the bokeh document manually.'
-            )
-
-        runtime = manifest.runtime
-        post_code = POST_PYSCRIPT if runtime == 'pyscript' else POST
-        source = source.replace('${', '&#36;{')
-        code = '\n'.join([PRE, source, post_code])
-
-        css_resources: list[str] | None = []
-        js_resources: list[str] | t.Literal['auto'] = 'auto'
-        if runtime.startswith('pyscript'):
-            if js_resources == 'auto':
-                js_resources = [PYSCRIPT_JS]
-            if css_resources is None or css_resources == []:
-                css_resources = [PYSCRIPT_CSS, PYSCRIPT_CSS_OVERRIDES]
-            else:
-                css_resources = list(css_resources)
-            pyconfig = {
-                'packages': manifest.requirements,
-                'plugins': ['!error'],
-                'files': {manifest.resources_zip.name: './*'} if manifest.resources_zip else {},
-            }
-            import json as _json
-            pyconfig_json = _json.dumps(pyconfig)
-            css_resources.append('<style type="text/css">.py-error { display: none; }</style>')
-            if 'worker' in runtime and manifest.worker is not None:
-                plot_script = (
-                    f'<script type="py" async worker config=\'{pyconfig_json}\' '
-                    f'src="{manifest.app_name}.py"></script>'
-                )
-                manifest.worker.content = code
-                manifest.worker.output_path = (
-                    manifest.dest_path / f'{manifest.app_name}.py'
-                )
-            else:
-                plot_script = f'<script type=\'py\' config=\'{pyconfig_json}\'>{code}</script>'
-        else:
-            css_resources = []
-            data_archives = f'{repr(manifest.resources_zip.name)}' if manifest.resources_zip else ''
-            env_spec = ', '.join([repr(req) for req in manifest.requirements])
-            code = code.encode('unicode_escape').decode('utf-8').replace('`', r'\`')
-            if runtime == 'pyodide-worker' and manifest.worker is not None:
-                js_resources = []
-                worker_handler = WORKER_HANDLER_TEMPLATE.render({
-                    'name': manifest.app_name,
-                    'loading_spinner': config.loading_spinner,
-                })
-                web_worker = WEB_WORKER_TEMPLATE.render({
-                    'PYODIDE_URL': PYODIDE_PYC_URL if manifest.compiled else PYODIDE_URL,
-                    'data_archives': data_archives,
-                    'env_spec': env_spec,
-                    'code': code,
-                })
-                manifest.worker.content = web_worker
-                manifest.worker.output_path = (
-                    manifest.dest_path / f'{manifest.app_name}.js'
-                )
-                plot_script = wrap_in_script_tag(worker_handler)
-            else:
-                if js_resources == 'auto':
-                    js_resources = [PYODIDE_PYC_JS if manifest.compiled else PYODIDE_JS]
-                script_template = _pn_env.from_string(PYODIDE_SCRIPT)
-                plot_script = script_template.render({
-                    'data_archives': data_archives,
-                    'env_spec': env_spec,
-                    'code': code,
-                })
-
-        if manifest.prerender:
-            json_id = make_id()
-            docs_json, render_items = standalone_docs_json_and_render_items(document)
-            render_item = render_items[0]
-            escaped_json = escape(serialize_json(docs_json), quote=False)
-            plot_script += wrap_in_script_tag(escaped_json, "application/json", json_id)
-            plot_script += wrap_in_script_tag(script_for_render_items(json_id, render_items))
-        else:
-            render_item = RenderItem(
-                token='',
-                roots=document.roots,
-                use_for_title=False,
-            )
-            render_items = [render_item]
-
-        template = document.template
-        if template is None:
-            template = BASE_TEMPLATE
-        elif isinstance(template, str):
-            template = get_env().from_string("{% extends base %}\n" + template)
-
-        resources = Resources(mode='inline' if manifest.inline else 'cdn')
-        css_resources = css_resources or []
-        css_resources += self._loading_resources(template, manifest.inline)
-        with set_curdoc(document):
-            bokeh_js, bokeh_css = bundle_resources(document.roots, resources)
         pwa_manifest_ref = 'site.webmanifest' if manifest.build_pwa else None
-        extra_js = [INIT_SERVICE_WORKER, bokeh_js] if pwa_manifest_ref else [bokeh_js]
-        bokeh_js = '\n'.join(js_resources + extra_js) if isinstance(js_resources, list) else extra_js[0]
-        bokeh_css = '\n'.join([bokeh_css] + list(css_resources))
+        resources_zip_name = manifest.resources_zip.name if manifest.resources_zip else None
 
-        template_variables = document._template_variables
-        context = template_variables.copy()
-        context.update(dict(
-            title=document.title,
-            bokeh_js=bokeh_js,
-            bokeh_css=bokeh_css,
-            plot_script=plot_script,
-            docs=render_items,
-            base=BASE_TEMPLATE,
-            macros=MACROS,
-            doc=render_item,
-            roots=render_item.roots,
+        html, web_worker = script_to_html(
+            manifest.app_path,
+            requirements=list(manifest.requirements),
+            app_resources=resources_zip_name,
+            runtime=manifest.runtime,
+            prerender=manifest.prerender,
+            panel_version=self._panel_version,
+            local_prefix=self._local_prefix,
             manifest=pwa_manifest_ref,
-            dist_url=CDN_DIST,
-        ))
-
-        html = template.render(context)
-        html = html.replace(
-            '<body>',
-            f'<body class="{LOADING_INDICATOR_CSS_CLASS} pn-{config.loading_spinner}">',
+            inline=manifest.inline,
+            compiled=manifest.compiled,
         )
-        if runtime == 'pyscript-worker':
-            html = (
-                html
-                .replace('<script type="text/javascript"', '<script type="text/javascript" crossorigin="anonymous"')
-                .replace('<link rel="stylesheet"', '<link rel="stylesheet" crossorigin="anonymous"')
-                .replace('<link rel="icon"', '<link rel="icon" crossorigin="anonymous"')
-            )
 
         manifest.html_content = html
         manifest.html_output = manifest.dest_path / f'{manifest.app_name}.html'
+
+        if web_worker is not None and manifest.worker is not None:
+            manifest.worker.content = web_worker
+            if manifest.worker.worker_type == WorkerType.PYODIDE:
+                manifest.worker.output_path = (
+                    manifest.dest_path / f'{manifest.app_name}.js'
+                )
+            elif manifest.worker.worker_type == WorkerType.PYSCRIPT:
+                manifest.worker.output_path = (
+                    manifest.dest_path / f'{manifest.app_name}.py'
+                )
 
     def write_outputs(self) -> None:
         manifest = self._manifest
@@ -412,25 +474,17 @@ class ManifestPersistence:
             with open(dest, 'wb') as f:
                 f.write(img.read_bytes())
             img_rel.append(f'images/{img.name}')
-            manifest.pwa_icons[str(img.name)] = type(
-                'AssetStatus', (), {'exists': True, 'validated': True, 'errors': [], 'warnings': []}
-            )()
+            manifest.pwa_icons[str(img.name)] = AssetStatus(
+                exists=True, validated=True, errors=[], warnings=[],
+            )
 
         title = self._title or 'Panel Applications'
         manifest_path = manifest.dest_path / 'site.webmanifest'
-        pwa_manifest_content = PWA_MANIFEST_TEMPLATE.render(
-            name=title,
-            path='index.html',
-            **self._pwa_config,
-        )
-        with open(manifest_path, 'w', encoding='utf-8') as f:
-            f.write(pwa_manifest_content)
-        manifest.pwa_manifest_path = manifest_path
 
         if manifest.service_worker is not None:
             worker_content = SERVICE_WORKER_TEMPLATE.render(
                 uuid=uuid.uuid4().hex,
-                name=self._title or 'Panel Pyodide App',
+                name=title,
                 pre_cache=', '.join([repr(p) for p in img_rel]),
             )
             sw_path = manifest.dest_path / 'serviceWorker.js'
@@ -440,17 +494,15 @@ class ManifestPersistence:
             manifest.service_worker.output_path = sw_path
             manifest.service_worker.status.exists = True
 
+        files_dict = {manifest.app_name.replace('_', ' '): f'{manifest.app_name}.html'}
+        pwa_manifest_content = build_pwa_manifest(files_dict, title=title, **self._pwa_config)
+        with open(manifest_path, 'w', encoding='utf-8') as f:
+            f.write(pwa_manifest_content)
+        manifest.pwa_manifest_path = manifest_path
+
     def write_index(self, files: dict[str, str]) -> pathlib.Path:
-        from ..resources import INDEX_TEMPLATE
-
-        manifest_ref = 'site.webmanifest' if self._manifest.build_pwa else None
-        favicon = 'images/favicon.ico' if self._manifest.build_pwa else None
-        apple_icon = 'images/apple-touch-icon.png' if self._manifest.build_pwa else None
-
-        items = {label: './' + os.path.basename(f) for label, f in sorted(files.items())}
-        index_html = INDEX_TEMPLATE.render(
-            items=items, manifest=manifest_ref, apple_icon=apple_icon,
-            favicon=favicon, title=self._title, PANEL_CDN=CDN_DIST,
+        index_html = make_index(
+            files, title=self._title, manifest=self._manifest.build_pwa
         )
         index_path = self._manifest.dest_path / 'index.html'
         with open(index_path, 'w') as f:
