@@ -297,6 +297,8 @@ class Design(param.Parameterized, ResourceComponent):
                 except Exception:
                     pass
 
+        self._sync_extension_component_themes(doc)
+
         theme_manager = getattr(template, '_theme_manager', None)
         if theme_manager is not None:
             self._sync_theme_manager(theme_manager)
@@ -316,8 +318,148 @@ class Design(param.Parameterized, ResourceComponent):
             theme_manager_model.design_name = type(self).__name__
             theme_manager_model.is_dark = self.is_dark_theme()
             theme_manager_model.bokeh_theme_json = self.get_bokeh_theme_json()
+            theme_manager_model.resources = self.get_resources()
+            theme_manager_model.extension_themes = self.get_extension_themes()
+            theme_manager_model.fast_style = self.get_fast_style_dict()
+            theme_manager_model.bs_theme = self.get_bs_theme()
         except Exception:
             pass
+
+    #----------------------------------------------------------------
+    # Runtime Design switching helpers
+    #----------------------------------------------------------------
+
+    def get_resources(self) -> dict[str, dict[str, str]]:
+        """
+        Returns a dict of design resources grouped by type:
+        'css', 'js', 'js_modules', 'font'. Each maps a resource name
+        to its URL/path. Only resources that can be dynamically
+        injected at runtime are included (css and font).
+        """
+        result: dict[str, dict[str, str]] = {}
+        resources = getattr(type(self), '_resources', {})
+        for rtype in ('css', 'font'):
+            if rtype in resources:
+                result[rtype] = dict(resources[rtype])
+        return result
+
+    def get_extension_themes(self) -> dict[str, t.Any]:
+        """
+        Extracts theme configuration for extension components
+        (Tabulator, ECharts, Plotly) from the design modifiers.
+        """
+        from ..widgets import Tabulator
+        ext: dict[str, t.Any] = {}
+        modifiers = {}
+        for scls in type(self).__mro__[::-1]:
+            modifiers.update(getattr(scls, 'modifiers', {}).get(Tabulator, {}))
+        if 'theme' in modifiers:
+            ext['tabulator_theme'] = modifiers['theme']
+        if 'theme_classes' in modifiers:
+            ext['tabulator_theme_classes'] = list(modifiers['theme_classes'])
+        ext.setdefault('echarts_theme_light', 'default')
+        ext.setdefault('echarts_theme_dark', 'dark')
+        ext.setdefault('plotly_template_light', 'plotly_white')
+        ext.setdefault('plotly_template_dark', 'plotly_dark')
+        return ext
+
+    def get_fast_style_dict(self) -> dict[str, t.Any]:
+        """
+        Returns Fast Design-specific style parameters.
+        Override in Fast subclass.
+        """
+        return {}
+
+    def get_bs_theme(self) -> str:
+        """
+        Returns Bootstrap theme attribute ('light' or 'dark').
+        Override in Bootstrap subclass.
+        """
+        return 'dark' if self.is_dark_theme() else 'light'
+
+    def apply_runtime_to_document(self, doc: Document, template) -> None:
+        """
+        Unified runtime application of this design to a document.
+        Applies Bokeh theme, reapplies modifiers to all rendered
+        views, syncs extension component (Plotly/ECharts/Tabulator)
+        theme parameters via the standard param/model change chain,
+        and syncs the ThemeManager.
+
+        Parameters
+        ----------
+        doc : Document
+            The Bokeh document to apply the design to.
+        template : BaseTemplate
+            The template associated with the document.
+        """
+        if doc in state._stylesheets:
+            cache = state._stylesheets[doc]
+        else:
+            state._stylesheets[doc] = cache = {}
+
+        if self.theme and self.theme.bokeh_theme and doc:
+            doc.theme = self.theme.bokeh_theme
+
+        for ref, (root_view, root_model, view_doc, comm) in list(state._views.items()):
+            if view_doc is not doc:
+                continue
+            if ref in state._fake_roots:
+                continue
+            with doc.models.freeze():
+                try:
+                    self._reapply(root_view, root_model, isolated=False, cache=cache, document=doc)
+                except Exception:
+                    pass
+
+        self._sync_extension_component_themes(doc)
+
+        theme_manager = getattr(template, '_theme_manager', None)
+        if theme_manager is not None:
+            self._sync_theme_manager(theme_manager)
+
+    def _sync_extension_component_themes(self, doc: Document) -> None:
+        """
+        Syncs theme parameters of already-rendered extension components
+        (Tabulator, ECharts, Plotly) via the standard param/model
+        change chain, so that the Python object, Bokeh model and
+        frontend rendering always stay consistent.
+
+        This is the authoritative channel for extension theme updates;
+        the panel:themechange DOM event is only a fallback notification.
+        """
+        from ..widgets import Tabulator
+        from ..pane.echarts import ECharts as EChartsPane
+        from ..pane.plotly import Plotly as PlotlyPane
+
+        ext_themes = self.get_extension_themes()
+        is_dark = self.is_dark_theme()
+        echarts_theme = ext_themes.get('echarts_theme_dark' if is_dark else 'echarts_theme_light', 'default')
+        plotly_template = ext_themes.get('plotly_template_dark' if is_dark else 'plotly_template_light', 'plotly_white')
+        tabulator_theme = ext_themes.get('tabulator_theme')
+        tabulator_theme_classes = ext_themes.get('tabulator_theme_classes', [])
+
+        for ref, (root_view, root_model, view_doc, comm) in list(state._views.items()):
+            if view_doc is not doc:
+                continue
+            if ref in state._fake_roots:
+                continue
+            for obj in root_view.select():
+                try:
+                    if isinstance(obj, Tabulator):
+                        if tabulator_theme is not None and obj.theme != tabulator_theme:
+                            obj.theme = tabulator_theme
+                        if tabulator_theme_classes and list(obj.theme_classes) != list(tabulator_theme_classes):
+                            obj.theme_classes = list(tabulator_theme_classes)
+                    elif isinstance(obj, EChartsPane):
+                        if hasattr(obj, 'theme') and obj.theme != echarts_theme:
+                            obj.theme = echarts_theme
+                    elif isinstance(obj, PlotlyPane):
+                        if hasattr(obj, 'layout') and isinstance(obj.layout, dict):
+                            current_template = obj.layout.get('template')
+                            if current_template != plotly_template:
+                                obj.layout = dict(obj.layout, template=plotly_template)
+                except Exception:
+                    pass
 
     def _reapply(
         self, viewable: Viewable, root: Model, old_models: list[Model] | None = None,

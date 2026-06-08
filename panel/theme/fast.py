@@ -272,3 +272,20 @@ class Fast(Design):
 
     def _wrapper(self, model):
         return FastWrapper(design=None, object=model, style=self.theme.style)
+
+    def get_fast_style_dict(self) -> dict[str, t.Any]:
+        """
+        Returns Fast Design-specific style parameters extracted
+        from the current theme's FastStyle object.
+        """
+        style = getattr(self.theme, 'style', None)
+        if style is None:
+            return {}
+        result: dict[str, t.Any] = {}
+        for param_name in ['accent_base_color', 'neutral_color', 'background_color',
+                           'luminance', 'corner_radius', 'color', 'font',
+                           'neutral_fill_card_rest', 'neutral_focus',
+                           'neutral_foreground_rest']:
+            if hasattr(style, param_name):
+                result[param_name] = getattr(style, param_name)
+        return result

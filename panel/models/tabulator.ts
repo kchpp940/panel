@@ -401,14 +401,11 @@ export class DataTabulatorView extends HTMLBoxView {
 
   _theme_bound: (() => void) | null = null
 
-  _on_panel_theme_change(e: CustomEvent): void {
-    const detail = (e as any).detail
-    if (detail && detail.is_dark !== undefined) {
-      this._updating_scroll = true
-      this.tabulator?.redraw(true)
-      this._updating_scroll = false
-      this.setStyles()
-    }
+  _on_panel_theme_change(_e: CustomEvent): void {
+    this._updating_scroll = true
+    this.tabulator?.redraw(true)
+    this._updating_scroll = false
+    this.setStyles()
   }
 
   override connect_signals(): void {

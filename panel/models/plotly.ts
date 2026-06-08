@@ -205,13 +205,13 @@ export class PlotlyPlotView extends HTMLBoxView {
   }, 2000, false)
   _throttled_resize: any
 
-  _on_panel_theme_change(e: CustomEvent): void {
-    const detail = (e as any).detail
-    if (detail && detail.bokeh_theme_json && this.container != null && (window as any).Plotly) {
-      const template = detail.is_dark ? 'plotly_dark' : 'plotly_white'
-      const currentLayout = this.container.layout || {}
-      const newLayout = {...currentLayout, template}
-      void (window as any).Plotly.relayout(this.container, newLayout)
+  _on_panel_theme_change(_e: CustomEvent): void {
+    if (this.container != null && (window as any).Plotly) {
+      try {
+        void (window as any).Plotly.Plots.resize(this.container)
+      } catch {
+        // ignore
+      }
     }
   }
 

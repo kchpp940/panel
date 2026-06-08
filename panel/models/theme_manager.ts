@@ -14,6 +14,10 @@ export namespace PanelThemeManager {
     design_name: p.Property<string>
     is_dark: p.Property<boolean>
     bokeh_theme_json: p.Property<{[key: string]: any}>
+    resources: p.Property<{[key: string]: {[key: string]: string}}>
+    extension_themes: p.Property<{[key: string]: any}>
+    fast_style: p.Property<{[key: string]: any}>
+    bs_theme: p.Property<string>
   }
 }
 
@@ -22,10 +26,12 @@ export interface PanelThemeManager extends PanelThemeManager.Attrs {}
 export class PanelThemeManagerView extends View {
   declare model: PanelThemeManager
 
+  _fast_design_provider: any = null
+
   override connect_signals(): void {
     super.connect_signals()
-    const {design, theme, theme_name, base_css, theme_css, css_variables, is_dark, bokeh_theme_json} = this.model.properties
-    this.on_change([design, theme, theme_name, base_css, theme_css, css_variables, is_dark, bokeh_theme_json], () => {
+    const {design, theme, theme_name, base_css, theme_css, css_variables, is_dark, bokeh_theme_json, resources, extension_themes, fast_style, bs_theme} = this.model.properties
+    this.on_change([design, theme, theme_name, base_css, theme_css, css_variables, is_dark, bokeh_theme_json, resources, extension_themes, fast_style, bs_theme], () => {
       this._apply_theme()
     })
   }
@@ -39,7 +45,9 @@ export class PanelThemeManagerView extends View {
     this._apply_css_variables()
     this._apply_base_css()
     this._apply_theme_css()
+    this._apply_resources()
     this._apply_design_classes()
+    this._apply_fast_provider()
     this._dispatch_theme_event()
   }
 
@@ -75,6 +83,68 @@ export class PanelThemeManagerView extends View {
     styleEl.textContent = css
   }
 
+  _apply_resources(): void {
+    const resources = this.model.resources || {}
+    this._apply_css_resources(resources['css'] || {})
+    this._apply_font_resources(resources['font'] || {})
+  }
+
+  _apply_css_resources(css_map: {[key: string]: string}): void {
+    const existing = document.querySelectorAll('link[data-panel-design-css]')
+    const toRemove: Element[] = []
+    const neededIds = new Set<string>()
+    for (const name in css_map) {
+      neededIds.add(`panel-design-css-${name}`)
+    }
+    existing.forEach(el => {
+      if (!neededIds.has(el.getAttribute('data-panel-design-css') || '')) {
+        toRemove.push(el)
+      }
+    })
+    toRemove.forEach(el => el.remove())
+
+    for (const name in css_map) {
+      const url = css_map[name]
+      const id = `panel-design-css-${name}`
+      if (document.getElementById(id)) continue
+      const link = document.createElement('link')
+      link.id = id
+      link.rel = 'stylesheet'
+      link.type = 'text/css'
+      link.href = url
+      link.setAttribute('data-panel-design-css', name)
+      document.head.appendChild(link)
+    }
+  }
+
+  _apply_font_resources(font_map: {[key: string]: string}): void {
+    const existing = document.querySelectorAll('link[data-panel-design-font]')
+    const toRemove: Element[] = []
+    const neededIds = new Set<string>()
+    for (const name in font_map) {
+      neededIds.add(`panel-design-font-${name}`)
+    }
+    existing.forEach(el => {
+      if (!neededIds.has(el.getAttribute('data-panel-design-font') || '')) {
+        toRemove.push(el)
+      }
+    })
+    toRemove.forEach(el => el.remove())
+
+    for (const name in font_map) {
+      const url = font_map[name]
+      const id = `panel-design-font-${name}`
+      if (document.getElementById(id)) continue
+      const link = document.createElement('link')
+      link.id = id
+      link.rel = 'stylesheet'
+      link.type = 'text/css'
+      link.href = url
+      link.setAttribute('data-panel-design-font', name)
+      document.head.appendChild(link)
+    }
+  }
+
   _apply_design_classes(): void {
     const body = document.body
     if (!body) return
@@ -84,10 +154,47 @@ export class PanelThemeManagerView extends View {
     body.classList.add(this.model.is_dark ? 'theme-dark' : 'theme-default')
     const html = document.documentElement
     if (html) {
-      html.setAttribute('data-bs-theme', this.model.is_dark ? 'dark' : 'light')
+      const bsTheme = this.model.bs_theme || (this.model.is_dark ? 'dark' : 'light')
+      html.setAttribute('data-bs-theme', bsTheme)
       html.setAttribute('data-theme', this.model.is_dark ? 'dark' : 'light')
       html.setAttribute('data-panel-theme', this.model.theme)
       html.setAttribute('data-panel-design', this.model.design)
+    }
+  }
+
+  _apply_fast_provider(): void {
+    if (this.model.design !== 'fast') {
+      this._fast_design_provider = null
+      return
+    }
+    const fastStyle = this.model.fast_style || {}
+    if (Object.keys(fastStyle).length === 0) return
+    if (typeof (window as any).fastDesignProvider === 'undefined') return
+
+    if (!this._fast_design_provider) {
+      try {
+        this._fast_design_provider = new (window as any).fastDesignProvider(document.body)
+      } catch (e) {
+        return
+      }
+    }
+    const dp = this._fast_design_provider
+    if (!dp) return
+
+    if (fastStyle.accent_base_color && typeof dp.setAccentColor === 'function') {
+      dp.setAccentColor(fastStyle.accent_base_color)
+    }
+    if (fastStyle.neutral_color && typeof dp.setNeutralColor === 'function') {
+      dp.setNeutralColor(fastStyle.neutral_color)
+    }
+    if (fastStyle.background_color && typeof dp.setBackgroundColor === 'function') {
+      dp.setBackgroundColor(fastStyle.background_color)
+    }
+    if (fastStyle.luminance !== undefined && typeof dp.setLuminance === 'function') {
+      dp.setLuminance(fastStyle.luminance)
+    }
+    if (fastStyle.corner_radius !== undefined && typeof dp.setCornerRadius === 'function') {
+      dp.setCornerRadius(fastStyle.corner_radius)
     }
   }
 
@@ -100,6 +207,10 @@ export class PanelThemeManagerView extends View {
         is_dark: this.model.is_dark,
         css_variables: {...this.model.css_variables},
         bokeh_theme_json: {...this.model.bokeh_theme_json},
+        resources: {...this.model.resources},
+        extension_themes: {...this.model.extension_themes},
+        fast_style: {...this.model.fast_style},
+        bs_theme: this.model.bs_theme,
       }
     })
     document.dispatchEvent(event)
@@ -124,6 +235,10 @@ export class PanelThemeManager extends Model {
       design_name:        [ Str,      '' ],
       is_dark:            [ Bool,     false ],
       bokeh_theme_json:   [ Dict(Str), {} ],
+      resources:          [ Dict(Dict(Str)), {} ],
+      extension_themes:   [ Dict(Str), {} ],
+      fast_style:         [ Dict(Str), {} ],
+      bs_theme:           [ Str,      'light' ],
     }))
   }
 }

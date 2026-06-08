@@ -62,18 +62,9 @@ export class EChartsView extends HTMLBoxView {
     this.on_change([event_config, js_events], () => this._subscribe())
   }
 
-  _on_panel_theme_change(e: CustomEvent): void {
-    const detail = (e as any).detail
-    if (detail && detail.is_dark !== undefined) {
-      const new_theme = detail.is_dark ? 'dark' : 'default'
-      if (new_theme !== this.model.theme) {
-        this.model.theme = new_theme
-      } else {
-        this.render()
-        if (this._chart != null) {
-          this._chart.resize()
-        }
-      }
+  _on_panel_theme_change(_e: CustomEvent): void {
+    if (this._chart != null) {
+      this._chart.resize()
     }
   }
 

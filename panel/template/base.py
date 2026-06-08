@@ -213,7 +213,8 @@ class BaseTemplate(param.Parameterized, MimeRenderMixin, ServableMixin, Resource
         """
         Switches the design system at runtime without page reload.
         Supports switching between Fast, Bootstrap, Material, Native,
-        and custom Design systems.
+        and custom Design systems. This is the unified entry point
+        that recalculates the full resource/modifier/provider chain.
 
         Parameters
         ----------
@@ -229,7 +230,9 @@ class BaseTemplate(param.Parameterized, MimeRenderMixin, ServableMixin, Resource
         >>> from panel.theme import Material
         >>> template.set_design(Material)
         """
+        from ..io.state import state
         from ..theme import Bootstrap, Fast, Material, Native
+
         design_map = {
             'fast': Fast,
             'bootstrap': Bootstrap,
@@ -251,7 +254,18 @@ class BaseTemplate(param.Parameterized, MimeRenderMixin, ServableMixin, Resource
             raise TypeError(
                 f"design must be str, Design class, or Design instance, got {type(design).__name__}"
             )
+
+        if design_cls is self.design:
+            return
+
+        current_theme_name = self._design.get_theme_name() if hasattr(self, '_design') and self._design else 'default'
         self.design = design_cls
+        new_design = self._design
+
+        for doc, tpl in state._templates.items():
+            if tpl is not self:
+                continue
+            new_design.apply_runtime_to_document(doc, self)
 
     def toggle_theme(self) -> None:
         """
