@@ -95,10 +95,6 @@ class Convert(Subcommand):
             default = 1,
             help    = "The number of processes to start in parallel to convert the apps."
         )),
-        ('--no-assets-report', Argument(
-            action  = 'store_true',
-            help    = "Whether to skip generating the assets report and diagnostic output.",
-        )),
     )
 
     _targets = ('pyscript', 'pyodide', 'pyodide-worker', 'pyscript-worker')
@@ -153,8 +149,7 @@ class Convert(Subcommand):
                     max_workers=args.num_procs,
                     http_patch=not args.disable_http_patch,
                     compiled=args.compiled,
-                    verbose=True,
-                    generate_assets_report=not args.no_assets_report,
+                    verbose=True
                 )
             except KeyboardInterrupt:
                 print("Aborted while building docs.")  # noqa: T201
