@@ -414,19 +414,33 @@ export class DataTabulatorView extends HTMLBoxView {
   _last_after_resize_el_height: number | null = null
   _updating_column_state: boolean = false
   _updating_profile: boolean = false
+  _profile_toolbar: HTMLDivElement | null = null
+  _profile_select: HTMLSelectElement | null = null
+  _profile_name_input: HTMLInputElement | null = null
+  _profile_save_btn: HTMLButtonElement | null = null
+  _profile_delete_btn: HTMLButtonElement | null = null
 
   override connect_signals(): void {
     super.connect_signals()
     const {
       configuration, layout, columns, groupby, visible, download,
       children, expanded, cell_styles, hidden_columns, page_size,
-      page, max_page, frozen_rows, sorters, theme_classes,
+      page, max_page, frozen_rows, sorters, filters, theme_classes,
       column_widths, column_order, column_profiles, active_profile,
     } = this.model.properties
 
-    this.on_change([configuration, layout, groupby], debounce(() => {
+    this.on_change([configuration, layout], debounce(() => {
       this.invalidate_render()
     }, 20, false))
+
+    this.on_change(groupby, debounce(() => {
+      this.invalidate_render()
+      this.syncColumnStateFromFrontend()
+    }, 20, false))
+
+    this.on_change(column_profiles, () => {
+      this.renderProfileToolbar()
+    })
 
     this.on_change(visible, () => {
       if (this.model.visible) {
@@ -495,6 +509,7 @@ export class DataTabulatorView extends HTMLBoxView {
       }
     })
     this.on_change(active_profile, () => {
+      this.renderProfileToolbar()
       if (!this._updating_profile) {
         this.applyActiveProfile()
       }
@@ -509,6 +524,7 @@ export class DataTabulatorView extends HTMLBoxView {
     this.on_change(max_page, () => this.setMaxPage())
     this.on_change(frozen_rows, () => this.setFrozen())
     this.on_change(sorters, () => this.setSorters())
+    this.on_change(filters, () => this.setFilters())
     this.on_change(theme_classes, () => this.setCSSClasses(this.tabulator.element))
 
     this.on_change(this.model.source.properties.data, () => {
@@ -724,8 +740,10 @@ export class DataTabulatorView extends HTMLBoxView {
     this._last_after_resize_el_height = null
     this._initializing = true
     this._building = true
-    const container = div({style: {display: "contents"}})
-    const el = div({style: {width: "100%", height: "100%", visibility: "hidden"}})
+    const container = div({style: {display: "flex", flexDirection: "column", width: "100%", height: "100%"}})
+    this._profile_toolbar = this.createProfileToolbar()
+    container.appendChild(this._profile_toolbar)
+    const el = div({style: {width: "100%", height: "100%", visibility: "hidden", flex: "1 1 auto", minHeight: 0}})
     this.container = el
     this.setCSSClasses(el)
     container.appendChild(el)
@@ -783,7 +801,13 @@ export class DataTabulatorView extends HTMLBoxView {
     this.tabulator.on("cellEdited", (cell: any) => this.cellEdited(cell))
     this.tabulator.on("dataFiltering", (filters: any) => {
       this.record_scroll()
-      this.model.filters = filters
+      this._updating_column_state = true
+      try {
+        this.model.filters = filters
+      } finally {
+        this._updating_column_state = false
+      }
+      this.syncColumnStateFromFrontend()
     })
     this.tabulator.on("dataFiltered", (_: any, rows: any[]) => {
       if (this._building) {
@@ -814,11 +838,15 @@ export class DataTabulatorView extends HTMLBoxView {
           sorts.push({field: s.field, dir: s.dir})
         }
       }
-      if (this.model.pagination !== "remote") {
-        this._updating_sort = true
+      this._updating_sort = true
+      this._updating_column_state = true
+      try {
         this.model.sorters = sorts.reverse()
+      } finally {
         this._updating_sort = false
+        this._updating_column_state = false
       }
+      this.syncColumnStateFromFrontend()
     })
     this.tabulator.on("columnResized", (column: any) => {
       this.syncColumnStateFromFrontend()
@@ -827,6 +855,9 @@ export class DataTabulatorView extends HTMLBoxView {
       this.syncColumnStateFromFrontend()
     })
     this.tabulator.on("columnMoved", (column: any, columns: any[]) => {
+      this.syncColumnStateFromFrontend()
+    })
+    this.tabulator.on("groupVisibilityChanged", (group: any, visible: boolean) => {
       this.syncColumnStateFromFrontend()
     })
   }
@@ -1426,6 +1457,21 @@ export class DataTabulatorView extends HTMLBoxView {
     this.tabulator.setSort(this.sorters)
   }
 
+  setFilters(): void {
+    if (this._updating_column_state) {
+      return
+    }
+    if (this._building || this._initializing) {
+      return
+    }
+    const filters = this.model.filters
+    if (!filters || filters.length === 0) {
+      this.tabulator.clearFilter(true)
+    } else {
+      this.tabulator.setFilter(filters)
+    }
+  }
+
   setStyles(): void {
     const style_data = this.model.cell_styles.data
     if (this.tabulator == null || this.tabulator.getDataCount() == 0 || style_data == null || !style_data.size) {
@@ -1576,6 +1622,7 @@ export class DataTabulatorView extends HTMLBoxView {
     const profile = profiles[active_name]
     this._updating_profile = true
     this._updating_column_state = true
+    this._updating_sort = true
     try {
       if (profile.hidden_columns != null) {
         this.model.hidden_columns = profile.hidden_columns
@@ -1592,9 +1639,16 @@ export class DataTabulatorView extends HTMLBoxView {
       if (profile.sorters != null) {
         this.model.sorters = profile.sorters
         this.setSorters()
+        if (this.model.pagination === "remote") {
+          this.requestPage(this.model.page)
+        }
       }
       if (profile.filters != null) {
         this.model.filters = profile.filters
+        this.setFilters()
+        if (this.model.pagination === "remote") {
+          this.requestPage(this.model.page)
+        }
       }
       if (profile.groupby != null) {
         this.model.groupby = profile.groupby
@@ -1604,6 +1658,126 @@ export class DataTabulatorView extends HTMLBoxView {
     } finally {
       this._updating_profile = false
       this._updating_column_state = false
+      this._updating_sort = false
+    }
+  }
+
+  createProfileToolbar(): HTMLDivElement {
+    const toolbar = document.createElement("div")
+    toolbar.className = "pnx-tabulator-profile-toolbar"
+    toolbar.style.display = "flex"
+    toolbar.style.alignItems = "center"
+    toolbar.style.gap = "8px"
+    toolbar.style.padding = "6px 8px"
+    toolbar.style.borderBottom = "1px solid var(--border-subtle, #e0e0e0)"
+    toolbar.style.background = "var(--background-subtle, #fafafa)"
+    toolbar.style.fontSize = "12px"
+    toolbar.style.minHeight = "0"
+    toolbar.style.flex = "0 0 auto"
+
+    const label = document.createElement("span")
+    label.textContent = "Profile:"
+    label.style.color = "var(--text-secondary, #666)"
+    toolbar.appendChild(label)
+
+    const select = document.createElement("select")
+    select.className = "pnx-tabulator-profile-select"
+    select.style.padding = "4px 8px"
+    select.style.border = "1px solid var(--border-subtle, #ccc)"
+    select.style.borderRadius = "4px"
+    select.style.background = "var(--background, #fff)"
+    select.style.color = "var(--text, #333)"
+    select.style.minWidth = "140px"
+    select.addEventListener("change", () => {
+      const name = select.value
+      if (name) {
+        this.model.trigger_event(new ColumnProfileEvent("load", undefined, name))
+      }
+    })
+    this._profile_select = select
+    toolbar.appendChild(select)
+
+    const name_input = document.createElement("input")
+    name_input.type = "text"
+    name_input.placeholder = "Profile name..."
+    name_input.className = "pnx-tabulator-profile-name-input"
+    name_input.style.padding = "4px 8px"
+    name_input.style.border = "1px solid var(--border-subtle, #ccc)"
+    name_input.style.borderRadius = "4px"
+    name_input.style.background = "var(--background, #fff)"
+    name_input.style.color = "var(--text, #333)"
+    name_input.style.minWidth = "140px"
+    this._profile_name_input = name_input
+    toolbar.appendChild(name_input)
+
+    const save_btn = document.createElement("button")
+    save_btn.textContent = "Save"
+    save_btn.className = "pnx-tabulator-profile-save"
+    save_btn.style.padding = "4px 12px"
+    save_btn.style.border = "1px solid var(--border-subtle, #ccc)"
+    save_btn.style.borderRadius = "4px"
+    save_btn.style.background = "var(--background, #fff)"
+    save_btn.style.color = "var(--text, #333)"
+    save_btn.style.cursor = "pointer"
+    save_btn.addEventListener("click", () => {
+      const name = name_input.value.trim() || select.value
+      if (name) {
+        const state = this.getColumnState()
+        this.model.trigger_event(new ColumnProfileEvent("save", state, name))
+        name_input.value = ""
+      }
+    })
+    this._profile_save_btn = save_btn
+    toolbar.appendChild(save_btn)
+
+    const delete_btn = document.createElement("button")
+    delete_btn.textContent = "Delete"
+    delete_btn.className = "pnx-tabulator-profile-delete"
+    delete_btn.style.padding = "4px 12px"
+    delete_btn.style.border = "1px solid var(--border-subtle, #ccc)"
+    delete_btn.style.borderRadius = "4px"
+    delete_btn.style.background = "var(--background, #fff)"
+    delete_btn.style.color = "var(--text, #333)"
+    delete_btn.style.cursor = "pointer"
+    delete_btn.addEventListener("click", () => {
+      const name = select.value
+      if (name) {
+        this.model.trigger_event(new ColumnProfileEvent("delete", undefined, name))
+        name_input.value = ""
+      }
+    })
+    this._profile_delete_btn = delete_btn
+    toolbar.appendChild(delete_btn)
+
+    this.renderProfileToolbar()
+    return toolbar
+  }
+
+  renderProfileToolbar(): void {
+    if (!this._profile_select) {
+      return
+    }
+    const profiles = this.model.column_profiles || {}
+    const active = this.model.active_profile
+    const select = this._profile_select
+    const current = select.value
+    select.innerHTML = ""
+    const empty_opt = document.createElement("option")
+    empty_opt.value = ""
+    empty_opt.textContent = "-- Select profile --"
+    select.appendChild(empty_opt)
+    for (const name of Object.keys(profiles).sort()) {
+      const opt = document.createElement("option")
+      opt.value = name
+      opt.textContent = name
+      select.appendChild(opt)
+    }
+    if (active && active in profiles) {
+      select.value = active
+    } else if (current && current in profiles) {
+      select.value = current
+    } else {
+      select.value = ""
     }
   }
 

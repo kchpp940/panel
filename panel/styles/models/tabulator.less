@@ -2,6 +2,50 @@
   overflow: visible;
 }
 
+.pnx-tabulator-profile-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border-subtle, #e0e0e0);
+  background: var(--background-subtle, #fafafa);
+  font-size: 12px;
+
+  select, input[type="text"] {
+    padding: 4px 8px;
+    border: 1px solid var(--border-subtle, #ccc);
+    border-radius: 4px;
+    background: var(--background, #fff);
+    color: var(--text, #333);
+  }
+
+  select {
+    min-width: 140px;
+  }
+
+  input[type="text"] {
+    min-width: 140px;
+  }
+
+  button {
+    padding: 4px 12px;
+    border: 1px solid var(--border-subtle, #ccc);
+    border-radius: 4px;
+    background: var(--background, #fff);
+    color: var(--text, #333);
+    cursor: pointer;
+    transition: background 0.15s ease;
+
+    &:hover {
+      background: var(--background-subtle, #f0f0f0);
+    }
+
+    &:active {
+      background: var(--background-muted, #e0e0e0);
+    }
+  }
+}
+
 .tabulator-table {
   max-width: max-content;
 
