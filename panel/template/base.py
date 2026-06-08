@@ -189,22 +189,36 @@ class BaseTemplate(param.Parameterized, MimeRenderMixin, ServableMixin, Resource
 
     def _restore_from_url_params(self, doc: Document) -> bool:
         """
-        Checks URL query parameters for ?design= and ?theme= (set by
-        the frontend cross-design soft-reload flow) and applies them
-        to this template. Returns True if any restoration occurred.
+        [Early phase] Checks URL query parameters for design/theme shell
+        switch after a cross-design soft reload:
 
-        The design/theme are set at template construction time so that
-        the Jinja template renders with the correct DOM shell for the
-        target design (Fast Web Components vs. Bootstrap classes etc.).
+          ?design=bootstrap&theme=dark&_pst=<token>
+
+        Only handles design/theme selection (must happen before Jinja
+        template render so the correct DOM shell is emitted). Widget
+        state restore from the _pst token happens later in
+        _restore_widget_state_from_token(), after all views are
+        registered in state._views.
+
+        Returns True if design/theme was restored.
         """
         from ..io.state import state
         from ..theme import Bootstrap, Fast, Material, Native
+        import logging
+
+        logger = logging.getLogger('panel.template')
 
         design_map = {
             'fast': Fast,
             'bootstrap': Bootstrap,
             'material': Material,
             'native': Native,
+        }
+
+        self._last_restore_result: dict[str, t.Any] = {
+            'design_theme_restored': False,
+            'state_restore': None,
+            'warnings': [],
         }
 
         try:
@@ -225,22 +239,91 @@ class BaseTemplate(param.Parameterized, MimeRenderMixin, ServableMixin, Resource
             if 'design' in params and params['design']:
                 design_name = params['design'][0].lower()
                 if design_name in design_map and design_map[design_name] is not self.design:
-                    self.design = design_map[design_name]
-                    restored_any = True
+                    try:
+                        self.design = design_map[design_name]
+                        restored_any = True
+                        self._last_restore_result['design_theme_restored'] = True
+                    except Exception as e:
+                        self._last_restore_result['warnings'].append(f'design restore failed: {e}')
+                        logger.warning('Failed to restore design from URL: %s', e)
 
             if 'theme' in params and params['theme']:
                 theme_name = params['theme'][0].lower()
                 if theme_name in ('default', 'dark'):
-                    theme_cls = DarkTheme if theme_name == 'dark' else self.design._themes['default']
-                    self.theme = theme_cls
-                    restored_any = True
+                    try:
+                        theme_cls = DarkTheme if theme_name == 'dark' else self.design._themes['default']
+                        self.theme = theme_cls
+                        restored_any = True
+                        self._last_restore_result['design_theme_restored'] = True
+                    except Exception as e:
+                        self._last_restore_result['warnings'].append(f'theme restore failed: {e}')
+                        logger.warning('Failed to restore theme from URL: %s', e)
 
             if restored_any:
-                self._design._sync_theme_manager(self._theme_manager)
+                try:
+                    self._design._sync_theme_manager(self._theme_manager)
+                except Exception:
+                    pass
+
+            if '_pst' in params and params['_pst']:
+                self._pending_state_token = params['_pst'][0]
 
             return restored_any
-        except Exception:
+        except Exception as e:
+            logger.warning('Unexpected error in _restore_from_url_params: %s', e)
             return False
+
+    def _restore_widget_state_from_token(self, doc: Document) -> dict[str, t.Any]:
+        """
+        [Late phase] Restores widget/location/tabs state from the
+        _pst token that was captured in _restore_from_url_params().
+        Must be called AFTER all render items have been added to
+        state._views (i.e. after add_to_doc loop in _init_doc).
+
+        Degrades gracefully: token expiry, invalid token, or partial
+        restore failures are recorded in _last_restore_result but
+        never raise.
+        """
+        from ..io.state import state
+        import logging
+
+        logger = logging.getLogger('panel.template')
+        default_result: dict[str, t.Any] = {
+            'restored': [],
+            'failed': [],
+            'location_restored': False,
+            'token_expired': False,
+        }
+
+        token = getattr(self, '_pending_state_token', '')
+        if not token:
+            return default_result
+
+        try:
+            restore_result = state._restore_design_snapshot(token, doc)
+            self._last_restore_result['state_restore'] = restore_result
+            if restore_result.get('token_expired'):
+                msg = (
+                    'design-switch state token expired or not found; '
+                    'design/theme still applied but widget values were lost'
+                )
+                self._last_restore_result['warnings'].append(msg)
+                logger.warning('Cross-design state restore token expired or not found')
+            else:
+                restored_count = len(restore_result.get('restored', []))
+                failed_count = len(restore_result.get('failed', []))
+                if failed_count:
+                    logger.info(
+                        'Cross-design state restore: %d widgets restored, '
+                        '%d items failed to restore',
+                        restored_count, failed_count,
+                    )
+            return restore_result
+        except Exception as e:
+            self._last_restore_result['warnings'].append(f'state restore error: {e}')
+            logger.warning('Error during cross-design state restore: %s', e)
+            default_result['failed'].append(('*', str(e)))
+            return default_result
 
     #----------------------------------------------------------------
     # Runtime theme/design switching (Public API)
@@ -366,8 +449,13 @@ class BaseTemplate(param.Parameterized, MimeRenderMixin, ServableMixin, Resource
                 continue
             theme_mgr = self._get_theme_manager(doc)
             if theme_mgr is not None:
+                try:
+                    token = state._save_design_snapshot(doc)
+                except Exception:
+                    token = ''
                 theme_mgr.reload_design = design_name
                 theme_mgr.reload_theme = current_theme_name
+                theme_mgr.reload_token = token
 
     def toggle_theme(self) -> None:
         """
@@ -506,6 +594,11 @@ class BaseTemplate(param.Parameterized, MimeRenderMixin, ServableMixin, Resource
 
         # Initialize ThemeManager for runtime theme switching
         self._init_theme_manager(document)
+
+        # Restore widget/location/tabs state from _pst token (late phase —
+        # must run after all render items have been added to state._views).
+        if getattr(self, '_pending_state_token', ''):
+            self._restore_widget_state_from_token(document)
 
         # Apply the jinja2 template and update template variables
         if notebook:

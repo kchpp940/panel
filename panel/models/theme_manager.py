@@ -66,3 +66,9 @@ class ThemeManager(Model):
     reload_theme = String(default='', help="""
         Set to a theme name ('default' or 'dark') alongside reload_design
         to preserve the color mode across the design switch reload.""")
+
+    reload_token = String(default='', help="""
+        Short-lived token pointing to a server-side snapshot of widget,
+        location, and tabs state. When non-empty, the frontend reloads
+        the page with ?_pst={token} so the new session can restore state
+        via state._restore_design_snapshot().""")

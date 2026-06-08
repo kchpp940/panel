@@ -20,6 +20,7 @@ export namespace PanelThemeManager {
     bs_theme: p.Property<string>
     reload_design: p.Property<string>
     reload_theme: p.Property<string>
+    reload_token: p.Property<string>
   }
 }
 
@@ -32,11 +33,11 @@ export class PanelThemeManagerView extends View {
 
   override connect_signals(): void {
     super.connect_signals()
-    const {design, theme, theme_name, base_css, theme_css, css_variables, is_dark, bokeh_theme_json, resources, extension_themes, fast_style, bs_theme, reload_design, reload_theme} = this.model.properties
+    const {design, theme, theme_name, base_css, theme_css, css_variables, is_dark, bokeh_theme_json, resources, extension_themes, fast_style, bs_theme, reload_design, reload_theme, reload_token} = this.model.properties
     this.on_change([design, theme, theme_name, base_css, theme_css, css_variables, is_dark, bokeh_theme_json, resources, extension_themes, fast_style, bs_theme], () => {
       this._apply_theme()
     })
-    this.on_change([reload_design, reload_theme], () => {
+    this.on_change([reload_design, reload_theme, reload_token], () => {
       this._handle_design_reload()
     })
   }
@@ -232,15 +233,23 @@ export class PanelThemeManagerView extends View {
   }
 
   _handle_design_reload(): void {
-    if (!this.model.reload_design) return
+    if (!this.model.reload_design && !this.model.reload_token) return
 
     const newDesign = this.model.reload_design
     const newTheme = this.model.reload_theme || this.model.theme
+    const token = this.model.reload_token
 
     const url = new URL(window.location.href)
-    url.searchParams.set('design', newDesign)
+    if (newDesign) {
+      url.searchParams.set('design', newDesign)
+    }
     if (newTheme) {
       url.searchParams.set('theme', newTheme)
+    }
+    if (token) {
+      url.searchParams.set('_pst', token)
+    } else {
+      url.searchParams.delete('_pst')
     }
 
     try {
@@ -248,16 +257,6 @@ export class PanelThemeManagerView extends View {
       snapshot.location_hash = window.location.hash
       snapshot.scroll_y = window.scrollY
       snapshot.scroll_x = window.scrollX
-      if (typeof Bokeh !== 'undefined' && Bokeh.documents && Bokeh.documents.length > 0) {
-        snapshot.widgets = {}
-        const doc = Bokeh.documents[0]
-        for (const root of doc.roots()) {
-          if ((root as any).properties && (root as any).properties.value !== undefined) {
-            const id = (root as any).id
-            snapshot.widgets[id] = {value: (root as any).value}
-          }
-        }
-      }
       sessionStorage.setItem('panel_design_switch_state', JSON.stringify(snapshot))
     } catch (e) {
       // ignore state save errors, reload anyway
@@ -309,6 +308,7 @@ export class PanelThemeManager extends Model {
       bs_theme:           [ Str,      'light' ],
       reload_design:      [ Str,      '' ],
       reload_theme:       [ Str,      '' ],
+      reload_token:       [ Str,      '' ],
     }))
   }
 }

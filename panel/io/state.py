@@ -239,6 +239,234 @@ class _state(param.Parameterized):
     # Types
     _notification_type: t.ClassVar[type[NotificationAreaBase] | None] = None
 
+    # Design switch snapshots (token -> snapshot dict)
+    _design_switch_snapshots: t.ClassVar[dict[str, dict[str, t.Any]]] = {}
+    _DESIGN_SWITCH_SNAPSHOT_TTL: int = 300  # 5 minutes TTL in seconds
+
+    #----------------------------------------------------------------
+    # Design switch snapshot / restore
+    #----------------------------------------------------------------
+
+    def _collect_serializable_widget_params(self, obj: t.Any) -> dict[str, t.Any]:
+        """
+        Collects serializable parameter values from a Panel widget/pane.
+        Only includes parameters that are safe to round-trip through JSON.
+        """
+        params: dict[str, t.Any] = {}
+        try:
+            param_obj = getattr(obj, 'param', None)
+            if param_obj is None:
+                return params
+            for pname, p in param_obj.objects().items():
+                if pname in ('name', 'loading', 'align'):
+                    continue
+                if getattr(p, 'readonly', False):
+                    continue
+                try:
+                    value = getattr(obj, pname)
+                except Exception:
+                    continue
+                try:
+                    import json
+                    json.dumps(value)
+                    params[pname] = value
+                except (TypeError, ValueError):
+                    try:
+                        if hasattr(value, 'to_dict'):
+                            params[pname] = value.to_dict()
+                        elif hasattr(value, 'to_list'):
+                            params[pname] = value.to_list()
+                        elif isinstance(value, (list, tuple)):
+                            serializable = True
+                            for v in value:
+                                try:
+                                    json.dumps(v)
+                                except (TypeError, ValueError):
+                                    serializable = False
+                                    break
+                            if serializable:
+                                params[pname] = list(value)
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+        return params
+
+    def _collect_tabs_active(self, obj: t.Any) -> dict[str, t.Any]:
+        """
+        Collects active tab / accordion index from Tab, Tabs, Accordion, etc.
+        """
+        result: dict[str, t.Any] = {}
+        try:
+            if hasattr(obj, 'param') and 'active' in obj.param.objects():
+                result['active'] = getattr(obj, 'active', None)
+        except Exception:
+            pass
+        return result
+
+    def _save_design_snapshot(self, doc: Document | None = None) -> str:
+        """
+        Saves a snapshot of the current session state for cross-design
+        soft reload. Includes:
+          - Widget parameter values (serializable only)
+          - Location URL state (href/pathname/search/hash)
+          - Tabs/Accordion active indices
+          - Timestamp for TTL expiration
+
+        Returns a short random token used to look up the snapshot on
+        the next page load.
+
+        Parameters
+        ----------
+        doc : Document, optional
+            The document to snapshot. Defaults to state.curdoc.
+        """
+        import secrets
+        import time
+
+        doc = doc or self.curdoc
+        if doc is None:
+            return ''
+
+        snapshot: dict[str, t.Any] = {
+            'widgets': {},
+            'location': {},
+            'tabs_active': {},
+            'created_at': time.time(),
+        }
+
+        # Collect widget state from state._views
+        for model_id, (view_obj, _bk_model, view_doc, _comm) in list(self._views.items()):
+            if view_doc is not doc:
+                continue
+            try:
+                view_snapshot: dict[str, t.Any] = {}
+                view_snapshot['params'] = self._collect_serializable_widget_params(view_obj)
+                tabs_data = self._collect_tabs_active(view_obj)
+                if tabs_data:
+                    view_snapshot['tabs'] = tabs_data
+                if view_snapshot['params'] or view_snapshot.get('tabs'):
+                    snapshot['widgets'][model_id] = view_snapshot
+            except Exception:
+                continue
+
+        # Collect location state
+        loc = self._locations.get(doc) if doc else None
+        if loc is not None:
+            snapshot['location'] = {
+                'href': getattr(loc, 'href', ''),
+                'pathname': getattr(loc, 'pathname', ''),
+                'search': getattr(loc, 'search', ''),
+                'hash': getattr(loc, 'hash', ''),
+            }
+
+        # Prune expired snapshots to prevent memory leaks
+        now = time.time()
+        expired_tokens = [
+            tok for tok, snap in self._design_switch_snapshots.items()
+            if now - snap.get('created_at', 0) > self._DESIGN_SWITCH_SNAPSHOT_TTL
+        ]
+        for tok in expired_tokens:
+            self._design_switch_snapshots.pop(tok, None)
+
+        # Generate unique token and store
+        token = secrets.token_urlsafe(12)
+        self._design_switch_snapshots[token] = snapshot
+
+        return token
+
+    def _restore_design_snapshot(self, token: str, doc: Document | None = None) -> dict[str, t.Any]:
+        """
+        Restores widget/location/tabs state from a previously saved
+        design-switch snapshot. Called on the new session after a
+        cross-design soft reload.
+
+        Returns a dict with keys:
+          - 'restored': list of widget model_ids successfully restored
+          - 'failed': list of (model_id, reason) tuples for widgets
+                      that could not be restored
+          - 'location_restored': bool indicating if location was applied
+          - 'token_expired': bool indicating the token was not found or TTL'd out
+
+        Parameters
+        ----------
+        token : str
+            The token returned by _save_design_snapshot().
+        doc : Document, optional
+            The target document. Defaults to state.curdoc.
+        """
+        import time
+
+        result: dict[str, t.Any] = {
+            'restored': [],
+            'failed': [],
+            'location_restored': False,
+            'token_expired': False,
+        }
+
+        if not token:
+            result['token_expired'] = True
+            return result
+
+        snapshot = self._design_switch_snapshots.pop(token, None)
+        if snapshot is None:
+            result['token_expired'] = True
+            return result
+
+        now = time.time()
+        if now - snapshot.get('created_at', 0) > self._DESIGN_SWITCH_SNAPSHOT_TTL:
+            result['token_expired'] = True
+            return result
+
+        doc = doc or self.curdoc
+        if doc is None:
+            return result
+
+        # Restore widget params — attempt match by model_id in new _views
+        widget_snapshots = snapshot.get('widgets', {})
+        for model_id, widget_snap in widget_snapshots.items():
+            if model_id not in self._views:
+                result['failed'].append((model_id, 'model_id not present in new session'))
+                continue
+            view_obj, _bk_model, view_doc, _comm = self._views[model_id]
+            if view_doc is not doc:
+                result['failed'].append((model_id, 'document mismatch'))
+                continue
+            try:
+                params = widget_snap.get('params', {})
+                param_obj = getattr(view_obj, 'param', None)
+                if param_obj is not None:
+                    valid_params = {
+                        k: v for k, v in params.items()
+                        if k in param_obj.objects() and not getattr(param_obj.objects().get(k), 'readonly', False)
+                    }
+                    if valid_params:
+                        param_obj.update(**valid_params)
+                        result['restored'].append(model_id)
+                tabs_data = widget_snap.get('tabs', {})
+                if tabs_data and hasattr(view_obj, 'param') and 'active' in view_obj.param.objects():
+                    try:
+                        view_obj.active = tabs_data['active']
+                    except Exception as e:
+                        result['failed'].append((model_id, f'tabs active: {e}'))
+            except Exception as e:
+                result['failed'].append((model_id, str(e)))
+
+        # Restore location
+        loc = self._locations.get(doc) if doc else None
+        loc_snap = snapshot.get('location', {})
+        if loc is not None and loc_snap:
+            try:
+                preserved_hash = loc_snap.get('hash', '')
+                if preserved_hash:
+                    with edit_readonly(loc):
+                        loc.hash = preserved_hash
+                result['location_restored'] = True
+            except Exception as e:
+                result['failed'].append(('location', str(e)))
+
+        return result
+
     def __repr__(self) -> str:
         server_info = []
         for server, panel, _docs in self._servers.values():
