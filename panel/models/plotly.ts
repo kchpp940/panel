@@ -12,7 +12,16 @@ import {ColumnDataSource} from "@bokehjs/models/sources/column_data_source"
 import {debounce} from  "debounce"
 
 import {HTMLBox, HTMLBoxView, set_size} from "./layout"
-import {InteractionStore, type InteractionEventKind, type InteractionSelection, type InteractionViewport} from "./interaction_store"
+import {
+  InteractionStore,
+  type InteractionEventKind,
+  type InteractionFilter,
+  type InteractionSelection,
+  type InteractionViewport,
+  build_point_filters,
+  build_range_filters,
+  collect_fields,
+} from "./interaction_store"
 import {convertUndefined, deepCopy, get, reshape, throttle} from "./util"
 
 import plotly_css from "styles/models/plotly.css"
@@ -237,6 +246,13 @@ export class PlotlyPlotView extends HTMLBoxView {
     })
   }
 
+  _get_dataset_id(): string | undefined {
+    if (this.model.source != null && this.model.source.name != null && this.model.source.name !== "") {
+      return this.model.source.name
+    }
+    return undefined
+  }
+
   _point_selection_from_points(points: any[] | null | undefined): InteractionSelection | null {
     if (points == null || points.length === 0) {
       return null
@@ -256,7 +272,10 @@ export class PlotlyPlotView extends HTMLBoxView {
       }
       values.push(v)
     }
-    return {mode: "point", indices, values}
+    const dataset_id = this._get_dataset_id()
+    const fields = collect_fields(values)
+    const filters = build_point_filters(values, indices)
+    return {mode: "point", dataset_id, indices, fields, values, filters}
   }
 
   _range_selection_from_event(eventData: any): InteractionSelection | null {
@@ -283,7 +302,13 @@ export class PlotlyPlotView extends HTMLBoxView {
     if (Object.keys(ranges).length === 0 && indices.length === 0) {
       return null
     }
-    return {mode: "range", ranges, indices, values}
+    const dataset_id = this._get_dataset_id()
+    const fields = collect_fields(values, Object.keys(ranges))
+    const filters = build_range_filters(ranges)
+    if (indices.length > 0) {
+      filters.unshift({field: "index", op: "in", value: indices.slice()})
+    }
+    return {mode: "range", dataset_id, ranges, fields, indices, values, filters}
   }
 
   _viewport_from_layout(viewport: any): InteractionViewport {
@@ -294,7 +319,10 @@ export class PlotlyPlotView extends HTMLBoxView {
         ranges[match[1]] = viewport[key]
       }
     }
-    return {ranges}
+    const dataset_id = this._get_dataset_id()
+    const fields = Object.keys(ranges)
+    const filters = build_range_filters(ranges)
+    return {dataset_id, fields, ranges, filters}
   }
 
   override connect_signals(): void {

@@ -10,7 +10,9 @@ from .datetime_slider import DatetimeSlider  # noqa
 from .esm import AnyWidgetComponent, ReactComponent, ReactiveESM  # noqa
 from .feed import Feed  # noqa
 from .icon import ButtonIcon, ToggleIcon, _ClickableIcon  # noqa
-from .interaction_store import InteractionEvent, InteractionStore  # noqa
+from .interaction_store import (  # noqa
+    InteractionEvent, InteractionFilter, InteractionStore,
+)
 from .ipywidget import IPyWidget  # noqa
 from .layout import Card, Column  # noqa
 from .location import Location  # noqa

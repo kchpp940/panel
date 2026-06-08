@@ -16,7 +16,7 @@ import {debounce} from "debounce"
 
 import {comm_settings} from "./comm_manager"
 import {transform_cds_to_records} from "./data"
-import {InteractionStore, type InteractionEventKind, type InteractionSelection} from "./interaction_store"
+import {InteractionStore, type InteractionEventKind, type InteractionSelection, build_point_filters, collect_fields} from "./interaction_store"
 import {HTMLBox, HTMLBoxView} from "./layout"
 import {schedule_when, transformJsPlaceholders} from "./util"
 
@@ -432,7 +432,10 @@ export class DataTabulatorView extends HTMLBoxView {
         values.push(v)
       }
     }
-    return {mode: "rows", indices, values}
+    const dataset_id = this.model.source?.name ?? undefined
+    const fields = collect_fields(values)
+    const filters = build_point_filters(values, indices)
+    return {mode: "rows", dataset_id, indices, fields, values, filters}
   }
 
   _point_selection_from_cell(index: number, column: string): InteractionSelection {
@@ -442,7 +445,10 @@ export class DataTabulatorView extends HTMLBoxView {
       row[col] = this.model.source.data[col][index]
     }
     values.push(row)
-    return {mode: "point", indices: [index], values}
+    const dataset_id = this.model.source?.name ?? undefined
+    const fields = collect_fields(values)
+    const filters = build_point_filters(values, [index])
+    return {mode: "point", dataset_id, indices: [index], fields, values, filters}
   }
 
   override connect_signals(): void {

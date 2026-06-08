@@ -6,23 +6,57 @@ import {View} from "@bokehjs/core/view"
 
 export type InteractionEventKind = "hover" | "selection" | "viewport" | "row_selection"
 
+export type InteractionFilterOp =
+  | "in"
+  | "not_in"
+  | "range"
+  | "=="
+  | "!="
+  | ">"
+  | ">="
+  | "<"
+  | "<="
+
+export interface InteractionFilter {
+  /** Column/field name, or the literal "index" for row-index-based filters. */
+  field: string
+  /** The filter operation. */
+  op: InteractionFilterOp
+  /**
+   * Value for the filter:
+   *  - for "in" / "not_in": an array of values
+   *  - for "range": a two-element tuple [min, max], inclusive
+   *  - for comparison ops: a scalar value
+   */
+  value: any
+}
+
 export interface InteractionSelectionPoint {
   mode: "point"
+  dataset_id?: string
   indices: number[]
+  fields: string[]
   values: Array<{[field: string]: any}>
+  filters: InteractionFilter[]
 }
 
 export interface InteractionSelectionRange {
   mode: "range"
+  dataset_id?: string
   ranges: {[axis: string]: [any, any]}
+  fields: string[]
   indices?: number[]
   values?: Array<{[field: string]: any}>
+  filters: InteractionFilter[]
 }
 
 export interface InteractionSelectionRows {
   mode: "rows"
+  dataset_id?: string
   indices: number[]
+  fields: string[]
   values: Array<{[field: string]: any}>
+  filters: InteractionFilter[]
 }
 
 export type InteractionSelection =
@@ -31,7 +65,10 @@ export type InteractionSelection =
   | InteractionSelectionRows
 
 export interface InteractionViewport {
+  dataset_id?: string
+  fields: string[]
   ranges: {[axis: string]: [any, any]}
+  filters: InteractionFilter[]
 }
 
 export interface InteractionEventPayload {
@@ -42,6 +79,71 @@ export interface InteractionEventPayload {
   payload: any
   selection?: InteractionSelection
   viewport?: InteractionViewport
+}
+
+/**
+ * Build a list of point filters from a list of row records.
+ * For each distinct field across all rows, emits an `{field, op: "in", value: [...]}`
+ * filter, plus an index-based `{field: "index", op: "in", value: indices}` filter
+ * when indices are provided.
+ */
+export function build_point_filters(
+  values: Array<{[field: string]: any}>,
+  indices: number[] | null = null,
+): InteractionFilter[] {
+  const filters: InteractionFilter[] = []
+  if (indices != null && indices.length > 0) {
+    filters.push({field: "index", op: "in", value: indices.slice()})
+  }
+  const fieldValues = new Map<string, Set<any>>()
+  for (const row of values) {
+    for (const [f, v] of Object.entries(row)) {
+      if (v === undefined || v === null) {
+        continue
+      }
+      if (!fieldValues.has(f)) fieldValues.set(f, new Set())
+      fieldValues.get(f)!.add(v)
+    }
+  }
+  for (const [field, set] of fieldValues.entries()) {
+    filters.push({field, op: "in", value: Array.from(set)})
+  }
+  return filters
+}
+
+/**
+ * Build a list of range filters from an axis→[min,max] mapping.
+ */
+export function build_range_filters(ranges: {[axis: string]: [any, any]}): InteractionFilter[] {
+  const filters: InteractionFilter[] = []
+  for (const [axis, range] of Object.entries(ranges)) {
+    if (Array.isArray(range) && range.length === 2) {
+      // Normalize axis name: plotly uses "xaxis.range", vega uses "x", echarts uses "x"
+      let field = axis
+      const match = axis.match(/^(x|y|xaxis|yaxis)(\d*)\.range$/)
+      if (match) {
+        const base = match[1].replace("axis", "")
+        field = base + (match[2] || "")
+      }
+      filters.push({field, op: "range", value: range})
+    }
+  }
+  return filters
+}
+
+/**
+ * Given a list of row records and optional column name hints, collect
+ * all distinct field names.
+ */
+export function collect_fields(
+  values: Array<{[field: string]: any}>,
+  hints: string[] = [],
+): string[] {
+  const fields = new Set<string>(hints)
+  for (const row of values) {
+    for (const f of Object.keys(row)) fields.add(f)
+  }
+  return Array.from(fields)
 }
 
 export class InteractionEvent extends ModelEvent {

@@ -21,6 +21,28 @@ InteractionEventKind = t.Literal["hover", "selection", "viewport", "row_selectio
 
 InteractionEventKinds = enumeration("hover", "selection", "viewport", "row_selection")
 
+InteractionFilterOp = t.Literal[
+    "in", "not_in", "range", "==", "!=", ">", ">=", "<", "<=",
+]
+
+
+class InteractionFilter(t.TypedDict, total=False):
+    """
+    A single normalized filter condition. Subscribers can apply these
+    filters directly to a pandas DataFrame without parsing library-specific
+    payloads.
+
+    Fields:
+        field: Column/field name, or the literal "index" for row-index filters.
+        op: The filter operator.
+        value: For "in"/"not_in" - an array of values;
+               for "range" - a [min, max] tuple (inclusive);
+               for comparison ops - a scalar value.
+    """
+    field: str
+    op: InteractionFilterOp
+    value: t.Any
+
 
 class InteractionEvent(ModelEvent):
 
@@ -66,14 +88,24 @@ class InteractionStore(Model):
         - source: human-readable source name (e.g. "plotly", "vega")
         - source_id: model id of the originating component
         - timestamp: monotonic timestamp in ms
-        - payload: original raw event from the library
+        - payload: original raw event from the library (for advanced use)
         - selection: normalized selection data (when applicable)
             - mode: "point" | "range" | "rows"
-            - indices: list of integer indices
-            - values: list of {field: value} dicts
+            - dataset_id: optional identifier of the underlying dataset
+            - indices: list of integer row/point indices
+            - fields: list of distinct column/field names involved
+            - values: list of {field: value} dicts per selected item
             - ranges: (mode="range" only) {axis: [min, max]}
+            - filters: list of InteractionFilter dicts that can be applied
+                       directly to a pandas DataFrame
         - viewport: normalized viewport data (when applicable)
+            - dataset_id: optional identifier of the underlying dataset
+            - fields: list of axis/field names involved
             - ranges: {axis: [min, max]}
+            - filters: list of InteractionFilter dicts (one per axis range)
+
+    Each filter in ``filters`` has the shape:
+        {field: str, op: "in" | "not_in" | "range" | "==" | ..., value: any}
     """
 
     events = List(

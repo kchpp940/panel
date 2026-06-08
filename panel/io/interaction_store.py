@@ -9,6 +9,7 @@ import typing as t
 import param
 
 from ..models.interaction_store import (
+    InteractionFilter,
     InteractionEvent as _BkInteractionEvent,
     InteractionStore as _BkInteractionStore,
 )
@@ -21,10 +22,147 @@ if t.TYPE_CHECKING:
 
     from bokeh.document import Document
     from bokeh.model import Model
+    from pandas import DataFrame
     from pyviz_comms import Comm
 
     InteractionEventKind = t.Literal["hover", "selection", "viewport", "row_selection"]
 
+
+# ---------------------------------------------------------------------------
+# Filter helpers
+# ---------------------------------------------------------------------------
+
+def apply_filter(
+    df: DataFrame,
+    f: InteractionFilter,
+) -> DataFrame:
+    """
+    Apply a single ``InteractionFilter`` to a pandas DataFrame.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        The dataframe to filter.
+    f : dict
+        An InteractionFilter dict with keys ``field``, ``op``, ``value``.
+
+    Returns
+    -------
+    DataFrame
+        A filtered view/copy of the input dataframe.
+    """
+    field = f["field"]
+    op = f["op"]
+    value = f["value"]
+
+    if field == "index":
+        series = df.index
+    elif field in df.columns:
+        series = df[field]
+    else:
+        return df.iloc[0:0]
+
+    if op == "in":
+        mask = series.isin(list(value))
+    elif op == "not_in":
+        mask = ~series.isin(list(value))
+    elif op == "range":
+        lo, hi = value
+        mask = (series >= lo) & (series <= hi)
+    elif op == "==":
+        mask = series == value
+    elif op == "!=":
+        mask = series != value
+    elif op == ">":
+        mask = series > value
+    elif op == ">=":
+        mask = series >= value
+    elif op == "<":
+        mask = series < value
+    elif op == "<=":
+        mask = series <= value
+    else:
+        raise ValueError(f"Unknown filter op: {op!r}")
+
+    return df[mask]
+
+
+def apply_filters_to_df(
+    df: DataFrame,
+    filters: list[InteractionFilter],
+) -> DataFrame:
+    """
+    Apply a list of normalized ``InteractionFilter`` dicts to a pandas
+    DataFrame. Filters are combined with AND (logical conjunction).
+
+    The ``filters`` list comes directly from an event's
+    ``event['selection']['filters']`` or ``event['viewport']['filters']``
+    so subscribers do not need to understand library-specific payloads.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        The dataframe to filter.
+    filters : list[dict]
+        A list of filter dicts of the form
+        ``{field: str, op: str, value: any}``.
+
+    Returns
+    -------
+    DataFrame
+        The filtered dataframe. If ``filters`` is empty the original
+        dataframe is returned.
+
+    Example
+    -------
+
+    >>> store = pn.io.InteractionStore()
+    >>> plotly = pn.pane.Plotly(fig, interaction_store=store)
+    >>> def on_selection(event):
+    ...     if event['selection'] is not None:
+    ...         filtered = pn.io.apply_filters_to_df(df, event['selection']['filters'])
+    ...         print(filtered)
+    >>> store.subscribe(on_selection, kind="selection")
+    """
+    if not filters:
+        return df
+    result = df
+    for f in filters:
+        result = apply_filter(result, f)
+    return result
+
+
+def apply_event_filters_to_df(
+    df: DataFrame,
+    event: dict[str, t.Any],
+) -> DataFrame:
+    """
+    Convenience wrapper over :func:`apply_filters_to_df` that takes a
+    full normalized event dict and applies ``filters`` from either
+    ``event['selection']['filters']`` or ``event['viewport']['filters']``
+    (preference given to selection filters if both are present).
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+    event : dict
+        A normalized InteractionEvent payload.
+
+    Returns
+    -------
+    DataFrame
+    """
+    filters: list[InteractionFilter] = []
+    if event.get("selection") and event["selection"].get("filters"):
+        filters = event["selection"]["filters"]
+    elif event.get("viewport") and event["viewport"].get("filters"):
+        filters = event["viewport"]["filters"]
+    return apply_filters_to_df(df, filters)
+
+
+# ---------------------------------------------------------------------------
+# InteractionStore component
+# ---------------------------------------------------------------------------
 
 class InteractionStore(Reactive):
     """
@@ -34,33 +172,75 @@ class InteractionStore(Reactive):
 
     Components publish their interaction events to the store, and Python
     callbacks or other components can subscribe to receive events filtered
-    by kind or source. Each event has a normalized schema so subscribers do
-    not need to handle library-specific data structures.
+    by kind or source. Each event has a **normalized schema** so subscribers
+    do **not** need to handle library-specific data structures.
 
-    Normalized event schema:
-        - kind: "hover" | "selection" | "viewport" | "row_selection"
-        - source: human-readable source name (e.g. "plotly", "vega")
-        - source_id: model id of the originating component
-        - timestamp: monotonic timestamp in ms
-        - payload: original raw event from the library (for advanced use)
-        - selection: normalized selection data (when applicable)
-            - mode: "point" | "range" | "rows"
-            - indices: list of integer row/point indices
-            - values: list of {field: value} dicts per selected item
-            - ranges: (mode="range" only) {axis: [min, max]}
-        - viewport: normalized viewport data (when applicable)
-            - ranges: {axis: [min, max]}
+    Normalized event schema
+    -----------------------
+    Every event in ``events`` (and every payload delivered to a subscriber
+    callback) has the following shape::
+
+        {
+            "kind":        "hover" | "selection" | "viewport" | "row_selection",
+            "source":      "plotly" | "vega" | "echarts" | "tabulator" | ...,
+            "source_id":   "<bokeh model id>",
+            "timestamp":   1710000000000,
+            "payload":     <original raw event from the library>,
+            "selection":   <see below>,     # for selection / hover / row_selection
+            "viewport":    <see below>,     # for viewport events
+        }
+
+    ``selection`` structure (when present)::
+
+        {
+            "mode":        "point" | "range" | "rows",
+            "dataset_id":  "<optional dataset/source name>",
+            "indices":     [0, 5, 7, ...],           # selected row indices
+            "fields":      ["x", "y", "category"],   # column/field names involved
+            "values":      [{col: val, ...}, ...],   # per-row column values
+            "ranges":      {"x": [0, 10], ...},      # only for mode="range"
+            "filters":     [                          # ready-made filter objects
+                {"field": "x", "op": "in", "value": [1, 3]},
+                {"field": "index", "op": "in", "value": [0, 5]},
+                {"field": "y", "op": "range", "value": [-5, 5]},
+                ...
+            ],
+        }
+
+    ``viewport`` structure (when present)::
+
+        {
+            "dataset_id": "<optional dataset/source name>",
+            "fields":     ["xaxis", "yaxis"],
+            "ranges":     {"xaxis": [0, 100], "yaxis": [-20, 20]},
+            "filters":    [
+                {"field": "x", "op": "range", "value": [0, 100]},
+                ...
+            ],
+        }
+
+    The ``filters`` list is designed to be passed directly to
+    :func:`apply_filters_to_df` so you never need to parse Plotly/Vega/
+    ECharts/Tabulator payloads by hand.
 
     Reference: https://panel.holoviz.org/api/panel.io.InteractionStore.html
 
     :Example:
 
+    >>> import pandas as pd
+    >>> import panel as pn
+    >>>
+    >>> df = pd.DataFrame({"x": [1, 2, 3, 4, 5], "y": [2, 4, 6, 8, 10]})
     >>> store = pn.io.InteractionStore()
-    >>> plotly = pn.pane.Plotly(fig, interaction_store=store)
-    >>> def on_selection(event):
-    ...     if event['selection'] and event['selection']['mode'] == 'point':
-    ...         print("Selected indices:", event['selection']['indices'])
-    >>> store.subscribe(on_selection, kind="selection")
+    >>> table = pn.widgets.Tabulator(df, interaction_store=store)
+    >>>
+    >>> def on_any_selection(event):
+    ...     if event.get("selection") or event.get("viewport"):
+    ...         filtered = pn.io.apply_event_filters_to_df(df, event)
+    ...         print("Filtered rows:", filtered)
+    >>>
+    >>> store.subscribe(on_any_selection, kind="selection")
+    >>> store.subscribe(on_any_selection, kind="row_selection")
     """
 
     events = param.List(
@@ -245,6 +425,25 @@ class InteractionStore(Reactive):
             if (kind is None or e['kind'] == kind)
             and (source_id is None or e['source_id'] == source_id)
         ]
+
+    def apply_to_df(self, df: DataFrame) -> DataFrame:
+        """
+        Apply filters from the *latest* event in the store to a pandas
+        DataFrame. Equivalent to::
+
+            pn.io.apply_event_filters_to_df(df, self.events[-1])
+
+        Parameters
+        ----------
+        df : pandas.DataFrame
+
+        Returns
+        -------
+        pandas.DataFrame
+        """
+        if not self.events:
+            return df
+        return apply_event_filters_to_df(df, self.events[-1])
 
     def _process_event(self, event: _BkInteractionEvent) -> None:
         pass

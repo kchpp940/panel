@@ -7,7 +7,15 @@ import {LayoutDOM, LayoutDOMView} from "@bokehjs/models/layouts/layout_dom"
 import type {Attrs} from "@bokehjs/core/types"
 
 import {set_size} from "./layout"
-import {InteractionStore, type InteractionEventKind, type InteractionSelection, type InteractionViewport} from "./interaction_store"
+import {
+  InteractionStore,
+  type InteractionEventKind,
+  type InteractionSelection,
+  type InteractionViewport,
+  build_point_filters,
+  build_range_filters,
+  collect_fields,
+} from "./interaction_store"
 
 import {debounce} from  "debounce"
 
@@ -66,6 +74,15 @@ export class VegaPlotView extends LayoutDOMView {
     return "selection"
   }
 
+  _get_dataset_id(): string | undefined {
+    const ds = this.model.data_sources
+    if (ds != null) {
+      const keys = Object.keys(ds)
+      if (keys.length > 0) return keys[0]
+    }
+    return undefined
+  }
+
   _normalize_selection(name: string, value: any): InteractionSelection | null {
     if (value == null) {
       return null
@@ -101,7 +118,13 @@ export class VegaPlotView extends LayoutDOMView {
         }
       }
       if (is_range) {
-        return {mode: "range", ranges, indices, values}
+        const dataset_id = this._get_dataset_id()
+        const fields = collect_fields(values, Object.keys(ranges))
+        const filters = build_range_filters(ranges)
+        if (indices.length > 0) {
+          filters.unshift({field: "index", op: "in", value: indices.slice()})
+        }
+        return {mode: "range", dataset_id, ranges, fields, indices, values, filters}
       }
       for (const k of Object.keys(value)) {
         const v = value[k]
@@ -116,7 +139,10 @@ export class VegaPlotView extends LayoutDOMView {
     if (indices.length === 0 && values.length === 0) {
       return null
     }
-    return {mode: "point", indices, values}
+    const dataset_id = this._get_dataset_id()
+    const fields = collect_fields(values)
+    const filters = build_point_filters(values, indices)
+    return {mode: "point", dataset_id, indices, fields, values, filters}
   }
 
   _normalize_viewport(name: string, value: any): InteractionViewport | null {
@@ -135,7 +161,10 @@ export class VegaPlotView extends LayoutDOMView {
     if (Object.keys(ranges).length === 0) {
       return null
     }
-    return {ranges}
+    const dataset_id = this._get_dataset_id()
+    const fields = Object.keys(ranges)
+    const filters = build_range_filters(ranges)
+    return {dataset_id, fields, ranges, filters}
   }
 
   override connect_signals(): void {

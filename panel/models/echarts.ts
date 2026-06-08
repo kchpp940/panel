@@ -6,7 +6,15 @@ import {Ref} from "@bokehjs/core/kinds"
 
 import {serializeEvent} from "./event-to-object"
 import {HTMLBox, HTMLBoxView} from "./layout"
-import {InteractionStore, type InteractionEventKind, type InteractionSelection, type InteractionViewport} from "./interaction_store"
+import {
+  InteractionStore,
+  type InteractionEventKind,
+  type InteractionSelection,
+  type InteractionViewport,
+  build_point_filters,
+  build_range_filters,
+  collect_fields,
+} from "./interaction_store"
 import {transformJsPlaceholders} from "./util"
 
 const mouse_events = [
@@ -124,13 +132,18 @@ export class EChartsView extends HTMLBoxView {
         }
       }
     }
+    const dataset_id = this.model.options?.dataset?.[0]?.source?.name
     if (is_range || Object.keys(ranges).length > 0) {
-      return {mode: "range", ranges, indices, values}
+      const fields = collect_fields(values, Object.keys(ranges))
+      const filters = build_range_filters(ranges)
+      return {mode: "range", dataset_id, ranges, fields, indices, values, filters}
     }
     if (indices.length === 0 && values.length === 0) {
       return null
     }
-    return {mode: "point", indices, values}
+    const fields = collect_fields(values)
+    const filters = build_point_filters(values, indices)
+    return {mode: "point", dataset_id, indices, fields, values, filters}
   }
 
   _normalize_viewport(event_type: string, event: any): InteractionViewport | null {
@@ -152,7 +165,10 @@ export class EChartsView extends HTMLBoxView {
     if (Object.keys(ranges).length === 0) {
       return null
     }
-    return {ranges}
+    const dataset_id = this.model.options?.dataset?.[0]?.source?.name
+    const fields = Object.keys(ranges)
+    const filters = build_range_filters(ranges)
+    return {dataset_id, fields, ranges, filters}
   }
 
   override connect_signals(): void {

@@ -38,6 +38,9 @@ __all__ = (
     "InteractionStore",
     "PeriodicCallback",
     "Resources",
+    "apply_event_filters_to_df",
+    "apply_filter",
+    "apply_filters_to_df",
     "hold",
     "immediate_dispatch",
     "ipywidget",
@@ -55,7 +58,24 @@ def __getattr__(name: str) -> t.Any:
     if name == "InteractionStore":
         from .interaction_store import InteractionStore
         return InteractionStore
+    if name in ("apply_filter", "apply_filters_to_df", "apply_event_filters_to_df"):
+        from .interaction_store import (
+            apply_event_filters_to_df as _aef,
+            apply_filter as _af,
+            apply_filters_to_df as _afdf,
+        )
+        mapping = {
+            "apply_filter": _af,
+            "apply_filters_to_df": _afdf,
+            "apply_event_filters_to_df": _aef,
+        }
+        return mapping[name]
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 if t.TYPE_CHECKING:
-    from .interaction_store import InteractionStore
+    from .interaction_store import (
+        InteractionStore,
+        apply_event_filters_to_df,
+        apply_filter,
+        apply_filters_to_df,
+    )
