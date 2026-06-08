@@ -134,13 +134,41 @@ class ManifestEntry:
     size_kb: float | None = None
     integrity: str | None = None
     note: str = ''
+    failure_reason: str = ''
 
     @property
     def display_name(self) -> str:
         return self.local_path or self.remote_url or self.owner
 
+    def mark_localized(self, local_path: str, size_kb: float | None = None) -> None:
+        """Called after the resource is successfully written/copied to disk."""
+        self.local_path = local_path
+        self.localized = True
+        if size_kb is not None:
+            self.size_kb = size_kb
+        self.failure_reason = ''
+
+    def mark_failed(self, reason: str) -> None:
+        """Called when a resource could not be localized or downloaded."""
+        self.localized = False
+        self.failure_reason = reason
+
+    def set_cache_policy(self, policy: CachePolicy) -> None:
+        self.cache_policy = policy
+
     def to_dict(self) -> dict:
         return dataclasses.asdict(self)
+
+
+@dataclasses.dataclass
+class DiagnosticIssue:
+    severity: t.Literal['error', 'warning', 'info']
+    category: t.Literal['missing', 'duplicate', 'non-localized', 'size-warning', 'cache-concern', 'inconsistency']
+    resource: str
+    message: str
+    page: str = ''
+    origin: str = ''
+    owner: str = ''
 
 
 @dataclasses.dataclass
@@ -206,15 +234,16 @@ class AssetManifest:
                 f'- **Asset count**: {len(page_entries)}',
                 f'- **Estimated size**: {sum(e.size_kb or 0 for e in page_entries):.1f} KB',
                 '',
-                '| Category | Origin | Owner | Local Path | Remote URL | Cache Policy | Localized | Size (KB) |',
-                '|----------|--------|-------|------------|------------|--------------|-----------|-----------|',
+                '| Category | Origin | Owner | Local Path | Remote URL | Cache Policy | Localized | Size (KB) | Failure |',
+                '|----------|--------|-------|------------|------------|--------------|-----------|-----------|---------|',
             ])
             for e in sorted(page_entries, key=lambda x: (x.category, x.origin, x.owner)):
                 lp = f'`{e.local_path}`' if e.local_path else '-'
                 ru = f'`{e.remote_url}`' if e.remote_url else '-'
                 size = f'{e.size_kb:.1f}' if e.size_kb else '-'
+                fail = e.failure_reason if e.failure_reason else '-'
                 lines.append(
-                    f'| {e.category} | {e.origin} | {e.owner} | {lp} | {ru} | {e.cache_policy} | {e.localized} | {size} |'
+                    f'| {e.category} | {e.origin} | {e.owner} | {lp} | {ru} | {e.cache_policy} | {e.localized} | {size} | {fail} |'
                 )
             lines.append('')
 
@@ -250,17 +279,6 @@ class AssetManifest:
                 lines.append('')
 
         return '\n'.join(lines)
-
-
-@dataclasses.dataclass
-class DiagnosticIssue:
-    severity: t.Literal['error', 'warning', 'info']
-    category: t.Literal['missing', 'duplicate', 'non-localized', 'size-warning', 'cache-concern']
-    resource: str
-    message: str
-    page: str = ''
-    origin: str = ''
-    owner: str = ''
 
 
 @dataclasses.dataclass
@@ -560,7 +578,17 @@ def diagnose_assets(
 
     for entry in manifest.entries:
         display = entry.display_name
-        # Missing local files
+        if entry.failure_reason and entry.category != 'runtime-url':
+            issues.append(DiagnosticIssue(
+                severity='error',
+                category='missing',
+                resource=display,
+                message=f'{entry.failure_reason}',
+                page=entry.page,
+                origin=entry.origin,
+                owner=entry.owner,
+            ))
+            continue
         if entry.local_path and not entry.localized and entry.origin != 'runtime-code':
             lp = pathlib.Path(entry.local_path)
             if not lp.is_absolute():
@@ -570,13 +598,14 @@ def diagnose_assets(
                     severity='error',
                     category='missing',
                     resource=display,
-                    message=f'Local {entry.category} file not found',
+                    message=f'Local {entry.category} file not found on disk at {entry.local_path}',
                     page=entry.page,
                     origin=entry.origin,
                     owner=entry.owner,
                 ))
                 continue
-        # Non-localized remote resources
+            if not entry.localized:
+                entry.localized = True
         if entry.remote_url and not entry.localized and entry.category != 'runtime-url':
             issues.append(DiagnosticIssue(
                 severity='warning',
@@ -590,7 +619,6 @@ def diagnose_assets(
                 origin=entry.origin,
                 owner=entry.owner,
             ))
-        # Runtime URLs are informational
         if entry.category == 'runtime-url':
             issues.append(DiagnosticIssue(
                 severity='warning',
@@ -673,6 +701,155 @@ def write_assets_report(
     with open(md_path, 'w', encoding='utf-8') as f:
         f.write(manifest.to_markdown(issues))
     return json_path, md_path
+
+
+def _validate_manifest_vs_output(
+    manifest: AssetManifest,
+) -> list[DiagnosticIssue]:
+    """
+    Cross-check the manifest against what actually got written to disk and
+    what URLs the generated HTML / service worker reference.  Updates
+    manifest entries in-place where the ground truth differs (e.g. a file
+    we thought was localised isn't there, or an HTML file still points to a
+    CDN URL that should have been localised).
+    """
+    issues: list[DiagnosticIssue] = []
+    dest = pathlib.Path(manifest.dest_path)
+
+    accounted_remote_urls: set[str] = set()
+    for e in manifest.entries:
+        if e.remote_url:
+            accounted_remote_urls.add(e.remote_url)
+            accounted_remote_urls.add(os.path.basename(urlparse(e.remote_url).path))
+
+    for entry in list(manifest.entries):
+        if entry.local_path and entry.localized:
+            p = pathlib.Path(entry.local_path)
+            if not p.is_absolute():
+                p = dest / entry.local_path
+            if not p.is_file():
+                entry.localized = False
+                entry.mark_failed(f'expected localised file missing on disk: {entry.local_path}')
+                issues.append(DiagnosticIssue(
+                    severity='error',
+                    category='inconsistency',
+                    resource=entry.display_name,
+                    message=(
+                        f'Manifest says localised={entry.local_path!r} but file does not exist on disk; '
+                        f'remote_url={entry.remote_url!r}'
+                    ),
+                    page=entry.page,
+                    origin=entry.origin,
+                    owner=entry.owner,
+                ))
+            elif entry.size_kb is None:
+                entry.size_kb = _get_file_size_kb(str(p))
+
+    html_entries = manifest.filter(category='html')
+    for html_e in html_entries:
+        if not html_e.local_path:
+            continue
+        html_path = dest / html_e.local_path
+        if not html_path.is_file():
+            continue
+        try:
+            html_text = html_path.read_text(encoding='utf-8')
+        except OSError:
+            continue
+        urls_in_html = _extract_urls_from_html(html_text)
+        for url in urls_in_html:
+            if not url.startswith('http'):
+                continue
+            basename = os.path.basename(urlparse(url).path)
+            matched: ManifestEntry | None = None
+            for e in manifest.entries:
+                if e.remote_url and (url in e.remote_url or e.remote_url in url):
+                    matched = e
+                    break
+                if e.local_path and basename and basename in e.local_path:
+                    matched = e
+                    break
+            if matched is None:
+                issues.append(DiagnosticIssue(
+                    severity='warning',
+                    category='inconsistency',
+                    resource=url,
+                    message=(
+                        f'Remote URL present in {html_e.local_path} but not tracked by manifest; '
+                        f'may leak to network and break offline mode'
+                    ),
+                    page=html_e.page,
+                    origin='html-scan',
+                    owner=html_e.owner,
+                ))
+            elif matched.remote_url and matched.cache_policy == 'precache' and not matched.localized:
+                issues.append(DiagnosticIssue(
+                    severity='error',
+                    category='inconsistency',
+                    resource=matched.display_name,
+                    message=(
+                        f'HTML {html_e.local_path} still references remote URL {url!r} '
+                        f'but manifest marks it cache_policy=precache; URL was not rewritten to local path'
+                    ),
+                    page=html_e.page,
+                    origin=matched.origin,
+                    owner=matched.owner,
+                ))
+
+    sw_entries = manifest.filter(category='service-worker', origin='app-worker')
+    for sw_e in sw_entries:
+        if not sw_e.local_path:
+            continue
+        sw_path = dest / sw_e.local_path
+        if not sw_path.is_file():
+            continue
+        try:
+            sw_text = sw_path.read_text(encoding='utf-8')
+        except OSError:
+            continue
+        precache_match = re.search(r'const\s+PRE_CACHE\s*=\s*\[([^\]]+)\]', sw_text)
+        sw_precache: set[str] = set()
+        if precache_match:
+            for m in re.findall(r"'([^']+)'", precache_match.group(1)):
+                sw_precache.add(m)
+        expected_precache = {
+            e.local_path for e in manifest.entries
+            if e.cache_policy == 'precache' and e.localized and e.local_path
+        }
+        missing_in_sw = expected_precache - sw_precache
+        extra_in_sw = sw_precache - expected_precache
+        for path in missing_in_sw:
+            e = next((x for x in manifest.entries if x.local_path == path and x.cache_policy == 'precache'), None)
+            issues.append(DiagnosticIssue(
+                severity='error',
+                category='inconsistency',
+                resource=path,
+                message=(
+                    f'Manifest marks cache_policy=precache but {sw_e.local_path} '
+                    f'does not include it in PRE_CACHE list'
+                ),
+                page=e.page if e else '__global__',
+                origin=e.origin if e else 'manifest-summary',
+                owner=e.owner if e else 'sw-sync',
+            ))
+        for path in extra_in_sw:
+            issues.append(DiagnosticIssue(
+                severity='info',
+                category='inconsistency',
+                resource=path,
+                message=(
+                    f'{sw_e.local_path} precaches {path!r} but no manifest entry '
+                    f'has cache_policy=precache'
+                ),
+                page='__global__',
+                origin='sw-scan',
+                owner=sw_e.owner,
+            ))
+        for e in manifest.entries:
+            if e.local_path and e.local_path in sw_precache and e.cache_policy != 'precache':
+                e.cache_policy = 'precache'
+
+    return issues
 
 
 _HREF_RE = re.compile(r'href=["\']([^"\']+)["\']')
@@ -1154,27 +1331,34 @@ def convert_app(
     )
     parsed_requirements_rewritten: list[str] = []
     wheels2pack: dict[str | os.PathLike, str] = {}
+    wheel_entries: list[ManifestEntry] = []
 
     for req_str, origin, owner_detail in parsed_requirements:
         req_as_url = urlparse(req_str)
+        entry: ManifestEntry | None = None
         if req_as_url.scheme == 'file':
             wheel_name = os.path.basename(req_as_url.path)
             wheel_path = req_as_url.path
-            size_kb = _get_file_size_kb(wheel_path)
             if asset_manifest is not None:
-                asset_manifest.add(ManifestEntry(
+                entry = asset_manifest.add(ManifestEntry(
                     page=page_name, category='wheel', origin=origin,
                     owner=owner_detail,
-                    local_path=wheel_path, remote_url=None,
-                    cache_policy='precache', localized=True,
-                    size_kb=size_kb,
+                    local_path=None, remote_url=None,
+                    cache_policy='precache', localized=False,
+                    note=f'local wheel: {wheel_name}',
                 ))
+                wheel_entries.append(entry)
             emfs_wheel_path = 'packed_wheels' + '/' + wheel_name
             parsed_requirements_rewritten.append(f'emfs:{emfs_wheel_path}')
             wheels2pack[req_as_url.path] = emfs_wheel_path
+            if entry is not None and os.path.isfile(req_as_url.path):
+                size_kb = _get_file_size_kb(req_as_url.path)
+                entry.mark_localized(emfs_wheel_path, size_kb=size_kb)
+                entry.note = f'packed into resources zip as {emfs_wheel_path}'
+            elif entry is not None:
+                entry.mark_failed(f'source wheel not found: {req_as_url.path}')
         else:
             is_local = req_as_url.scheme not in ('http', 'https')
-            size_kb = _get_file_size_kb(req_str) if is_local else None
             try:
                 req_obj = Requirement(req_str.split('==')[0].split('>=')[0].split('<=')[0].split('~=')[0].split('!=')[0])
                 wname = req_obj.name
@@ -1183,16 +1367,26 @@ def convert_app(
             if asset_manifest is not None:
                 remote = req_str if not is_local else None
                 local = req_str if is_local else None
-                asset_manifest.add(ManifestEntry(
+                entry = asset_manifest.add(ManifestEntry(
                     page=page_name, category='wheel', origin=origin,
                     owner=owner_detail,
-                    local_path=local, remote_url=remote,
-                    cache_policy='cache-first', localized=is_local,
-                    size_kb=size_kb, note=wname,
+                    local_path=None, remote_url=remote,
+                    cache_policy='cache-first', localized=False,
+                    note=wname,
                 ))
+                wheel_entries.append(entry)
             parsed_requirements_rewritten.append(req_str)
+            if entry is not None:
+                if is_local and os.path.isfile(req_str):
+                    size_kb = _get_file_size_kb(req_str)
+                    entry.mark_localized(local, size_kb=size_kb)
+                elif is_local:
+                    entry.mark_failed(f'local wheel not found: {req_str}')
+                else:
+                    entry.mark_failed(f'remote CDN wheel: {req_str} (not bundled, fetched at runtime)')
 
     resources_validated: dict[str | os.PathLike, str] = {}
+    user_resource_entries: list[ManifestEntry] = []
     for resourcepath in ([] if resources is None else resources):
         commonpath = pathlib.Path(
             os.path.commonpath(
@@ -1204,14 +1398,71 @@ def convert_app(
                 resourcepath, app_folder
             )
         else:
-            raise ValueError('resources have to be in a folder rootable at the app-directory')
+            if asset_manifest is not None:
+                bad_entry = asset_manifest.add(ManifestEntry(
+                    page=page_name, category='user-data', origin='user-cli-resource',
+                    owner=f'CLI --resources: {os.path.basename(str(resourcepath))}',
+                    local_path=str(resourcepath), remote_url=None,
+                    cache_policy='cache-first', localized=False,
+                ))
+                bad_entry.mark_failed(f'resource outside app folder: {resourcepath}')
+                user_resource_entries.append(bad_entry)
+            else:
+                raise ValueError('resources have to be in a folder rootable at the app-directory')
 
     app_resources = {**wheels2pack, **resources_validated}
+    app_resources_packfile: str | None = None
+    resources_zip_entry: ManifestEntry | None = None
     if app_resources:
         app_resources_packfile = f'{app_name}.resources.zip'
-        pack_files(app_resources, os.path.join(dest_path, app_resources_packfile))
-    else:
-        app_resources_packfile = None
+        try:
+            pack_files(app_resources, os.path.join(dest_path, app_resources_packfile))
+            zip_full_path = dest_path / app_resources_packfile
+            if asset_manifest is not None:
+                resources_zip_entry = asset_manifest.add(ManifestEntry(
+                    page=page_name, category='user-data',
+                    origin='user-cli-resource',
+                    owner='packed resources zip (wheels + user files)',
+                    local_path=None, remote_url=None,
+                    cache_policy='precache', localized=False,
+                ))
+                if zip_full_path.is_file():
+                    resources_zip_entry.mark_localized(
+                        app_resources_packfile,
+                        size_kb=_get_file_size_kb(str(zip_full_path)),
+                    )
+                else:
+                    resources_zip_entry.mark_failed('pack_files did not produce zip')
+        except Exception as e:
+            if asset_manifest is not None and resources_zip_entry is None:
+                resources_zip_entry = asset_manifest.add(ManifestEntry(
+                    page=page_name, category='user-data',
+                    origin='user-cli-resource',
+                    owner='packed resources zip (wheels + user files)',
+                    local_path=None, remote_url=None,
+                    cache_policy='precache', localized=False,
+                ))
+            if resources_zip_entry is not None:
+                resources_zip_entry.mark_failed(f'pack_files failed: {e}')
+
+    for orig_path, rel_path in resources_validated.items():
+        if asset_manifest is not None:
+            size_kb = _get_file_size_kb(str(orig_path))
+            entry = asset_manifest.add(ManifestEntry(
+                page=page_name, category=_url_to_category(str(orig_path)),
+                origin='user-cli-resource',
+                owner=f'CLI --resources: {os.path.basename(str(orig_path))}',
+                local_path=None, remote_url=None,
+                cache_policy='cache-first', localized=False,
+            ))
+            user_resource_entries.append(entry)
+            if app_resources_packfile:
+                entry.mark_localized(rel_path, size_kb=size_kb)
+                entry.note = f'packed inside {app_resources_packfile}'
+            elif os.path.isfile(orig_path):
+                entry.mark_localized(rel_path, size_kb=size_kb)
+            else:
+                entry.mark_failed(f'source not found: {orig_path}')
 
     try:
         with set_resource_mode('inline' if inline else 'cdn'):
@@ -1233,58 +1484,55 @@ def convert_app(
     except KeyboardInterrupt:
         return
     except Exception as e:
+        if asset_manifest is not None:
+            for entry in wheel_entries + user_resource_entries:
+                if not entry.localized and not entry.failure_reason:
+                    entry.mark_failed(f'conversion failed before this resource was written: {e}')
         print(f'Failed to convert {app} to {runtime} target: {e}')
         return
 
     filename = f'{app_name}.html'
+    html_entry: ManifestEntry | None = None
 
     with open(dest_path / filename, 'w', encoding='utf-8') as out:
         out.write(html)
 
     if asset_manifest is not None:
-        asset_manifest.add(ManifestEntry(
+        html_entry = asset_manifest.add(ManifestEntry(
             page=page_name, category='html', origin='app-html',
             owner=filename,
-            local_path=filename, remote_url=None,
-            cache_policy='precache', localized=True,
-            size_kb=_get_file_size_kb(str(dest_path / filename)),
+            local_path=None, remote_url=None,
+            cache_policy='precache', localized=False,
         ))
+        full_html = dest_path / filename
+        if full_html.is_file():
+            html_entry.mark_localized(filename, size_kb=_get_file_size_kb(str(full_html)))
+            html_entry.note = 'rendered HTML output'
+        else:
+            html_entry.mark_failed('HTML file not written to disk')
 
+    worker_entry: ManifestEntry | None = None
     if 'worker' in runtime and worker:
         ext = 'py' if runtime.startswith('pyscript') else 'js'
         worker_filename = f'{app_name}.{ext}'
         with open(dest_path / worker_filename, 'w', encoding="utf-8") as out:
             out.write(worker)
         if asset_manifest is not None:
-            asset_manifest.add(ManifestEntry(
+            worker_entry = asset_manifest.add(ManifestEntry(
                 page=page_name, category='service-worker', origin='app-worker',
                 owner=f'{runtime} worker',
-                local_path=worker_filename, remote_url=None,
-                cache_policy='cache-first', localized=True,
-                size_kb=_get_file_size_kb(str(dest_path / worker_filename)),
+                local_path=None, remote_url=None,
+                cache_policy='cache-first', localized=False,
             ))
-
-    if asset_manifest is not None:
-        for orig_path, rel_path in resources_validated.items():
-            size_kb = _get_file_size_kb(str(orig_path))
-            asset_manifest.add(ManifestEntry(
-                page=page_name, category=_url_to_category(str(orig_path)),
-                origin='user-cli-resource',
-                owner=f'CLI --resources: {os.path.basename(str(orig_path))}',
-                local_path=rel_path, remote_url=None,
-                cache_policy='cache-first', localized=True,
-                size_kb=size_kb,
-            ))
-        if app_resources_packfile:
-            size_kb = _get_file_size_kb(str(dest_path / app_resources_packfile))
-            asset_manifest.add(ManifestEntry(
-                page=page_name, category='user-data',
-                origin='user-cli-resource',
-                owner='packed resources zip (wheels + user files)',
-                local_path=app_resources_packfile, remote_url=None,
-                cache_policy='precache', localized=True,
-                size_kb=size_kb,
-            ))
+            full_worker = dest_path / worker_filename
+            if full_worker.is_file():
+                worker_entry.mark_localized(
+                    worker_filename,
+                    size_kb=_get_file_size_kb(str(full_worker)),
+                )
+                worker_entry.note = f'{runtime} web worker'
+            else:
+                worker_entry.mark_failed('worker file not written to disk')
 
     if verbose:
         print(f'Successfully converted {app} to {runtime} target and wrote output to {filename}.')
@@ -1460,13 +1708,19 @@ def convert_apps(
         with open(index_path, 'w') as f:
             f.write(index)
         if asset_manifest is not None:
-            asset_manifest.add(ManifestEntry(
+            index_entry = asset_manifest.add(ManifestEntry(
                 page='__global__', category='html', origin='app-html',
                 owner='index.html (app listing)',
-                local_path='index.html', remote_url=None,
-                cache_policy='precache', localized=True,
-                size_kb=_get_file_size_kb(str(index_path)),
+                local_path=None, remote_url=None,
+                cache_policy='precache', localized=False,
             ))
+            if index_path.is_file():
+                index_entry.mark_localized(
+                    'index.html',
+                    size_kb=_get_file_size_kb(str(index_path)),
+                )
+            else:
+                index_entry.mark_failed('index.html was not written')
         if verbose:
             print('Successfully wrote index.html.')
 
@@ -1486,13 +1740,18 @@ def convert_apps(
             rel = f'images/{img.name}'
             img_rel.append(rel)
             if asset_manifest is not None:
-                asset_manifest.add(ManifestEntry(
+                icon_entry = asset_manifest.add(ManifestEntry(
                     page='__global__', category='image', origin='pwa-icon',
                     owner=f'PWA icon: {img.name}',
-                    local_path=rel, remote_url=None,
-                    cache_policy='precache', localized=True,
-                    size_kb=_get_file_size_kb(str(target)),
+                    local_path=None, remote_url=None,
+                    cache_policy='precache', localized=False,
                 ))
+                if target.is_file():
+                    icon_entry.mark_localized(
+                        rel, size_kb=_get_file_size_kb(str(target)),
+                    )
+                else:
+                    icon_entry.mark_failed(f'PWA icon not written: {img.name}')
         if verbose:
             print('Successfully wrote icons and images.')
 
@@ -1501,17 +1760,22 @@ def convert_apps(
         with open(webmanifest_path, 'w', encoding='utf-8') as f:
             f.write(manifest_content)
         if asset_manifest is not None:
-            asset_manifest.add(ManifestEntry(
+            wm_entry = asset_manifest.add(ManifestEntry(
                 page='__global__', category='user-data', origin='pwa-icon',
                 owner='site.webmanifest (PWA manifest)',
-                local_path='site.webmanifest', remote_url=None,
-                cache_policy='precache', localized=True,
-                size_kb=_get_file_size_kb(str(webmanifest_path)),
+                local_path=None, remote_url=None,
+                cache_policy='precache', localized=False,
             ))
+            if webmanifest_path.is_file():
+                wm_entry.mark_localized(
+                    'site.webmanifest',
+                    size_kb=_get_file_size_kb(str(webmanifest_path)),
+                )
+            else:
+                wm_entry.mark_failed('site.webmanifest was not written')
         if verbose:
             print('Successfully wrote site.manifest.')
 
-        # Build full precache list from manifest entries
         precache_list: list[str] = list(img_rel)
         if asset_manifest is not None:
             for entry in asset_manifest.entries:
@@ -1530,19 +1794,27 @@ def convert_apps(
         with open(sw_path, 'w', encoding='utf-8') as f:
             f.write(worker)
         if asset_manifest is not None:
-            asset_manifest.add(ManifestEntry(
+            sw_entry = asset_manifest.add(ManifestEntry(
                 page='__global__', category='service-worker', origin='app-worker',
                 owner='serviceWorker.js (PWA cache manager)',
-                local_path='serviceWorker.js', remote_url=None,
-                cache_policy='cache-first', localized=True,
-                size_kb=_get_file_size_kb(str(sw_path)),
+                local_path=None, remote_url=None,
+                cache_policy='cache-first', localized=False,
                 note=f'precache list: {len(precache_list)} files',
             ))
+            if sw_path.is_file():
+                sw_entry.mark_localized(
+                    'serviceWorker.js',
+                    size_kb=_get_file_size_kb(str(sw_path)),
+                )
+            else:
+                sw_entry.mark_failed('serviceWorker.js was not written')
         if verbose:
             print('Successfully wrote serviceWorker.js.')
 
     if generate_assets_report and asset_manifest is not None:
-        issues = diagnose_assets(asset_manifest)
+        inconsistency_issues = _validate_manifest_vs_output(asset_manifest)
+        base_issues = diagnose_assets(asset_manifest)
+        issues = inconsistency_issues + base_issues
         json_path, md_path = write_assets_report(asset_manifest, issues, dest_path)
         if verbose:
             print(f'Successfully wrote asset manifest to {json_path.name} and {md_path.name}.')
