@@ -1,9 +1,23 @@
 """
 Dashboard state snapshot functionality.
 
-Components that wish to participate in snapshots must explicitly set
-their ``snapshot_key`` parameter. Only components with a non-None
-``snapshot_key`` are collected and restored.
+Key strategy (two-tier, stable-by-default):
+
+1. **Explicit key (highest priority)** – set via the ``snapshot_key``
+   parameter on any Viewable. These keys are stable across layout changes
+   and are the recommended way for authors to identify important widgets.
+
+2. **Structural key (fallback)** – automatically generated for every
+   Viewable that has serializable state. It encodes the component's
+   position within a specific root (``p:<index_path>:<TypeName>``), so it
+   only matches when the same root has an equivalent layout structure.
+   This lets default snapshots remain useful *without* the user having
+   to annotate every widget, while still preventing cross-root or
+   heavily-dynamic-layout mismatches.
+
+Every snapshot entry carries a ``key_source`` tag (``"explicit"`` or
+``"structural"``) and, for explicit keys, the corresponding structural
+key is also stored as a fallback.
 
 Public API:
   - collect_state() -> dict
@@ -20,6 +34,7 @@ Public API:
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import typing as t
 import zlib
@@ -34,7 +49,7 @@ from bokeh.document import Document
 from ..util import edit_readonly
 
 if t.TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
 
     from ..viewable import Viewable
     from .state import state as _state_type
@@ -44,12 +59,17 @@ SNAPSHOT_QUERY_PARAM = "_snapshot"
 SNAPSHOT_BASE_URL = "_snapshots"
 
 SNAPSHOT_VERSION = 2
+_STRUCTURAL_KEY_PREFIX = "p:"
 
 
 def _get_state():
     from .state import state
     return state
 
+
+# ---------------------------------------------------------------------------
+# Storage
+# ---------------------------------------------------------------------------
 
 class _SnapshotStore:
     """
@@ -91,6 +111,10 @@ class _SnapshotStore:
     def list(cls, doc: Document | None = None) -> list[str]:
         return sorted(cls._storage(doc).keys())
 
+
+# ---------------------------------------------------------------------------
+# Root discovery
+# ---------------------------------------------------------------------------
 
 def _find_root_viewables(
     explicit_roots: t.Iterable[t.Any] | None = None,
@@ -142,15 +166,54 @@ def _find_root_viewables(
     return roots
 
 
-def _iter_snapshot_components(roots: list[Viewable]) -> t.Iterator[Viewable]:
+# ---------------------------------------------------------------------------
+# Structural key generation
+# ---------------------------------------------------------------------------
+
+def _structural_key(
+    obj: Viewable,
+    root: Viewable,
+    index_path: tuple[int, ...],
+) -> str:
     """
-    Recursively yield Viewable descendants that have snapshot_key set.
+    Build a structural key for *obj* relative to *root*.
+
+    The key encodes the position path and the component type name. The
+    prefix ``p:`` avoids colliding with user-supplied explicit keys.
+    """
+    path_str = "/".join(str(i) for i in index_path)
+    type_name = type(obj).__name__
+    raw = f"{_STRUCTURAL_KEY_PREFIX}{path_str}:{type_name}"
+    # Keep the key compact – structural keys don't need to be human-readable.
+    if len(raw) > 120:
+        digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+        raw = f"{_STRUCTURAL_KEY_PREFIX}{digest}:{type_name}"
+    return raw
+
+
+# ---------------------------------------------------------------------------
+# Recursive traversal with index-path tracking
+# ---------------------------------------------------------------------------
+
+def _iter_component_tree(
+    roots: list[Viewable],
+) -> Iterator[tuple[Viewable, Viewable, tuple[int, ...]]]:
+    """
+    Yield ``(component, root, index_path)`` for every Viewable reachable
+    from *roots* by walking ``.objects``/``.select()`` descendants.
+
+    ``index_path`` is the tuple of child indices that locate *component*
+    within ``root``.  For the root itself the path is ``()``.
     """
     from ..viewable import Viewable
 
     seen: set[int] = set()
 
-    def _visit(obj: t.Any) -> None:
+    def _visit(
+        obj: t.Any,
+        root: Viewable,
+        path: tuple[int, ...],
+    ) -> Iterator[tuple[Viewable, Viewable, tuple[int, ...]]]:
         if id(obj) in seen:
             return
         seen.add(id(obj))
@@ -158,29 +221,38 @@ def _iter_snapshot_components(roots: list[Viewable]) -> t.Iterator[Viewable]:
         if not isinstance(obj, Viewable):
             return
 
-        if getattr(obj, "snapshot_key", None):
-            yield obj
+        yield obj, root, path
 
+        children: list[t.Any] = []
         with suppress(Exception):
-            for child in obj.select():
-                if child is not obj:
-                    yield from _visit(child)
+            objs = getattr(obj, "objects", None)
+            if isinstance(objs, (list, tuple)):
+                children.extend(list(objs))
 
-        with suppress(Exception):
-            for item in getattr(obj, "objects", []) or []:
-                yield from _visit(item)
+        if not children:
+            with suppress(Exception):
+                for ch in obj.select():
+                    if ch is not obj:
+                        children.append(ch)
+
+        for idx, ch in enumerate(children):
+            yield from _visit(ch, root, (*path, idx))
 
     for root in roots:
-        yield from _visit(root)
+        yield from _visit(root, root, ())
 
+
+# ---------------------------------------------------------------------------
+# Param serialization
+# ---------------------------------------------------------------------------
 
 def _collect_params_for(obj: Viewable) -> dict[str, t.Any]:
     """
     Serialize the relevant parameters for a snapshot-capable component.
-    For Widget-like objects: "value" plus a small set of stable params.
-    For Tabs/Accordion: "active".
-    For other Viewables: try to serialize "value" if present; otherwise
-    any JSON-serialisable parameter that isn't layout/style metadata.
+    Widget-like objects: ``value`` + a small set of stable params.
+    Tabs/Accordion: ``active``.
+    Other Viewables: try ``value`` first, then a fixed small list.
+    Returns an empty dict when nothing serializable is found.
     """
     from ..layout import Accordion, Tabs
 
@@ -250,29 +322,33 @@ def _deserialize_params_for(obj: Viewable, params: dict[str, t.Any]) -> dict[str
     return updates
 
 
+# ---------------------------------------------------------------------------
+# Collection
+# ---------------------------------------------------------------------------
+
 def collect_state(root: t.Any = None, *extra_roots: t.Any) -> dict[str, t.Any]:
     """
-    Collect a snapshot of all components that have an explicit
-    ``snapshot_key`` set, plus the current URL location state.
+    Collect a snapshot of all serializable Viewables reachable from the
+    supplied roots (or the current session's roots when omitted).
+
+    Components with an explicit ``snapshot_key`` are recorded under that
+    key with ``key_source="explicit"``; every other component that has
+    serializable state is recorded under an auto-generated structural
+    key (``key_source="structural"``). Structural keys are only valid
+    within the same root/layout.
 
     Parameters
     ----------
     root : Viewable or iterable of Viewable, optional
-        Explicit root(s) to scan. If omitted, the current session's
+        Explicit root(s) to scan. If omitted the current session's
         template and registered views are used automatically.
     *extra_roots : Viewable
         Additional root objects to scan.
 
-    Returns a dictionary of the form::
-
-        {
-            "version": 2,
-            "components": {
-                "<snapshot_key>": {"type": "...", "params": {...}},
-                ...
-            },
-            "location": {"search": ..., "hash": ..., "query_params": {...}}
-        }
+    Returns
+    -------
+    dict
+        ``{version, components, location}``.
     """
     state = _get_state()
 
@@ -292,19 +368,34 @@ def collect_state(root: t.Any = None, *extra_roots: t.Any) -> dict[str, t.Any]:
         "location": {},
     }
 
-    used_keys: set[str] = set()
-    for comp in _iter_snapshot_components(roots):
-        key = getattr(comp, "snapshot_key", None)
-        if not isinstance(key, str) or not key:
-            continue
-        if key in used_keys:
-            continue
-        used_keys.add(key)
+    used_explicit: set[str] = set()
+    used_structural: set[str] = set()
+
+    for comp, comp_root, path in _iter_component_tree(roots):
         params = _collect_params_for(comp)
         if not params:
             continue
-        snapshot["components"][key] = {
+
+        explicit_key = getattr(comp, "snapshot_key", None)
+        if isinstance(explicit_key, str) and explicit_key and explicit_key not in used_explicit:
+            used_explicit.add(explicit_key)
+            skey = _structural_key(comp, comp_root, path)
+            snapshot["components"][explicit_key] = {
+                "type": type(comp).__name__,
+                "key_source": "explicit",
+                "structural_key": skey,
+                "params": params,
+            }
+            used_structural.add(skey)
+            continue
+
+        skey = _structural_key(comp, comp_root, path)
+        if skey in used_structural:
+            continue
+        used_structural.add(skey)
+        snapshot["components"][skey] = {
             "type": type(comp).__name__,
+            "key_source": "structural",
             "params": params,
         }
 
@@ -323,6 +414,10 @@ def collect_state(root: t.Any = None, *extra_roots: t.Any) -> dict[str, t.Any]:
     return snapshot
 
 
+# ---------------------------------------------------------------------------
+# Restoration
+# ---------------------------------------------------------------------------
+
 def apply_state(
     snapshot: dict[str, t.Any],
     root: t.Any = None,
@@ -330,6 +425,14 @@ def apply_state(
 ) -> dict[str, list[str]]:
     """
     Apply a snapshot produced by :func:`collect_state`.
+
+    Matching order for each snapshot entry:
+
+    * ``key_source="explicit"`` – first look up the component by its
+      explicit key in the current tree; if that fails, fall back to the
+      stored ``structural_key`` (same-root positional match).
+    * ``key_source="structural"`` – only the structural (positional)
+      match is attempted, avoiding cross-root mismatches.
 
     Parameters
     ----------
@@ -340,8 +443,10 @@ def apply_state(
     *extra_roots : Viewable
         Additional root objects to scan.
 
-    Returns ``{"applied": [...], "failed": [...]}`` listing the
-    snapshot_keys that were or were not restored.
+    Returns
+    -------
+    dict
+        ``{"applied": [...], "failed": [...]}``.
     """
     from ..viewable import Viewable
 
@@ -355,35 +460,58 @@ def apply_state(
 
     state = _get_state()
 
-    explicit: list[t.Any] = []
+    explicit_in: list[t.Any] = []
     if root is not None:
         if isinstance(root, (list, tuple, set)):
-            explicit.extend(root)
+            explicit_in.extend(root)
         else:
-            explicit.append(root)
-    explicit.extend(extra_roots)
+            explicit_in.append(root)
+    explicit_in.extend(extra_roots)
 
-    roots = _find_root_viewables(explicit if explicit else None)
-    key_to_obj: dict[str, Viewable] = {}
-    for comp in _iter_snapshot_components(roots):
-        key = getattr(comp, "snapshot_key", None)
-        if isinstance(key, str) and key and key not in key_to_obj:
-            key_to_obj[key] = comp
+    roots = _find_root_viewables(explicit_in if explicit_in else None)
 
+    # Build two indexes of the live tree.
+    explicit_map: dict[str, Viewable] = {}
+    structural_map: dict[str, Viewable] = {}
+    for comp, comp_root, path in _iter_component_tree(roots):
+        ekey = getattr(comp, "snapshot_key", None)
+        if isinstance(ekey, str) and ekey and ekey not in explicit_map:
+            explicit_map[ekey] = comp
+        skey = _structural_key(comp, comp_root, path)
+        if skey not in structural_map:
+            structural_map[skey] = comp
+
+    # Normalize legacy (v1) format
     components: dict[str, dict[str, t.Any]] = {}
     if version == 1:
         for section in ("widgets", "layouts", "panes"):
             for k, v in snapshot.get(section, {}).items():
-                components[k] = v
+                components[k] = dict(v, key_source="explicit")
     else:
         components = snapshot.get("components", {})
 
     for key, info in components.items():
-        obj = key_to_obj.get(key)
+        if not isinstance(info, dict):
+            result["failed"].append(key)
+            continue
+
+        key_source = info.get("key_source", "explicit")
+        params = info.get("params", {})
+
+        obj: Viewable | None = None
+        if key_source == "explicit":
+            obj = explicit_map.get(key)
+            if obj is None:
+                fallback_skey = info.get("structural_key")
+                if isinstance(fallback_skey, str):
+                    obj = structural_map.get(fallback_skey)
+        else:  # structural
+            obj = structural_map.get(key)
+
         if obj is None:
             result["failed"].append(key)
             continue
-        params = info.get("params", {}) if isinstance(info, dict) else {}
+
         try:
             updates = _deserialize_params_for(obj, params)
             if updates:
@@ -408,6 +536,10 @@ def apply_state(
     return result
 
 
+# ---------------------------------------------------------------------------
+# Encode / decode
+# ---------------------------------------------------------------------------
+
 def encode_snapshot(snapshot: dict[str, t.Any]) -> str:
     """Encode a snapshot dict as a URL-safe base64 string (zlib compressed)."""
     raw = json.dumps(snapshot, separators=(",", ":")).encode("utf-8")
@@ -422,6 +554,10 @@ def decode_snapshot(encoded: str) -> dict[str, t.Any] | None:
     except Exception:
         return None
 
+
+# ---------------------------------------------------------------------------
+# Named snapshots
+# ---------------------------------------------------------------------------
 
 def save_named_snapshot(
     name: str,
@@ -458,6 +594,10 @@ def list_named_snapshots() -> list[str]:
     state = _get_state()
     return _SnapshotStore.list(doc=state.curdoc)
 
+
+# ---------------------------------------------------------------------------
+# URL integration
+# ---------------------------------------------------------------------------
 
 def get_snapshot_from_url() -> dict[str, t.Any] | None:
     """Return the decoded snapshot from the URL query parameter, if any."""
