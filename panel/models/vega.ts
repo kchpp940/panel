@@ -7,7 +7,7 @@ import {LayoutDOM, LayoutDOMView} from "@bokehjs/models/layouts/layout_dom"
 import type {Attrs} from "@bokehjs/core/types"
 
 import {set_size} from "./layout"
-import {InteractionStore, type InteractionEventType} from "./interaction_store"
+import {InteractionStore, type InteractionEventKind, type InteractionSelection, type InteractionViewport} from "./interaction_store"
 
 import {debounce} from  "debounce"
 
@@ -36,28 +36,106 @@ export class VegaPlotView extends LayoutDOMView {
   _resize: any
   _rendered: boolean = false
 
-  _publish_interaction(type: InteractionEventType, data: any): void {
+  _publish(
+    kind: InteractionEventKind,
+    selection: InteractionSelection | null,
+    viewport: InteractionViewport | null,
+    payload: any,
+  ): void {
     if (this.model.interaction_store == null) {
       return
     }
-    this.model.interaction_store.publish(type, this.model.id, "vega", data)
+    this.model.interaction_store.publish_event({
+      kind,
+      source: "vega",
+      source_id: this.model.id,
+      payload,
+      selection: selection ?? undefined,
+      viewport: viewport ?? undefined,
+    })
   }
 
-  _classify_vega_event(name: string, value: any): InteractionEventType {
+  _classify_vega_event(name: string, value: any): InteractionEventKind {
     const lower = name.toLowerCase()
     if (lower.includes("hover") || lower.includes("mouseover") || lower.includes("mouseenter")) {
       return "hover"
     }
-    if (lower.includes("select") || lower.includes("brush") || lower.includes("interval") || lower.includes("point")) {
-      return "selection"
-    }
-    if (lower.includes("view") || lower.includes("zoom") || lower.includes("pan") || lower.includes("scale") || lower.includes("domain") || lower.includes("range")) {
+    if (lower.includes("view") || lower.includes("zoom") || lower.includes("pan") || lower.includes("scale") || lower.includes("domain")) {
       return "viewport"
     }
-    if (value != null && typeof value === "object" && "vlPoint" in value) {
-      return "selection"
-    }
     return "selection"
+  }
+
+  _normalize_selection(name: string, value: any): InteractionSelection | null {
+    if (value == null) {
+      return null
+    }
+    const indices: number[] = []
+    const values: Array<{[field: string]: any}> = []
+    if (Array.isArray(value)) {
+      for (let i = 0; i < value.length; i++) {
+        const item = value[i]
+        if (typeof item === "number") {
+          indices.push(item)
+        } else if (item && typeof item === "object") {
+          if (typeof item._vgsid_ === "number") {
+            indices.push(item._vgsid_)
+          }
+          values.push({...item})
+        }
+      }
+    } else if (typeof value === "object") {
+      if (Array.isArray(value.vlPoint?.or)) {
+        for (const item of value.vlPoint.or) {
+          if (typeof item._vgsid_ === "number") indices.push(item._vgsid_)
+          values.push({...item})
+        }
+      }
+      const ranges: {[axis: string]: [any, any]} = {}
+      let is_range = false
+      for (const k of Object.keys(value)) {
+        const v = value[k]
+        if (Array.isArray(v) && v.length === 2) {
+          ranges[k] = v
+          is_range = true
+        }
+      }
+      if (is_range) {
+        return {mode: "range", ranges, indices, values}
+      }
+      for (const k of Object.keys(value)) {
+        const v = value[k]
+        if (typeof v === "object" && v != null && Array.isArray((v as any).vlPoint?.or)) {
+          for (const item of (v as any).vlPoint.or) {
+            if (typeof item._vgsid_ === "number") indices.push(item._vgsid_)
+            values.push({...item})
+          }
+        }
+      }
+    }
+    if (indices.length === 0 && values.length === 0) {
+      return null
+    }
+    return {mode: "point", indices, values}
+  }
+
+  _normalize_viewport(name: string, value: any): InteractionViewport | null {
+    const ranges: {[axis: string]: [any, any]} = {}
+    if (value == null) {
+      return null
+    }
+    if (typeof value === "object") {
+      for (const k of Object.keys(value)) {
+        const v = value[k]
+        if (Array.isArray(v) && v.length === 2) {
+          ranges[k] = v
+        }
+      }
+    }
+    if (Object.keys(ranges).length === 0) {
+      return null
+    }
+    return {ranges}
   }
 
   override connect_signals(): void {
@@ -102,13 +180,12 @@ export class VegaPlotView extends LayoutDOMView {
     if ("vlPoint" in value && value.vlPoint.or != null) {
       const indexes = []
       for (const index of value.vlPoint.or) {
-        if (index._vgsid_ !== undefined) {  // If "_vgsid_" property exists
+        if (index._vgsid_ !== undefined) {
           indexes.push(index._vgsid_)
-        } else {  // If "_vgsid_" property doesn't exist
-          // Iterate through all properties in the "index" object
+        } else {
           for (const key in index) {
-            if (index.hasOwnProperty(key)) {  // To ensure key comes from "index" object itself, not its prototype
-              indexes.push({[key]: index[key]})  // Push a new object with this key-value pair into the array
+            if (index.hasOwnProperty(key)) {
+              indexes.push({[key]: index[key]})
             }
           }
         }
@@ -116,8 +193,15 @@ export class VegaPlotView extends LayoutDOMView {
       value = indexes
     }
     this.model.trigger_event(new VegaEvent({type: name, value}))
-    const itype = this._classify_vega_event(name, value)
-    this._publish_interaction(itype, {signal: name, value})
+    const kind = this._classify_vega_event(name, value)
+    const payload = {signal: name, value}
+    if (kind === "viewport") {
+      const vp = this._normalize_viewport(name, value)
+      this._publish(kind, null, vp, payload)
+    } else {
+      const sel = this._normalize_selection(name, value)
+      this._publish(kind, sel, null, payload)
+    }
   }
 
   _fetch_datasets() {

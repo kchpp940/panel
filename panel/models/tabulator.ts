@@ -16,7 +16,7 @@ import {debounce} from "debounce"
 
 import {comm_settings} from "./comm_manager"
 import {transform_cds_to_records} from "./data"
-import {InteractionStore, type InteractionEventType} from "./interaction_store"
+import {InteractionStore, type InteractionEventKind, type InteractionSelection} from "./interaction_store"
 import {HTMLBox, HTMLBoxView} from "./layout"
 import {schedule_when, transformJsPlaceholders} from "./util"
 
@@ -400,11 +400,49 @@ export class DataTabulatorView extends HTMLBoxView {
   _last_after_resize_el_width: number | null = null
   _last_after_resize_el_height: number | null = null
 
-  _publish_interaction(type: InteractionEventType, data: any): void {
+  _publish(
+    kind: InteractionEventKind,
+    selection: InteractionSelection | null,
+    payload: any,
+  ): void {
     if (this.model.interaction_store == null) {
       return
     }
-    this.model.interaction_store.publish(type, this.model.id, "tabulator", data)
+    this.model.interaction_store.publish_event({
+      kind,
+      source: "tabulator",
+      source_id: this.model.id,
+      payload,
+      selection: selection ?? undefined,
+    })
+  }
+
+  _row_selection_from_indices(indices: number[]): InteractionSelection | null {
+    if (indices.length === 0) {
+      return null
+    }
+    const values: Array<{[field: string]: any}> = []
+    for (const i of indices) {
+      const row = this.model.source.data[i]
+      if (row != null) {
+        const v: {[field: string]: any} = {}
+        for (const col of this.model.source.columns()) {
+          v[col] = this.model.source.data[col][i]
+        }
+        values.push(v)
+      }
+    }
+    return {mode: "rows", indices, values}
+  }
+
+  _point_selection_from_cell(index: number, column: string): InteractionSelection {
+    const values: Array<{[field: string]: any}> = []
+    const row: {[field: string]: any} = {}
+    for (const col of this.model.source.columns()) {
+      row[col] = this.model.source.data[col][index]
+    }
+    values.push(row)
+    return {mode: "point", indices: [index], values}
   }
 
   override connect_signals(): void {
@@ -1240,12 +1278,9 @@ export class DataTabulatorView extends HTMLBoxView {
         const index = cell.getData()._index
         const event = new CellClickEvent(column.field, index)
         this.model.trigger_event(event)
-        this._publish_interaction("selection", {
-          column: column.field,
-          index,
-          data: this.model.source.data[index],
-          mode: "cell_click",
-        })
+        const payload = {column: column.field, index, mode: "cell_click"}
+        const sel = this._point_selection_from_cell(index, column.field)
+        this._publish("selection", sel, payload)
       }
       if (config_columns == null) {
         columns.push(tab_column)
@@ -1262,12 +1297,9 @@ export class DataTabulatorView extends HTMLBoxView {
           const index = cell.getData()._index
           const event = new CellClickEvent(col, index)
           this.model.trigger_event(event)
-          this._publish_interaction("selection", {
-            column: col,
-            index,
-            data: this.model.source.data[index],
-            mode: "button_click",
-          })
+          const payload = {column: col, index, mode: "button_click"}
+          const sel = this._point_selection_from_cell(index, col)
+          this._publish("selection", sel, payload)
         },
       }
       columns.push(button_column)
@@ -1580,13 +1612,9 @@ export class DataTabulatorView extends HTMLBoxView {
       selected.indices = filtered
     }
     this.model.trigger_event(new SelectionEvent(indices, !includes, flush))
-    const data = indices.map((i) => this.model.source.data[i]).filter(Boolean)
-    this._publish_interaction("row_selection", {
-      indices: filtered,
-      data,
-      selected: !includes,
-      mode: "row_click",
-    })
+    const payload = {indices: filtered, selected: !includes, mode: "row_click"}
+    const sel = this._row_selection_from_indices(filtered)
+    this._publish("row_selection", sel, payload)
     this._selection_updating = false
   }
 
@@ -1617,36 +1645,25 @@ export class DataTabulatorView extends HTMLBoxView {
       if (selected_indices.length > 0) {
         this._selection_updating = true
         this.model.trigger_event(new SelectionEvent(selected_indices, true, false))
-        const selected_data = selected_indices.map((i) => this.model.source.data[i]).filter(Boolean)
-        this._publish_interaction("row_selection", {
-          indices: selected_indices,
-          data: selected_data,
-          selected: true,
-          mode: "tabulator_select",
-        })
+        const payload = {indices: selected_indices, selected: true, mode: "tabulator_select"}
+        const sel = this._row_selection_from_indices(selected_indices)
+        this._publish("row_selection", sel, payload)
       }
       if (deselected_indices.length > 0) {
         this._selection_updating = true
         this.model.trigger_event(new SelectionEvent(deselected_indices, false, false))
-        const deselected_data = deselected_indices.map((i) => this.model.source.data[i]).filter(Boolean)
-        this._publish_interaction("row_selection", {
-          indices: deselected_indices,
-          data: deselected_data,
-          selected: false,
-          mode: "tabulator_deselect",
-        })
+        const payload = {indices: deselected_indices, selected: false, mode: "tabulator_deselect"}
+        const sel = this._row_selection_from_indices(deselected_indices)
+        this._publish("row_selection", sel, payload)
       }
     } else {
       const indices: number[] = data.map((row: any) => row._index)
       const filtered = this._filter_selected(indices)
       this._selection_updating = indices.length === filtered.length
       this.model.source.selected.indices = filtered
-      this._publish_interaction("row_selection", {
-        indices: filtered,
-        data: filtered.map((i) => this.model.source.data[i]).filter(Boolean),
-        selected: filtered.length > 0,
-        mode: "tabulator_change",
-      })
+      const payload = {indices: filtered, selected: filtered.length > 0, mode: "tabulator_change"}
+      const sel = this._row_selection_from_indices(filtered)
+      this._publish("row_selection", sel, payload)
     }
     this._selection_updating = false
   }

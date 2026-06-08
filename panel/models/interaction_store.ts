@@ -4,26 +4,68 @@ import {ModelEvent} from "@bokehjs/core/bokeh_events"
 import {Model} from "@bokehjs/model"
 import {View} from "@bokehjs/core/view"
 
-export type InteractionEventType = "hover" | "selection" | "viewport" | "row_selection"
+export type InteractionEventKind = "hover" | "selection" | "viewport" | "row_selection"
+
+export interface InteractionSelectionPoint {
+  mode: "point"
+  indices: number[]
+  values: Array<{[field: string]: any}>
+}
+
+export interface InteractionSelectionRange {
+  mode: "range"
+  ranges: {[axis: string]: [any, any]}
+  indices?: number[]
+  values?: Array<{[field: string]: any}>
+}
+
+export interface InteractionSelectionRows {
+  mode: "rows"
+  indices: number[]
+  values: Array<{[field: string]: any}>
+}
+
+export type InteractionSelection =
+  | InteractionSelectionPoint
+  | InteractionSelectionRange
+  | InteractionSelectionRows
+
+export interface InteractionViewport {
+  ranges: {[axis: string]: [any, any]}
+}
 
 export interface InteractionEventPayload {
-  type: InteractionEventType
+  kind: InteractionEventKind
   source: string
-  data: any
+  source_id: string
   timestamp: number
+  payload: any
+  selection?: InteractionSelection
+  viewport?: InteractionViewport
 }
 
 export class InteractionEvent extends ModelEvent {
   constructor(
-    readonly type: InteractionEventType,
+    readonly kind: InteractionEventKind,
     readonly source: string,
-    readonly data: any,
+    readonly source_id: string,
+    readonly payload: any,
+    readonly selection?: InteractionSelection,
+    readonly viewport?: InteractionViewport,
   ) {
     super()
   }
 
   protected override get event_values(): Attrs {
-    return {model: this.origin, type: this.type, source: this.source, data: this.data}
+    return {
+      model: this.origin,
+      kind: this.kind,
+      source: this.source,
+      source_id: this.source_id,
+      payload: this.payload,
+      selection: this.selection,
+      viewport: this.viewport,
+    }
   }
 
   static {
@@ -76,47 +118,43 @@ export class InteractionStore extends Model {
     }))
   }
 
-  publish(
-    type: InteractionEventType,
-    source: string,
-    source_name: string | null,
-    data: any,
-  ): InteractionEventPayload {
-    const event: InteractionEventPayload = {
-      type,
-      source,
-      data,
+  publish_event(event: Omit<InteractionEventPayload, "timestamp">): InteractionEventPayload {
+    const full: InteractionEventPayload = {
+      ...event,
       timestamp: Date.now(),
     }
 
-    const events = [...this.events, event]
+    const events = [...this.events, full]
     const overflow = events.length - this.max_history
     const trimmed = overflow > 0 ? events.slice(overflow) : events
 
     this.events = trimmed
     this._update_filtered_views(trimmed)
 
-    if (source_name != null && this.sources[source] == null) {
-      this.sources = {...this.sources, [source]: source_name}
+    if (event.source != null && this.sources[event.source_id] == null) {
+      this.sources = {...this.sources, [event.source_id]: event.source}
     }
 
-    this.trigger_event(new InteractionEvent(type, source, data))
+    this.trigger_event(new InteractionEvent(
+      full.kind, full.source, full.source_id,
+      full.payload, full.selection, full.viewport,
+    ))
 
     if (this._autoclear) {
-      setTimeout(() => this.clear_by_source(source, type), 0)
+      setTimeout(() => this.clear(full.kind, full.source_id), 0)
     }
 
-    return event
+    return full
   }
 
   subscribe(
     callback: (event: InteractionEventPayload) => void,
-    type_filter?: InteractionEventType | InteractionEventType[],
+    kind_filter?: InteractionEventKind | InteractionEventKind[],
     source_filter?: string | string[],
   ): () => void {
-    const types = type_filter == null
+    const kinds = kind_filter == null
       ? null
-      : Array.isArray(type_filter) ? new Set(type_filter) : new Set([type_filter])
+      : Array.isArray(kind_filter) ? new Set(kind_filter) : new Set([kind_filter])
     const sources = source_filter == null
       ? null
       : Array.isArray(source_filter) ? new Set(source_filter) : new Set([source_filter])
@@ -126,10 +164,10 @@ export class InteractionStore extends Model {
       if (latest == null) {
         return
       }
-      if (types != null && !types.has(latest.type)) {
+      if (kinds != null && !kinds.has(latest.kind)) {
         return
       }
-      if (sources != null && !sources.has(latest.source)) {
+      if (sources != null && !sources.has(latest.source_id)) {
         return
       }
       callback(latest)
@@ -142,20 +180,16 @@ export class InteractionStore extends Model {
     }
   }
 
-  clear(type?: InteractionEventType, source?: string): void {
+  clear(kind?: InteractionEventKind, source_id?: string): void {
     let filtered = this.events
-    if (type != null) {
-      filtered = filtered.filter((e) => e.type !== type)
+    if (kind != null) {
+      filtered = filtered.filter((e) => e.kind !== kind)
     }
-    if (source != null) {
-      filtered = filtered.filter((e) => e.source !== source)
+    if (source_id != null) {
+      filtered = filtered.filter((e) => e.source_id !== source_id)
     }
     this.events = filtered
     this._update_filtered_views(filtered)
-  }
-
-  clear_by_source(source: string, type?: InteractionEventType): void {
-    this.clear(type, source)
   }
 
   clear_all(): void {
@@ -164,14 +198,14 @@ export class InteractionStore extends Model {
   }
 
   get_events(
-    type?: InteractionEventType,
-    source?: string,
+    kind?: InteractionEventKind,
+    source_id?: string,
   ): InteractionEventPayload[] {
     return this.events.filter((e) => {
-      if (type != null && e.type !== type) {
+      if (kind != null && e.kind !== kind) {
         return false
       }
-      if (source != null && e.source !== source) {
+      if (source_id != null && e.source_id !== source_id) {
         return false
       }
       return true
@@ -185,7 +219,7 @@ export class InteractionStore extends Model {
     const row_selection: InteractionEventPayload[] = []
 
     for (const e of events) {
-      switch (e.type) {
+      switch (e.kind) {
         case "hover":
           hover.push(e)
           break

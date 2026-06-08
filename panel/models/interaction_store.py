@@ -17,9 +17,9 @@ from ..config import config
 from ..io.resources import bundled_files
 from ..util import classproperty
 
-InteractionEventType = t.Literal["hover", "selection", "viewport", "row_selection"]
+InteractionEventKind = t.Literal["hover", "selection", "viewport", "row_selection"]
 
-InteractionEventTypes = enumeration("hover", "selection", "viewport", "row_selection")
+InteractionEventKinds = enumeration("hover", "selection", "viewport", "row_selection")
 
 
 class InteractionEvent(ModelEvent):
@@ -29,19 +29,26 @@ class InteractionEvent(ModelEvent):
     def __init__(
         self,
         model,
-        type: InteractionEventType | None = None,
+        kind: InteractionEventKind | None = None,
         source: str | None = None,
-        data: t.Any = None,
+        source_id: str | None = None,
+        payload: t.Any = None,
+        selection: t.Any = None,
+        viewport: t.Any = None,
     ):
-        self.type = type
+        self.kind = kind
         self.source = source
-        self.data = data
+        self.source_id = source_id
+        self.payload = payload
+        self.selection = selection
+        self.viewport = viewport
         super().__init__(model=model)
 
     def __repr__(self):
         return (
-            f'{type(self).__name__}(type={self.type!r}, source={self.source!r}, '
-            f'data={self.data!r})'
+            f'{type(self).__name__}(kind={self.kind!r}, source={self.source!r}, '
+            f'source_id={self.source_id!r}, selection={self.selection!r}, '
+            f'viewport={self.viewport!r})'
         )
 
 
@@ -51,44 +58,54 @@ class InteractionStore(Model):
     across multiple Panel components (Plotly, Vega, ECharts, Tabulator, etc.).
 
     Components publish their events to the store, and other components or
-    Python callbacks can subscribe to receive filtered events by type
+    Python callbacks can subscribe to receive filtered events by kind
     or source.
+
+    Each event has a normalized schema:
+        - kind: "hover" | "selection" | "viewport" | "row_selection"
+        - source: human-readable source name (e.g. "plotly", "vega")
+        - source_id: model id of the originating component
+        - timestamp: monotonic timestamp in ms
+        - payload: original raw event from the library
+        - selection: normalized selection data (when applicable)
+            - mode: "point" | "range" | "rows"
+            - indices: list of integer indices
+            - values: list of {field: value} dicts
+            - ranges: (mode="range" only) {axis: [min, max]}
+        - viewport: normalized viewport data (when applicable)
+            - ranges: {axis: [min, max]}
     """
 
     events = List(
         Dict(String, Any),
         default=[],
         help="""
-        List of interaction events. Each event is a dict with keys:
-        - type: 'hover' | 'selection' | 'viewport' | 'row_selection'
-        - source: model id of the originating component
-        - data: event-specific payload
-        - timestamp: monotonic timestamp in ms
+        List of normalized interaction events. See class docstring for schema.
         """,
     )
 
     hover_events = List(
         Dict(String, Any),
         default=[],
-        help="Filtered view: events of type 'hover'",
+        help="Filtered view: events of kind 'hover'",
     )
 
     selection_events = List(
         Dict(String, Any),
         default=[],
-        help="Filtered view: events of type 'selection'",
+        help="Filtered view: events of kind 'selection'",
     )
 
     viewport_events = List(
         Dict(String, Any),
         default=[],
-        help="Filtered view: events of type 'viewport'",
+        help="Filtered view: events of kind 'viewport'",
     )
 
     row_selection_events = List(
         Dict(String, Any),
         default=[],
-        help="Filtered view: events of type 'row_selection'",
+        help="Filtered view: events of kind 'row_selection'",
     )
 
     sources = Dict(

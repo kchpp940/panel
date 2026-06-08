@@ -13,7 +13,7 @@ from ..models.interaction_store import (
     InteractionStore as _BkInteractionStore,
 )
 from ..reactive import Reactive
-from .document import create_doc_if_none_exists, unlocked
+from .document import create_doc_if_none_exists
 from .state import state
 
 if t.TYPE_CHECKING:
@@ -23,7 +23,7 @@ if t.TYPE_CHECKING:
     from bokeh.model import Model
     from pyviz_comms import Comm
 
-    InteractionEventType = t.Literal["hover", "selection", "viewport", "row_selection"]
+    InteractionEventKind = t.Literal["hover", "selection", "viewport", "row_selection"]
 
 
 class InteractionStore(Reactive):
@@ -32,9 +32,24 @@ class InteractionStore(Reactive):
     distributing interaction events across multiple Panel components such
     as Plotly, Vega, ECharts, and Tabulator.
 
-    Components publish their interaction events (hover, selection,
-    viewport, row selection) to the store, and Python callbacks or other
-    components can subscribe to receive events filtered by type or source.
+    Components publish their interaction events to the store, and Python
+    callbacks or other components can subscribe to receive events filtered
+    by kind or source. Each event has a normalized schema so subscribers do
+    not need to handle library-specific data structures.
+
+    Normalized event schema:
+        - kind: "hover" | "selection" | "viewport" | "row_selection"
+        - source: human-readable source name (e.g. "plotly", "vega")
+        - source_id: model id of the originating component
+        - timestamp: monotonic timestamp in ms
+        - payload: original raw event from the library (for advanced use)
+        - selection: normalized selection data (when applicable)
+            - mode: "point" | "range" | "rows"
+            - indices: list of integer row/point indices
+            - values: list of {field: value} dicts per selected item
+            - ranges: (mode="range" only) {axis: [min, max]}
+        - viewport: normalized viewport data (when applicable)
+            - ranges: {axis: [min, max]}
 
     Reference: https://panel.holoviz.org/api/panel.io.InteractionStore.html
 
@@ -42,7 +57,10 @@ class InteractionStore(Reactive):
 
     >>> store = pn.io.InteractionStore()
     >>> plotly = pn.pane.Plotly(fig, interaction_store=store)
-    >>> store.subscribe(lambda event: print(event), type="selection")
+    >>> def on_selection(event):
+    ...     if event['selection'] and event['selection']['mode'] == 'point':
+    ...         print("Selected indices:", event['selection']['indices'])
+    >>> store.subscribe(on_selection, kind="selection")
     """
 
     events = param.List(
@@ -50,11 +68,8 @@ class InteractionStore(Reactive):
         item_type=dict,
         nested_refs=True,
         doc="""
-        List of all interaction events. Each event is a dict with keys:
-        - type: 'hover' | 'selection' | 'viewport' | 'row_selection'
-        - source: model id of the originating component
-        - data: event-specific payload
-        - timestamp: monotonic timestamp in ms
+        List of all normalized interaction events. See class docstring for
+        the full schema.
         """,
     )
 
@@ -62,28 +77,28 @@ class InteractionStore(Reactive):
         default=[],
         item_type=dict,
         nested_refs=True,
-        doc="Filtered view: events of type 'hover'",
+        doc="Filtered view: events of kind 'hover'",
     )
 
     selection_events = param.List(
         default=[],
         item_type=dict,
         nested_refs=True,
-        doc="Filtered view: events of type 'selection'",
+        doc="Filtered view: events of kind 'selection'",
     )
 
     viewport_events = param.List(
         default=[],
         item_type=dict,
         nested_refs=True,
-        doc="Filtered view: events of type 'viewport'",
+        doc="Filtered view: events of kind 'viewport'",
     )
 
     row_selection_events = param.List(
         default=[],
         item_type=dict,
         nested_refs=True,
-        doc="Filtered view: events of type 'row_selection'",
+        doc="Filtered view: events of kind 'row_selection'",
     )
 
     sources = param.Dict(
@@ -120,10 +135,10 @@ class InteractionStore(Reactive):
         if not self.events:
             return
         latest = self.events[-1]
-        for callback, type_filter, source_filter in self._subscribers:
-            if type_filter is not None and latest['type'] not in type_filter:
+        for callback, kind_filter, source_filter in self._subscribers:
+            if kind_filter is not None and latest['kind'] not in kind_filter:
                 continue
-            if source_filter is not None and latest['source'] not in source_filter:
+            if source_filter is not None and latest['source_id'] not in source_filter:
                 continue
             try:
                 callback(latest)
@@ -134,8 +149,8 @@ class InteractionStore(Reactive):
     def subscribe(
         self,
         callback: Callable[[dict[str, t.Any]], None],
-        type: InteractionEventType | list[InteractionEventType] | None = None,
-        source: str | list[str] | None = None,
+        kind: InteractionEventKind | list[InteractionEventKind] | None = None,
+        source_id: str | list[str] | None = None,
     ) -> Callable[[], None]:
         """
         Subscribe to interaction events.
@@ -143,24 +158,26 @@ class InteractionStore(Reactive):
         Parameters
         ----------
         callback : callable
-            A function that receives a single event dict argument.
-        type : str or list[str], optional
-            Filter to only receive events of the given type(s).
-        source : str or list[str], optional
-            Filter to only receive events from the given source id(s).
+            A function that receives a single normalized event dict.
+            See class docstring for the event schema.
+        kind : str or list[str], optional
+            Filter to only receive events of the given kind(s).
+            One of: "hover", "selection", "viewport", "row_selection".
+        source_id : str or list[str], optional
+            Filter to only receive events from the given source model id(s).
 
         Returns
         -------
         unsubscribe : callable
             A function that when called removes the subscription.
         """
-        type_set = None if type is None else (
-            set(type) if isinstance(type, list) else {type}
+        kind_set = None if kind is None else (
+            set(kind) if isinstance(kind, list) else {kind}
         )
-        source_set = None if source is None else (
-            set(source) if isinstance(source, list) else {source}
+        source_set = None if source_id is None else (
+            set(source_id) if isinstance(source_id, list) else {source_id}
         )
-        entry = (callback, type_set, source_set)
+        entry = (callback, kind_set, source_set)
         self._subscribers.append(entry)
 
         def unsubscribe() -> None:
@@ -171,24 +188,24 @@ class InteractionStore(Reactive):
 
     def clear(
         self,
-        type: InteractionEventType | None = None,
-        source: str | None = None,
+        kind: InteractionEventKind | None = None,
+        source_id: str | None = None,
     ) -> None:
         """
         Clear events from the store.
 
         Parameters
         ----------
-        type : str, optional
-            If given, only clear events of this type.
-        source : str, optional
-            If given, only clear events from this source id.
+        kind : str, optional
+            If given, only clear events of this kind.
+        source_id : str, optional
+            If given, only clear events from this source model id.
         """
-        if type is not None or source is not None:
+        if kind is not None or source_id is not None:
             filtered = [
                 e for e in self.events
-                if (type is None or e['type'] != type)
-                and (source is None or e['source'] != source)
+                if (kind is None or e['kind'] != kind)
+                and (source_id is None or e['source_id'] != source_id)
             ]
         else:
             filtered = []
@@ -205,28 +222,28 @@ class InteractionStore(Reactive):
 
     def get_events(
         self,
-        type: InteractionEventType | None = None,
-        source: str | None = None,
+        kind: InteractionEventKind | None = None,
+        source_id: str | None = None,
     ) -> list[dict[str, t.Any]]:
         """
-        Retrieve events filtered by type and/or source.
+        Retrieve events filtered by kind and/or source.
 
         Parameters
         ----------
-        type : str, optional
-            Only return events of this type.
-        source : str, optional
-            Only return events from this source id.
+        kind : str, optional
+            Only return events of this kind.
+        source_id : str, optional
+            Only return events from this source model id.
 
         Returns
         -------
         events : list[dict]
-            A list of matching event dicts.
+            A list of matching normalized event dicts.
         """
         return [
             e for e in self.events
-            if (type is None or e['type'] == type)
-            and (source is None or e['source'] == source)
+            if (kind is None or e['kind'] == kind)
+            and (source_id is None or e['source_id'] == source_id)
         ]
 
     def _process_event(self, event: _BkInteractionEvent) -> None:

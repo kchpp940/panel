@@ -12,7 +12,7 @@ import {ColumnDataSource} from "@bokehjs/models/sources/column_data_source"
 import {debounce} from  "debounce"
 
 import {HTMLBox, HTMLBoxView, set_size} from "./layout"
-import {InteractionStore, type InteractionEventType} from "./interaction_store"
+import {InteractionStore, type InteractionEventKind, type InteractionSelection, type InteractionViewport} from "./interaction_store"
 import {convertUndefined, deepCopy, get, reshape, throttle} from "./util"
 
 import plotly_css from "styles/models/plotly.css"
@@ -211,11 +211,90 @@ export class PlotlyPlotView extends HTMLBoxView {
     this._throttled_resize = throttle(() => this.resize_layout(), 25)
   }
 
-  _publish_interaction(type: InteractionEventType, data: any): void {
+  _publish_selection(kind: InteractionEventKind, selection: InteractionSelection | null, payload: any): void {
     if (this.model.interaction_store == null) {
       return
     }
-    this.model.interaction_store.publish(type, this.model.id, "plotly", data)
+    this.model.interaction_store.publish_event({
+      kind,
+      source: "plotly",
+      source_id: this.model.id,
+      payload,
+      selection: selection ?? undefined,
+    })
+  }
+
+  _publish_viewport(viewport: InteractionViewport, payload: any): void {
+    if (this.model.interaction_store == null) {
+      return
+    }
+    this.model.interaction_store.publish_event({
+      kind: "viewport",
+      source: "plotly",
+      source_id: this.model.id,
+      payload,
+      viewport,
+    })
+  }
+
+  _point_selection_from_points(points: any[] | null | undefined): InteractionSelection | null {
+    if (points == null || points.length === 0) {
+      return null
+    }
+    const indices: number[] = []
+    const values: Array<{[field: string]: any}> = []
+    for (const pt of points) {
+      if (pt.pointNumber != null) {
+        indices.push(pt.pointNumber)
+      }
+      const v: {[field: string]: any} = {}
+      for (const k of Object.keys(pt)) {
+        const val = pt[k]
+        if (!Array.isArray(val) && typeof val !== "object" && val !== undefined) {
+          v[k] = val
+        }
+      }
+      values.push(v)
+    }
+    return {mode: "point", indices, values}
+  }
+
+  _range_selection_from_event(eventData: any): InteractionSelection | null {
+    const ranges: {[axis: string]: [any, any]} = {}
+    if (eventData?.range) {
+      if (eventData.range.x) ranges["x"] = eventData.range.x
+      if (eventData.range.y) ranges["y"] = eventData.range.y
+    }
+    const indices: number[] = []
+    const values: Array<{[field: string]: any}> = []
+    if (eventData?.points) {
+      for (const pt of eventData.points) {
+        if (pt.pointNumber != null) indices.push(pt.pointNumber)
+        const v: {[field: string]: any} = {}
+        for (const k of Object.keys(pt)) {
+          const val = pt[k]
+          if (!Array.isArray(val) && typeof val !== "object" && val !== undefined) {
+            v[k] = val
+          }
+        }
+        values.push(v)
+      }
+    }
+    if (Object.keys(ranges).length === 0 && indices.length === 0) {
+      return null
+    }
+    return {mode: "range", ranges, indices, values}
+  }
+
+  _viewport_from_layout(viewport: any): InteractionViewport {
+    const ranges: {[axis: string]: [any, any]} = {}
+    for (const key of Object.keys(viewport)) {
+      const match = key.match(/^(xaxis|yaxis\d*)\.range$/)
+      if (match && Array.isArray(viewport[key])) {
+        ranges[match[1]] = viewport[key]
+      }
+    }
+    return {ranges}
   }
 
   override connect_signals(): void {
@@ -368,21 +447,24 @@ export class PlotlyPlotView extends HTMLBoxView {
     this.container.on("plotly_click", (eventData: any) => {
       const data = filterEventData(this.container, eventData, "click")
       this.model.trigger_event(new PlotlyEvent({type: "click", data}))
-      this._publish_interaction("selection", data)
+      const sel = this._point_selection_from_points(eventData?.points)
+      this._publish_selection("selection", sel, data)
     })
 
     //  - plotly_doubleclick
     this.container.on("plotly_doubleclick", (eventData: any) => {
       const data = filterEventData(this.container, eventData, "click")
       this.model.trigger_event(new PlotlyEvent({type: "doubleclick", data}))
-      this._publish_interaction("selection", data)
+      const sel = this._point_selection_from_points(eventData?.points)
+      this._publish_selection("selection", sel, data)
     })
 
     //  - plotly_hover
     this.container.on("plotly_hover", (eventData: any) => {
       const data = filterEventData(this.container, eventData, "hover")
       this.model.trigger_event(new PlotlyEvent({type: "hover", data}))
-      this._publish_interaction("hover", data)
+      const sel = this._point_selection_from_points(eventData?.points)
+      this._publish_selection("hover", sel, data)
       // Override hoverdata to ensure click event has context
       // see https://github.com/holoviz/panel/pull/6753
       this._hoverdata = this.container._hoverdata = eventData.points
@@ -396,7 +478,8 @@ export class PlotlyPlotView extends HTMLBoxView {
       }
       const data = filterEventData(this.container, eventData, "selected")
       this.model.trigger_event(new PlotlyEvent({type: "selected", data}))
-      this._publish_interaction("selection", data)
+      const sel = this._range_selection_from_event(eventData)
+      this._publish_selection("selection", sel, data)
     })
 
     //  - plotly_clickannotation
@@ -404,13 +487,13 @@ export class PlotlyPlotView extends HTMLBoxView {
       delete eventData.event
       delete eventData.fullAnnotation
       this.model.trigger_event(new PlotlyEvent({type: "clickannotation", data: eventData}))
-      this._publish_interaction("selection", eventData)
+      this._publish_selection("selection", null, eventData)
     })
 
     //  - plotly_deselect
     this.container.on("plotly_deselect", () => {
       this.model.trigger_event(new PlotlyEvent({type: "selected", data: null}))
-      this._publish_interaction("selection", null)
+      this._publish_selection("selection", null, null)
     })
 
     //  - plotly_unhover
@@ -418,7 +501,7 @@ export class PlotlyPlotView extends HTMLBoxView {
       // Override hoverdata to ensure click event has context
       this.container._hoverdata = this._hoverdata
       this.model.trigger_event(new PlotlyEvent({type: "hover", data: null}))
-      this._publish_interaction("hover", null)
+      this._publish_selection("hover", null, null)
       setTimeout(() => {
         // Remove hoverdata once events have been processed
         delete this.container._hoverdata
@@ -521,7 +604,8 @@ export class PlotlyPlotView extends HTMLBoxView {
 
     if (!is_equal(viewport, this.model.viewport)) {
       this._setViewport(viewport)
-      this._publish_interaction("viewport", viewport)
+      const vp = this._viewport_from_layout(viewport)
+      this._publish_viewport(vp, viewport)
     }
   }
 
