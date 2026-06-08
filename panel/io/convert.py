@@ -82,6 +82,26 @@ PWA_IMAGES = [
 
 Runtimes = t.Literal['pyodide', 'pyscript', 'pyodide-worker', 'pyscript-worker']
 
+WheelProvenance = t.Literal[
+    'wheel-auto-detected',
+    'wheel-cli-list',
+    'wheel-requirements-file',
+    'wheel-panel-dependency',
+    'wheel-local-file',
+]
+
+ResourceProvenance = t.Literal[
+    'bokeh-core',
+    'panel-core',
+    'panel-extension',
+    'pane-resource',
+    'theme-css',
+    'user-resource',
+    'sw-precache',
+    'runtime-url',
+    'unknown',
+]
+
 _URL_RE = re.compile(r'https?://[^\s"\'<>)]+')
 
 
@@ -89,6 +109,8 @@ _URL_RE = re.compile(r'https?://[^\s"\'<>)]+')
 class WheelInfo:
     name: str
     source: str
+    provenance: WheelProvenance = 'wheel-auto-detected'
+    provenance_detail: str = ''
     size_kb: float | None = None
     local: bool = False
 
@@ -98,6 +120,8 @@ class ResourceInfo:
     path: str
     type: t.Literal['js', 'css', 'image', 'font', 'other']
     source: t.Literal['cdn', 'local', 'inline', 'external']
+    provenance: ResourceProvenance = 'unknown'
+    provenance_detail: str = ''
     size_kb: float | None = None
     referenced_by: str = ''
 
@@ -124,8 +148,8 @@ class PageAssets:
     js_resources: list[ResourceInfo] = dataclasses.field(default_factory=list)
     css_resources: list[ResourceInfo] = dataclasses.field(default_factory=list)
     theme: ThemeInfo | None = None
-    user_resources: list[str] = dataclasses.field(default_factory=list)
-    runtime_urls: list[str] = dataclasses.field(default_factory=list)
+    user_resources: list[ResourceInfo] = dataclasses.field(default_factory=list)
+    runtime_urls: list[ResourceInfo] = dataclasses.field(default_factory=list)
     total_size_kb: float = 0.0
 
 
@@ -135,6 +159,8 @@ class DiagnosticIssue:
     category: t.Literal['missing', 'duplicate', 'non-localized', 'size-warning']
     resource: str
     message: str
+    provenance: str = ''
+    provenance_detail: str = ''
     source: str = ''
 
 
@@ -183,29 +209,29 @@ class AssetsReport:
             if page.wheels:
                 lines.append(f'### Python Wheels ({len(page.wheels)})')
                 lines.append('')
-                lines.append('| Name | Source | Size (KB) | Local |')
-                lines.append('|------|--------|-----------|-------|')
+                lines.append('| Name | Provenance | Detail | Source | Size (KB) | Local |')
+                lines.append('|------|------------|--------|--------|-----------|-------|')
                 for w in page.wheels:
                     size = f'{w.size_kb:.1f}' if w.size_kb else 'N/A'
-                    lines.append(f'| {w.name} | {w.source} | {size} | {w.local} |')
+                    lines.append(f'| {w.name} | {w.provenance} | {w.provenance_detail} | {w.source} | {size} | {w.local} |')
                 lines.append('')
             if page.js_resources:
                 lines.append(f'### JavaScript Resources ({len(page.js_resources)})')
                 lines.append('')
-                lines.append('| Path | Source | Size (KB) |')
-                lines.append('|------|--------|-----------|')
+                lines.append('| Path | Provenance | Detail | Source | Size (KB) |')
+                lines.append('|------|------------|--------|--------|-----------|')
                 for r in page.js_resources:
                     size = f'{r.size_kb:.1f}' if r.size_kb else 'N/A'
-                    lines.append(f'| {r.path} | {r.source} | {size} |')
+                    lines.append(f'| {r.path} | {r.provenance} | {r.provenance_detail} | {r.source} | {size} |')
                 lines.append('')
             if page.css_resources:
                 lines.append(f'### CSS Resources ({len(page.css_resources)})')
                 lines.append('')
-                lines.append('| Path | Source | Size (KB) |')
-                lines.append('|------|--------|-----------|')
+                lines.append('| Path | Provenance | Detail | Source | Size (KB) |')
+                lines.append('|------|------------|--------|--------|-----------|')
                 for r in page.css_resources:
                     size = f'{r.size_kb:.1f}' if r.size_kb else 'N/A'
-                    lines.append(f'| {r.path} | {r.source} | {size} |')
+                    lines.append(f'| {r.path} | {r.provenance} | {r.provenance_detail} | {r.source} | {size} |')
                 lines.append('')
             if page.theme:
                 lines.append(f'### Theme: {page.theme.name}')
@@ -219,8 +245,11 @@ class AssetsReport:
             if page.user_resources:
                 lines.append(f'### User Resources ({len(page.user_resources)})')
                 lines.append('')
+                lines.append('| Path | Provenance | Detail | Size (KB) |')
+                lines.append('|------|------------|--------|-----------|')
                 for r in page.user_resources:
-                    lines.append(f'- `{r}`')
+                    size = f'{r.size_kb:.1f}' if r.size_kb else 'N/A'
+                    lines.append(f'| {r.path} | {r.provenance} | {r.provenance_detail} | {size} |')
                 lines.append('')
             if page.runtime_urls:
                 lines.append(f'### Runtime Network URLs ({len(page.runtime_urls)})')
@@ -228,8 +257,10 @@ class AssetsReport:
                 lines.append('> These URLs are referenced in the code and may be fetched at runtime.')
                 lines.append('> They must be reachable or cached for the app to work offline.')
                 lines.append('')
-                for url in page.runtime_urls:
-                    lines.append(f'- `{url}`')
+                lines.append('| URL | Provenance | Detail |')
+                lines.append('|-----|------------|--------|')
+                for r in page.runtime_urls:
+                    lines.append(f'| {r.path} | {r.provenance} | {r.provenance_detail} |')
                 lines.append('')
         if self.issues:
             lines.extend([
@@ -245,8 +276,10 @@ class AssetsReport:
                     lines.append(f'### {sev_label} ({len(by_severity[severity])})')
                     lines.append('')
                     for issue in by_severity[severity]:
-                        src = f' (source: `{issue.source}`)' if issue.source else ''
-                        lines.append(f'- **[{issue.category}]** {issue.resource}: {issue.message}{src}')
+                        src = f' (page: `{issue.source}`)' if issue.source else ''
+                        prov = f' from `{issue.provenance}`' if issue.provenance else ''
+                        detail = f' ({issue.provenance_detail})' if issue.provenance_detail else ''
+                        lines.append(f'- **[{issue.category}]** {issue.resource}{prov}{detail}: {issue.message}{src}')
                     lines.append('')
         return '\n'.join(lines)
 
@@ -292,21 +325,37 @@ def _get_file_size_kb(path: str, base_dir: pathlib.Path | None = None) -> float 
     return None
 
 
-def _extract_runtime_urls(code: str) -> list[str]:
-    urls = set()
+def _extract_runtime_urls(code: str, source_name: str = 'app code') -> list[ResourceInfo]:
+    urls: dict[str, ResourceInfo] = {}
     for match in _URL_RE.findall(code):
         if not match.endswith(('.whl', '.js', '.css', '.png', '.jpg', '.jpeg', '.gif', '.svg', '.ico')):
-            urls.add(match.rstrip('.,;:'))
+            url = match.rstrip('.,;:)')
+            if url not in urls:
+                urls[url] = ResourceInfo(
+                    path=url,
+                    type='other',
+                    source='external',
+                    provenance='runtime-url',
+                    provenance_detail=f'detected in {source_name}',
+                )
     try:
         tree = ast.parse(code)
         for node in ast.walk(tree):
             if isinstance(node, ast.Constant) and isinstance(node.value, str):
                 for match in _URL_RE.findall(node.value):
                     if not match.endswith(('.whl', '.js', '.css', '.png', '.jpg', '.jpeg', '.gif', '.svg', '.ico')):
-                        urls.add(match.rstrip('.,;:'))
+                        url = match.rstrip('.,;:)')
+                        if url not in urls:
+                            urls[url] = ResourceInfo(
+                                path=url,
+                                type='other',
+                                source='external',
+                                provenance='runtime-url',
+                                provenance_detail=f'string literal in {source_name}',
+                            )
     except SyntaxError:
         pass
-    return sorted(urls)
+    return sorted(urls.values(), key=lambda r: r.path)
 
 
 def _detect_theme(document: Document) -> ThemeInfo | None:
@@ -334,15 +383,174 @@ def _detect_theme(document: Document) -> ThemeInfo | None:
     return None
 
 
+def _collect_theme_css_resources(
+    document: Document,
+    dest_path: pathlib.Path | None = None,
+) -> list[ResourceInfo]:
+    from ..theme.base import Design, Theme
+    results: list[ResourceInfo] = []
+    theme_info = _detect_theme(document)
+    if not theme_info:
+        return results
+    for css_path in theme_info.css_files:
+        css_path_str = str(css_path)
+        rtype = _classify_resource_type(css_path_str)
+        rsrc = _classify_resource_source(css_path_str)
+        size_kb = _get_file_size_kb(css_path_str, dest_path)
+        results.append(ResourceInfo(
+            path=css_path_str,
+            type=rtype,
+            source=rsrc,
+            provenance='theme-css',
+            provenance_detail=theme_info.name,
+            size_kb=size_kb,
+        ))
+    return results
+
+
+def _collect_resources_with_provenance(
+    document: Document,
+    roots: list | None = None,
+    dest_path: pathlib.Path | None = None,
+) -> tuple[list[ResourceInfo], list[ResourceInfo]]:
+    """
+    Walks the document's model tree and collects JS/CSS resources along with
+    their provenance: whether they come from bokeh-core, panel-core,
+    panel-extension, pane-resource or theme-css.
+
+    Returns (js_resources, css_resources) as lists of ResourceInfo.
+    """
+    from ..io.resources import CDN_DIST, CDN_ROOT, bundle_resources, Resources
+
+    if roots is None:
+        roots = list(document.roots)
+
+    js_results: list[ResourceInfo] = []
+    css_results: list[ResourceInfo] = []
+
+    seen_js: set[str] = set()
+    seen_css: set[str] = set()
+
+    def _add_js(path: str, provenance: ResourceProvenance, detail: str = '') -> None:
+        if path in seen_js:
+            return
+        seen_js.add(path)
+        rtype = _classify_resource_type(path)
+        rsrc = _classify_resource_source(path)
+        size_kb = _get_file_size_kb(path, dest_path)
+        js_results.append(ResourceInfo(
+            path=path, type=rtype, source=rsrc,
+            provenance=provenance, provenance_detail=detail,
+            size_kb=size_kb,
+        ))
+
+    def _add_css(path: str, provenance: ResourceProvenance, detail: str = '') -> None:
+        if path in seen_css:
+            return
+        seen_css.add(path)
+        rtype = _classify_resource_type(path)
+        rsrc = _classify_resource_source(path)
+        size_kb = _get_file_size_kb(path, dest_path)
+        css_results.append(ResourceInfo(
+            path=path, type=rtype, source=rsrc,
+            provenance=provenance, provenance_detail=detail,
+            size_kb=size_kb,
+        ))
+
+    component_resources: dict[str, tuple[str, str]] = {}
+
+    for model in document.models.values():
+        mcls = type(model)
+        cls_name = mcls.__name__
+        for attr in ('__javascript__', '__css__', '__js_modules__'):
+            urls = getattr(mcls, attr, None)
+            if not urls:
+                continue
+            if isinstance(urls, str):
+                urls = [urls]
+            for i, url in enumerate(urls):
+                resource_type = 'javascript' if attr == '__javascript__' else (
+                    'js_module' if attr == '__js_modules__' else 'css'
+                )
+                component_resources[url] = (
+                    'pane-resource',
+                    f'{cls_name}:{resource_type}[{i}]',
+                )
+
+        from ..io.resources import ResourceComponent
+        if isinstance(model, ResourceComponent) or hasattr(model, 'resolve_resources'):
+            try:
+                if hasattr(model, 'resolve_resources'):
+                    resolved = model.resolve_resources(cdn=True)
+                    for rname, rurl in resolved.get('js', {}).items():
+                        component_resources[rurl] = ('pane-resource', f'{cls_name}:{rname}')
+                    for rname, rurl in resolved.get('js_modules', {}).items():
+                        component_resources[rurl] = ('pane-resource', f'{cls_name}:{rname}')
+                    for rname, rurl in resolved.get('css', {}).items():
+                        component_resources[rurl] = ('pane-resource', f'{cls_name}:{rname}')
+            except Exception:
+                pass
+
+    try:
+        res = Resources(mode='cdn')
+        bundle = bundle_resources(roots, res)
+    except Exception:
+        bundle = None
+
+    if bundle:
+        for url in bundle.js_files:
+            url_str = str(url)
+            if url_str in component_resources:
+                prov, detail = component_resources[url_str]
+                _add_js(url_str, prov, detail)
+            elif CDN_DIST in url_str or 'panel.min.js' in url_str:
+                if 'bundled/' in url_str and ('@holoviz/panel' in url_str or '/panel/' in url_str):
+                    _add_js(url_str, 'panel-extension', 'bundled panel extension')
+                else:
+                    _add_js(url_str, 'panel-core', 'panel main bundle')
+            elif 'bokeh' in url_str:
+                _add_js(url_str, 'bokeh-core', 'bokeh runtime')
+            elif CDN_ROOT in url_str:
+                _add_js(url_str, 'bokeh-core', 'bokeh contrib')
+            else:
+                _add_js(url_str, 'panel-extension', 'third-party extension')
+        for url in bundle.css_files:
+            url_str = str(url)
+            if url_str in component_resources:
+                prov, detail = component_resources[url_str]
+                _add_css(url_str, prov, detail)
+            elif CDN_DIST in url_str:
+                _add_css(url_str, 'panel-core', 'panel base CSS')
+            elif 'bokeh' in url_str:
+                _add_css(url_str, 'bokeh-core', 'bokeh CSS')
+            else:
+                _add_css(url_str, 'panel-extension', 'third-party CSS')
+
+    for rurl, (prov, detail) in component_resources.items():
+        rtype = _classify_resource_type(rurl)
+        if rtype == 'js' and rurl not in seen_js:
+            _add_js(rurl, prov, detail)
+        elif rtype == 'css' and rurl not in seen_css:
+            _add_css(rurl, prov, detail)
+
+    theme_css = _collect_theme_css_resources(document, dest_path)
+    for r in theme_css:
+        if r.path not in seen_css:
+            seen_css.add(r.path)
+            css_results.append(r)
+
+    return js_results, css_results
+
+
 def diagnose_assets(
     pages: list[PageAssets],
     dest_path: pathlib.Path,
 ) -> list[DiagnosticIssue]:
     issues: list[DiagnosticIssue] = []
-    all_resources: list[tuple[str, str]] = []
+    all_resources: list[tuple[str, str, str, str]] = []
     for page in pages:
         for w in page.wheels:
-            all_resources.append((w.source, page.page_name))
+            all_resources.append((w.source, page.page_name, w.provenance, w.provenance_detail))
             if not w.local:
                 parsed = urlparse(w.source)
                 if parsed.scheme in ('http', 'https'):
@@ -351,6 +559,8 @@ def diagnose_assets(
                         category='non-localized',
                         resource=w.name,
                         message=f'Wheel loaded from remote URL {w.source}, will not work fully offline',
+                        provenance=w.provenance,
+                        provenance_detail=w.provenance_detail,
                         source=page.page_name,
                     ))
             else:
@@ -361,17 +571,21 @@ def diagnose_assets(
                         category='missing',
                         resource=w.name,
                         message=f'Local wheel not found at {w.source}',
+                        provenance=w.provenance,
+                        provenance_detail=w.provenance_detail,
                         source=page.page_name,
                     ))
-        for rtype in ('js_resources', 'css_resources'):
+        for rtype in ('js_resources', 'css_resources', 'user_resources'):
             for r in getattr(page, rtype):
-                all_resources.append((r.path, page.page_name))
+                all_resources.append((r.path, page.page_name, r.provenance, r.provenance_detail))
                 if r.source in ('cdn', 'external'):
                     issues.append(DiagnosticIssue(
                         severity='warning',
                         category='non-localized',
                         resource=r.path,
                         message=f'{rtype.split("_")[0].upper()} resource loaded from remote URL, may fail offline',
+                        provenance=r.provenance,
+                        provenance_detail=r.provenance_detail,
                         source=page.page_name,
                     ))
                 elif r.source == 'local':
@@ -383,31 +597,36 @@ def diagnose_assets(
                             severity='error',
                             category='missing',
                             resource=r.path,
-                            message=f'Local resource file not found',
+                            message='Local resource file not found',
+                            provenance=r.provenance,
+                            provenance_detail=r.provenance_detail,
                             source=page.page_name,
                         ))
-        for ur in page.user_resources:
-            all_resources.append((ur, page.page_name))
-            local_path = pathlib.Path(ur)
-            if not local_path.is_absolute():
-                local_path = dest_path / local_path
-            if not local_path.is_file():
-                issues.append(DiagnosticIssue(
-                    severity='error',
-                    category='missing',
-                    resource=ur,
-                    message='User resource file not found in output directory',
-                    source=page.page_name,
-                ))
-    counts = Counter(path for path, _ in all_resources)
+        for r in page.runtime_urls:
+            all_resources.append((r.path, page.page_name, r.provenance, r.provenance_detail))
+            issues.append(DiagnosticIssue(
+                severity='warning',
+                category='non-localized',
+                resource=r.path,
+                message='Runtime network URL referenced in code; must be reachable or cached for offline use',
+                provenance=r.provenance,
+                provenance_detail=r.provenance_detail,
+                source=page.page_name,
+            ))
+    counts = Counter(path for path, _, _, _ in all_resources)
     for path, count in counts.items():
         if count > 1:
-            pages_with = sorted(set(pg for p, pg in all_resources if p == path))
+            entries = [e for e in all_resources if e[0] == path]
+            pages_with = sorted(set(pg for _, pg, _, _ in entries))
+            provs = sorted(set((p, pd) for _, _, p, pd in entries if p))
+            prov_str = ', '.join(f'{p}({pd})' for p, pd in provs)
             issues.append(DiagnosticIssue(
                 severity='info',
                 category='duplicate',
                 resource=path,
                 message=f'Resource included {count} times across pages: {", ".join(pages_with)}',
+                provenance=prov_str,
+                provenance_detail='',
                 source=', '.join(pages_with),
             ))
     for page in pages:
@@ -417,6 +636,8 @@ def diagnose_assets(
                 category='size-warning',
                 resource=page.page_name,
                 message=f'Page assets exceed 5MB ({page.total_size_kb:.1f} KB), consider optimizing wheels and resources',
+                provenance='page-summary',
+                provenance_detail='',
                 source=page.page_name,
             ))
     return issues
@@ -438,8 +659,10 @@ def print_diagnostics(issues: list[DiagnosticIssue]) -> None:
         label = severity.upper()
         print(f'{prefix} {label}: {len(sev_items)} issue(s)')
         for issue in sev_items:
-            src = f' [{issue.source}]' if issue.source else ''
-            print(f'   [{issue.category}] {issue.resource}: {issue.message}{src}')
+            prov = f' [{issue.provenance}]' if issue.provenance else ''
+            detail = f' ({issue.provenance_detail})' if issue.provenance_detail else ''
+            src = f' @ {issue.source}' if issue.source else ''
+            print(f'   [{issue.category}] {issue.resource}{prov}{detail}: {issue.message}{src}')
     print()
 
 
@@ -569,9 +792,11 @@ def collect_python_requirements(
     requirements: list[str] | t.Literal['auto'] | os.PathLike = 'auto',
     panel_version: t.Literal['auto', 'local'] | str = 'auto',
     http_patch: bool = True,
-) -> list[str]:
+) -> list[tuple[str, WheelProvenance, str]]:
     """
     Make sense of python requirements for our Panel script.
+
+    Returns a list of (req_str, provenance, provenance_detail) tuples.
 
     Arguments
     ---------
@@ -585,7 +810,8 @@ def collect_python_requirements(
         Whether to patch the HTTP request stack with the pyodide-http library
         to allow urllib3 and requests to work.
     """
-    # Environment
+    collected_requirements: list[tuple[str, WheelProvenance, str]] = []
+
     if panel_version == 'local':
         panel_req = './' + str(PANEL_LOCAL_WHL.as_posix()).split('/')[-1]
         bokeh_req = './' + str(BOKEH_LOCAL_WHL.as_posix()).split('/')[-1]
@@ -595,12 +821,14 @@ def collect_python_requirements(
     else:
         panel_req = f'panel=={panel_version}'
         bokeh_req = f'bokeh=={BOKEH_VERSION}'
-    collected_requirements = [bokeh_req, panel_req]
+
+    collected_requirements.append((bokeh_req, 'wheel-panel-dependency', 'bokeh runtime'))
+    collected_requirements.append((panel_req, 'wheel-panel-dependency', 'panel runtime'))
     if http_patch:
-        collected_requirements.append('pyodide-http')
+        collected_requirements.append(('pyodide-http', 'wheel-panel-dependency', 'http patch for requests/urllib3'))
 
     requirements_root = os.getcwd()
-    resolved_reqs: list[str]
+    resolved_reqs: list[tuple[str, WheelProvenance, str]]
     if requirements == 'auto':
         if hasattr(code, 'read'):
             source = code.read()
@@ -608,14 +836,25 @@ def collect_python_requirements(
             path = pathlib.Path(code)
             application = build_single_handler_application(path.absolute())
             source = application._handlers[0]._runner.source
-        resolved_reqs = find_requirements(source)
+        detected = find_requirements(source)
+        resolved_reqs = [
+            (r, 'wheel-auto-detected', f'auto-detected from import in {os.path.basename(str(code))}')
+            for r in detected
+        ]
     elif isinstance(requirements, (str, os.PathLike)) and pathlib.Path(requirements).is_file():
         requirements_root = os.path.dirname(requirements)
-        resolved_reqs = (
+        lines = (
             pathlib.Path(requirements).read_text(encoding='utf-8').splitlines()
         )
+        resolved_reqs = [
+            (r, 'wheel-requirements-file', f'from requirements file {os.path.basename(str(requirements))}')
+            for r in lines
+        ]
     elif isinstance(requirements, list):
-        resolved_reqs = requirements
+        resolved_reqs = [
+            (r, 'wheel-cli-list', 'from CLI --requirements list')
+            for r in requirements
+        ]
     else:
         raise ValueError(
             f'Requirements {requirements!r} could not be resolved. '
@@ -623,7 +862,7 @@ def collect_python_requirements(
             'file that exists on disk or \'auto\' as a literal.'
         )
 
-    for raw_req in resolved_reqs:
+    for raw_req, prov, prov_detail in resolved_reqs:
         stripped_req = raw_req.split('#')[0].strip()
         if not len(stripped_req) > 0:
             continue
@@ -640,20 +879,22 @@ def collect_python_requirements(
         elif req.url is not None:
             parsed_req = urlparse(req.url)
             if parsed_req.scheme in ('https', 'http'):
-                collected_requirements.append(req.url)
+                collected_requirements.append((req.url, prov, prov_detail))
             elif parsed_req.scheme in ('file', ''):
                 check_path = parsed_req.path
                 check_path = os.path.normpath(
                     os.path.join(requirements_root, check_path)
                 )
                 if os.path.exists(check_path):
-                    collected_requirements.append(
-                        f'file:{check_path}'
-                    )  # make a custom URL so things can be handled as a URL
+                    collected_requirements.append((
+                        f'file:{check_path}',
+                        'wheel-local-file',
+                        f'local wheel specified in {prov_detail}',
+                    ))
                 else:
                     raise ValueError(f'Could not verify path for {req}. Make sure the file is available if it is a local wheel.')
         else:
-            collected_requirements.append(f'{req.name}{req.specifier}')
+            collected_requirements.append((f'{req.name}{req.specifier}', prov, prov_detail))
 
     return collected_requirements
 
@@ -710,8 +951,9 @@ def script_to_html(
     local_prefix: str = LOCAL_PREFIX,
     manifest: str | None = None,
     inline: bool = False,
-    compiled: bool = True
-) -> tuple[str, str | None, list[ResourceInfo], list[ResourceInfo], ThemeInfo | None, list[str]]:
+    compiled: bool = True,
+    dest_path: str | os.PathLike | None = None,
+) -> tuple[str, str | None, list[ResourceInfo], list[ResourceInfo], ThemeInfo | None, list[ResourceInfo]]:
     """
     Converts a Panel or Bokeh script to a standalone WASM Python
     application.
@@ -880,32 +1122,12 @@ def script_to_html(
             .replace('<link rel="stylesheet"', '<link rel="stylesheet" crossorigin="anonymous"')
             .replace('<link rel="icon"', '<link rel="icon" crossorigin="anonymous"')
         )
-    js_infos: list[ResourceInfo] = []
-    css_infos: list[ResourceInfo] = []
-    all_urls = _extract_urls_from_html(bokeh_js) + _extract_urls_from_html(bokeh_css)
-    seen_urls = set()
-    for url in all_urls:
-        if url in seen_urls:
-            continue
-        seen_urls.add(url)
-        rtype = _classify_resource_type(url)
-        rsrc = _classify_resource_source(url)
-        size_kb = _get_file_size_kb(url)
-        info = ResourceInfo(
-            path=url,
-            type=rtype,
-            source=rsrc,
-            size_kb=size_kb,
-        )
-        if rtype == 'js':
-            js_infos.append(info)
-        elif rtype == 'css':
-            css_infos.append(info)
-        else:
-            if rsrc in ('cdn', 'external'):
-                js_infos.append(info)
+    js_infos, css_infos = _collect_resources_with_provenance(
+        document, roots, dest_path=pathlib.Path(dest_path) if dest_path else None,
+    )
     theme_info = _detect_theme(document)
-    runtime_urls = _extract_runtime_urls(source)
+    source_name = os.path.basename(str(filename)) if not hasattr(filename, 'read') else 'app code'
+    runtime_urls = _extract_runtime_urls(source, source_name=source_name)
     return html, web_worker, js_infos, css_infos, theme_info, runtime_urls
 
 
@@ -941,9 +1163,9 @@ def convert_app(
     wheels2pack: dict[str | os.PathLike, str] = {}
     wheel_infos: list[WheelInfo] = []
 
-    for req in parsed_requirements:
+    for req_str, prov, prov_detail in parsed_requirements:
         try:
-            req_as_url = urlparse(req)
+            req_as_url = urlparse(req_str)
             if req_as_url.scheme == 'file':
                 wheel_name = os.path.basename(req_as_url.path)
                 wheel_path = req_as_url.path
@@ -951,6 +1173,8 @@ def convert_app(
                 wheel_infos.append(WheelInfo(
                     name=wheel_name,
                     source=wheel_path,
+                    provenance=prov,
+                    provenance_detail=prov_detail,
                     size_kb=size_kb,
                     local=True,
                 ))
@@ -959,32 +1183,36 @@ def convert_app(
                 wheels2pack[req_as_url.path] = emfs_wheel_path
             else:
                 is_local = req_as_url.scheme not in ('http', 'https')
-                size_kb = _get_file_size_kb(req) if is_local else None
+                size_kb = _get_file_size_kb(req_str) if is_local else None
                 try:
-                    req_obj = Requirement(req.split('==')[0].split('>=')[0].split('<=')[0].split('~=')[0].split('!=')[0])
+                    req_obj = Requirement(req_str.split('==')[0].split('>=')[0].split('<=')[0].split('~=')[0].split('!=')[0])
                     wname = req_obj.name
                 except Exception:
-                    wname = req
+                    wname = req_str
                 wheel_infos.append(WheelInfo(
                     name=wname,
-                    source=req,
+                    source=req_str,
+                    provenance=prov,
+                    provenance_detail=prov_detail,
                     size_kb=size_kb,
                     local=is_local,
                 ))
-                parsed_requirements_rewritten.append(req)
+                parsed_requirements_rewritten.append(req_str)
         except ValueError:
             # no url, so must be a properly formatted requirement
             try:
-                req_obj = Requirement(req.split('==')[0].split('>=')[0].split('<=')[0].split('~=')[0].split('!=')[0])
+                req_obj = Requirement(req_str.split('==')[0].split('>=')[0].split('<=')[0].split('~=')[0].split('!=')[0])
                 wname = req_obj.name
             except Exception:
-                wname = req
+                wname = req_str
             wheel_infos.append(WheelInfo(
                 name=wname,
-                source=req,
+                source=req_str,
+                provenance=prov,
+                provenance_detail=prov_detail,
                 local=False,
             ))
-            parsed_requirements_rewritten.append(req)
+            parsed_requirements_rewritten.append(req_str)
 
     # make a zip out of resources
     resources_validated: dict[str | os.PathLike, str] = {}
@@ -1013,7 +1241,7 @@ def convert_app(
     js_infos: list[ResourceInfo] = []
     css_infos: list[ResourceInfo] = []
     theme_info: ThemeInfo | None = None
-    runtime_urls: list[str] = []
+    runtime_urls: list[ResourceInfo] = []
     try:
         with set_resource_mode('inline' if inline else 'cdn'):
             html, worker, js_infos, css_infos, theme_info, runtime_urls = script_to_html(
@@ -1026,7 +1254,8 @@ def convert_app(
                 panel_version=panel_version,
                 inline=inline,
                 compiled=compiled,
-                local_prefix=local_prefix
+                local_prefix=local_prefix,
+                dest_path=dest_path,
             )
     except KeyboardInterrupt:
         return
@@ -1044,9 +1273,27 @@ def convert_app(
         with open(dest_path / f'{app_name}.{ext}', 'w', encoding="utf-8") as out:
             out.write(worker)
 
-    user_resources = list(resources_validated.values())
+    user_resources: list[ResourceInfo] = []
+    for orig_path, rel_path in resources_validated.items():
+        size_kb = _get_file_size_kb(str(orig_path))
+        user_resources.append(ResourceInfo(
+            path=rel_path,
+            type=_classify_resource_type(str(orig_path)),
+            source='local',
+            provenance='user-resource',
+            provenance_detail='CLI --resources argument',
+            size_kb=size_kb,
+        ))
     if app_resources_packfile:
-        user_resources.append(app_resources_packfile)
+        size_kb = _get_file_size_kb(str(dest_path / app_resources_packfile))
+        user_resources.append(ResourceInfo(
+            path=app_resources_packfile,
+            type='other',
+            source='local',
+            provenance='user-resource',
+            provenance_detail='packed resources zip (wheels + user files)',
+            size_kb=size_kb,
+        ))
 
     total_size = 0.0
     for w in wheel_infos:
@@ -1277,6 +1524,19 @@ def convert_apps(
             strategy='cache-first',
             runtime_caching=True,
         )
+
+        for pa in all_page_assets:
+            for img_path in img_rel:
+                full_path = dest_path / img_path
+                size_kb = _get_file_size_kb(str(full_path))
+                pa.user_resources.append(ResourceInfo(
+                    path=img_path,
+                    type='image',
+                    source='local',
+                    provenance='sw-precache',
+                    provenance_detail='PWA service worker pre-cached icon',
+                    size_kb=size_kb,
+                ))
 
     if generate_assets_report:
         issues: list[DiagnosticIssue] = []
