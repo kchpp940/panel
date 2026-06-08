@@ -5,7 +5,7 @@ import {isArray, isBoolean, isFunction, isString, isNumber} from "@bokehjs/core/
 import {ModelEvent} from "@bokehjs/core/bokeh_events"
 import type {StyleSheetLike} from "@bokehjs/core/dom"
 import {div} from "@bokehjs/core/dom"
-import {Enum} from "@bokehjs/core/kinds"
+import {Enum, Ref} from "@bokehjs/core/kinds"
 import type * as p from "@bokehjs/core/properties"
 import type {LayoutDOM} from "@bokehjs/models/layouts/layout_dom"
 import {ColumnDataSource} from "@bokehjs/models/sources/column_data_source"
@@ -16,6 +16,7 @@ import {debounce} from "debounce"
 
 import {comm_settings} from "./comm_manager"
 import {transform_cds_to_records} from "./data"
+import {InteractionStore, type InteractionEventType} from "./interaction_store"
 import {HTMLBox, HTMLBoxView} from "./layout"
 import {schedule_when, transformJsPlaceholders} from "./util"
 
@@ -398,6 +399,13 @@ export class DataTabulatorView extends HTMLBoxView {
   _automatic_page_size: boolean = false
   _last_after_resize_el_width: number | null = null
   _last_after_resize_el_height: number | null = null
+
+  _publish_interaction(type: InteractionEventType, data: any): void {
+    if (this.model.interaction_store == null) {
+      return
+    }
+    this.model.interaction_store.publish(type, this.model.id, "tabulator", data)
+  }
 
   override connect_signals(): void {
     super.connect_signals()
@@ -1232,6 +1240,12 @@ export class DataTabulatorView extends HTMLBoxView {
         const index = cell.getData()._index
         const event = new CellClickEvent(column.field, index)
         this.model.trigger_event(event)
+        this._publish_interaction("selection", {
+          column: column.field,
+          index,
+          data: this.model.source.data[index],
+          mode: "cell_click",
+        })
       }
       if (config_columns == null) {
         columns.push(tab_column)
@@ -1248,6 +1262,12 @@ export class DataTabulatorView extends HTMLBoxView {
           const index = cell.getData()._index
           const event = new CellClickEvent(col, index)
           this.model.trigger_event(event)
+          this._publish_interaction("selection", {
+            column: col,
+            index,
+            data: this.model.source.data[index],
+            mode: "button_click",
+          })
         },
       }
       columns.push(button_column)
@@ -1560,6 +1580,13 @@ export class DataTabulatorView extends HTMLBoxView {
       selected.indices = filtered
     }
     this.model.trigger_event(new SelectionEvent(indices, !includes, flush))
+    const data = indices.map((i) => this.model.source.data[i]).filter(Boolean)
+    this._publish_interaction("row_selection", {
+      indices: filtered,
+      data,
+      selected: !includes,
+      mode: "row_click",
+    })
     this._selection_updating = false
   }
 
@@ -1590,16 +1617,36 @@ export class DataTabulatorView extends HTMLBoxView {
       if (selected_indices.length > 0) {
         this._selection_updating = true
         this.model.trigger_event(new SelectionEvent(selected_indices, true, false))
+        const selected_data = selected_indices.map((i) => this.model.source.data[i]).filter(Boolean)
+        this._publish_interaction("row_selection", {
+          indices: selected_indices,
+          data: selected_data,
+          selected: true,
+          mode: "tabulator_select",
+        })
       }
       if (deselected_indices.length > 0) {
         this._selection_updating = true
         this.model.trigger_event(new SelectionEvent(deselected_indices, false, false))
+        const deselected_data = deselected_indices.map((i) => this.model.source.data[i]).filter(Boolean)
+        this._publish_interaction("row_selection", {
+          indices: deselected_indices,
+          data: deselected_data,
+          selected: false,
+          mode: "tabulator_deselect",
+        })
       }
     } else {
       const indices: number[] = data.map((row: any) => row._index)
       const filtered = this._filter_selected(indices)
       this._selection_updating = indices.length === filtered.length
       this.model.source.selected.indices = filtered
+      this._publish_interaction("row_selection", {
+        indices: filtered,
+        data: filtered.map((i) => this.model.source.data[i]).filter(Boolean),
+        selected: filtered.length > 0,
+        mode: "tabulator_change",
+      })
     }
     this._selection_updating = false
   }
@@ -1660,6 +1707,7 @@ export namespace DataTabulator {
     cell_styles: p.Property<any>
     theme_classes: p.Property<string[]>
     container_popup: p.Property<boolean>
+    interaction_store: p.Property<InteractionStore | null>
   }
 }
 
@@ -1707,6 +1755,7 @@ export class DataTabulator extends HTMLBox {
       cell_styles:    [ Any,                     {} ],
       theme_classes:  [ List(Str),           [] ],
       container_popup: [ Bool, true ],
+      interaction_store: [ Nullable(Ref(InteractionStore)), null ],
     }))
   }
 }

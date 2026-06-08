@@ -11,6 +11,7 @@ import param
 from bokeh.models import ColumnDataSource
 from pyviz_comms import JupyterComm
 
+from ..io.interaction_store import InteractionStore
 from ..util import lazy_load
 from .base import ModelPane
 from .image import PDF, SVG, Image
@@ -209,6 +210,15 @@ class Vega(ModelPane):
         Declares the debounce time in milliseconds either for all
         events or if a dictionary is provided for individual events.""")
 
+    interaction_store = param.ClassSelector(
+        class_=InteractionStore,
+        default=None,
+        doc="""
+        An optional InteractionStore that collects selection, hover and
+        viewport events from this pane and allows cross-component linkage.
+        """,
+    )
+
     selection = param.ClassSelector(class_=param.Parameterized, doc="""
         The Selection object reflects any selections available on the
         supplied vega plot into Python.""")
@@ -230,7 +240,7 @@ class Vega(ModelPane):
     priority: t.ClassVar[float | bool | None] = 0.8
 
     _rename: t.ClassVar[Mapping[str, str | None]] = {
-        'selection': None, 'debounce': None, 'object': 'data'}
+        'selection': None, 'debounce': None, 'object': 'data', 'interaction_store': None}
 
     _updates: t.ClassVar[bool] = True
 
@@ -449,7 +459,17 @@ class Vega(ModelPane):
         Vega._bokeh_model = lazy_load(
             'panel.models.vega', 'VegaPlot', isinstance(comm, JupyterComm), root
         )
-        model = super()._get_model(doc, root, parent, comm)
+        if self.interaction_store is not None:
+            store_model = self.interaction_store.get_root(doc, comm=comm, preprocess=False)
+            self._models.setdefault(root.ref['id'] if root else store_model.ref['id'], (store_model, None))
+            props = self._get_properties(doc)
+            props['interaction_store'] = store_model
+            model = Vega._bokeh_model(**props)
+            root = root or model
+            self._models[root.ref['id']] = (model, parent)
+            self._link_props(model, self._linked_properties, doc, root, comm)
+        else:
+            model = super()._get_model(doc, root, parent, comm)
         self._register_events('vega_event', model=model, doc=doc, comm=comm)
         return model
 

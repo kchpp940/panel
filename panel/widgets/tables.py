@@ -26,6 +26,7 @@ from bokeh.util.serialization import convert_datetime_array
 from param.parameterized import transform_reference
 from pyviz_comms import JupyterComm
 
+from ..io.interaction_store import InteractionStore
 from ..io.model import JSCode
 from ..io.resources import CDN_DIST, CSS_URLS
 from ..io.state import state
@@ -1217,6 +1218,15 @@ class Tabulator(BaseTable):
         If True, popups will appear within the table container, otherwise
         popups will be appended to the body element of the DOM.""")
 
+    interaction_store = param.ClassSelector(
+        class_=InteractionStore,
+        default=None,
+        doc="""
+        An optional InteractionStore that collects row_selection and selection
+        events from this widget and allows cross-component linkage.
+        """,
+    )
+
     expanded = param.List(default=[], item_type=int, nested_refs=True, doc="""
         List of expanded rows, only applicable if a row_content function
         has been defined.""")
@@ -1374,7 +1384,8 @@ class Tabulator(BaseTable):
         'selection': None, 'row_content': None, 'row_height': None,
         'text_align': None, 'header_align': None, 'header_filters': None,
         'header_tooltips': None, 'styles': 'cell_styles',
-        'title_formatters': None, 'sortable': None, 'initial_page_size': None
+        'title_formatters': None, 'sortable': None, 'initial_page_size': None,
+        'interaction_store': None
     }
 
     # Determines the maximum size limits beyond which (local, remote)
@@ -1993,8 +2004,14 @@ class Tabulator(BaseTable):
         Tabulator._widget_type = lazy_load(
             'panel.models.tabulator', 'DataTabulator', isinstance(comm, JupyterComm), root
         )
+        if self.interaction_store is not None:
+            store_model = self.interaction_store.get_root(doc, comm=comm, preprocess=False)
+            self._models.setdefault(root.ref['id'] if root else store_model.ref['id'], (store_model, None))
         model = super()._get_model(doc, root, parent, comm)
         root = root or model
+        if self.interaction_store is not None:
+            store_model = self.interaction_store.get_root(doc, comm=comm, preprocess=False)
+            model.interaction_store = store_model
         self._child_panels, removed, expanded = self._get_children()
         model.expanded = expanded
         model.children = self._get_model_children(doc, root, parent, comm)

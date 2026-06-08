@@ -6,11 +6,13 @@ import {isPlainObject} from "@bokehjs/core/util/types"
 import {clone} from "@bokehjs/core/util/object"
 import {is_equal} from "@bokehjs/core/util/eq"
 import type {Attrs} from "@bokehjs/core/types"
+import {Ref} from "@bokehjs/core/kinds"
 import {ColumnDataSource} from "@bokehjs/models/sources/column_data_source"
 
 import {debounce} from  "debounce"
 
 import {HTMLBox, HTMLBoxView, set_size} from "./layout"
+import {InteractionStore, type InteractionEventType} from "./interaction_store"
 import {convertUndefined, deepCopy, get, reshape, throttle} from "./util"
 
 import plotly_css from "styles/models/plotly.css"
@@ -209,6 +211,13 @@ export class PlotlyPlotView extends HTMLBoxView {
     this._throttled_resize = throttle(() => this.resize_layout(), 25)
   }
 
+  _publish_interaction(type: InteractionEventType, data: any): void {
+    if (this.model.interaction_store == null) {
+      return
+    }
+    this.model.interaction_store.publish(type, this.model.id, "plotly", data)
+  }
+
   override connect_signals(): void {
     super.connect_signals()
 
@@ -359,18 +368,21 @@ export class PlotlyPlotView extends HTMLBoxView {
     this.container.on("plotly_click", (eventData: any) => {
       const data = filterEventData(this.container, eventData, "click")
       this.model.trigger_event(new PlotlyEvent({type: "click", data}))
+      this._publish_interaction("selection", data)
     })
 
     //  - plotly_doubleclick
     this.container.on("plotly_doubleclick", (eventData: any) => {
       const data = filterEventData(this.container, eventData, "click")
       this.model.trigger_event(new PlotlyEvent({type: "doubleclick", data}))
+      this._publish_interaction("selection", data)
     })
 
     //  - plotly_hover
     this.container.on("plotly_hover", (eventData: any) => {
       const data = filterEventData(this.container, eventData, "hover")
       this.model.trigger_event(new PlotlyEvent({type: "hover", data}))
+      this._publish_interaction("hover", data)
       // Override hoverdata to ensure click event has context
       // see https://github.com/holoviz/panel/pull/6753
       this._hoverdata = this.container._hoverdata = eventData.points
@@ -384,6 +396,7 @@ export class PlotlyPlotView extends HTMLBoxView {
       }
       const data = filterEventData(this.container, eventData, "selected")
       this.model.trigger_event(new PlotlyEvent({type: "selected", data}))
+      this._publish_interaction("selection", data)
     })
 
     //  - plotly_clickannotation
@@ -391,11 +404,13 @@ export class PlotlyPlotView extends HTMLBoxView {
       delete eventData.event
       delete eventData.fullAnnotation
       this.model.trigger_event(new PlotlyEvent({type: "clickannotation", data: eventData}))
+      this._publish_interaction("selection", eventData)
     })
 
     //  - plotly_deselect
     this.container.on("plotly_deselect", () => {
       this.model.trigger_event(new PlotlyEvent({type: "selected", data: null}))
+      this._publish_interaction("selection", null)
     })
 
     //  - plotly_unhover
@@ -403,6 +418,7 @@ export class PlotlyPlotView extends HTMLBoxView {
       // Override hoverdata to ensure click event has context
       this.container._hoverdata = this._hoverdata
       this.model.trigger_event(new PlotlyEvent({type: "hover", data: null}))
+      this._publish_interaction("hover", null)
       setTimeout(() => {
         // Remove hoverdata once events have been processed
         delete this.container._hoverdata
@@ -505,6 +521,7 @@ export class PlotlyPlotView extends HTMLBoxView {
 
     if (!is_equal(viewport, this.model.viewport)) {
       this._setViewport(viewport)
+      this._publish_interaction("viewport", viewport)
     }
   }
 
@@ -546,6 +563,7 @@ export namespace PlotlyPlot {
     viewport_update_policy: p.Property<string>
     viewport_update_throttle: p.Property<number>
     _render_count: p.Property<number>
+    interaction_store: p.Property<InteractionStore | null>
   }
 }
 
@@ -577,6 +595,7 @@ export class PlotlyPlot extends HTMLBox {
       viewport_update_policy: [ Str, "mouseup" ],
       viewport_update_throttle: [ Float, 200 ],
       _render_count: [ Float, 0 ],
+      interaction_store: [ Nullable(Ref(InteractionStore)), null ],
     }))
   }
 }

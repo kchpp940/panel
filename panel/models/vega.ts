@@ -2,10 +2,12 @@ import {div} from "@bokehjs/core/dom"
 import type * as p from "@bokehjs/core/properties"
 import {ModelEvent} from "@bokehjs/core/bokeh_events"
 import {isArray} from "@bokehjs/core/util/types"
+import {Ref} from "@bokehjs/core/kinds"
 import {LayoutDOM, LayoutDOMView} from "@bokehjs/models/layouts/layout_dom"
 import type {Attrs} from "@bokehjs/core/types"
 
 import {set_size} from "./layout"
+import {InteractionStore, type InteractionEventType} from "./interaction_store"
 
 import {debounce} from  "debounce"
 
@@ -33,6 +35,30 @@ export class VegaPlotView extends LayoutDOMView {
   _replot: any
   _resize: any
   _rendered: boolean = false
+
+  _publish_interaction(type: InteractionEventType, data: any): void {
+    if (this.model.interaction_store == null) {
+      return
+    }
+    this.model.interaction_store.publish(type, this.model.id, "vega", data)
+  }
+
+  _classify_vega_event(name: string, value: any): InteractionEventType {
+    const lower = name.toLowerCase()
+    if (lower.includes("hover") || lower.includes("mouseover") || lower.includes("mouseenter")) {
+      return "hover"
+    }
+    if (lower.includes("select") || lower.includes("brush") || lower.includes("interval") || lower.includes("point")) {
+      return "selection"
+    }
+    if (lower.includes("view") || lower.includes("zoom") || lower.includes("pan") || lower.includes("scale") || lower.includes("domain") || lower.includes("range")) {
+      return "viewport"
+    }
+    if (value != null && typeof value === "object" && "vlPoint" in value) {
+      return "selection"
+    }
+    return "selection"
+  }
 
   override connect_signals(): void {
     super.connect_signals()
@@ -90,6 +116,8 @@ export class VegaPlotView extends LayoutDOMView {
       value = indexes
     }
     this.model.trigger_event(new VegaEvent({type: name, value}))
+    const itype = this._classify_vega_event(name, value)
+    this._publish_interaction(itype, {signal: name, value})
   }
 
   _fetch_datasets() {
@@ -189,6 +217,7 @@ export namespace VegaPlot {
     show_actions: p.Property<boolean>
     theme: p.Property<string | null>
     throttle: p.Property<any>
+    interaction_store: p.Property<InteractionStore | null>
   }
 }
 
@@ -206,13 +235,14 @@ export class VegaPlot extends LayoutDOM {
   static {
     this.prototype.default_view = VegaPlotView
 
-    this.define<VegaPlot.Props>(({Any, List, Bool, Nullable, Str}) => ({
+    this.define<VegaPlot.Props>(({Any, List, Bool, Nullable, Str, Ref}) => ({
       data:         [ Any,                {} ],
       data_sources: [ Any,                {} ],
       events:       [ List(Str),      [] ],
       show_actions: [ Bool,         false ],
       theme:        [ Nullable(Str), null ],
       throttle:     [ Any,                {} ],
+      interaction_store: [ Nullable(Ref(InteractionStore)), null ],
     }))
   }
 }

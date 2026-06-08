@@ -2,7 +2,7 @@
 Defines custom bokeh model to render ECharts plots.
 """
 from bokeh.core.properties import (
-    Any, Dict, Enum, List, Nullable, String,
+    Any, Dict, Enum, Instance, List, Nullable, String,
 )
 from bokeh.events import ModelEvent
 from bokeh.models import LayoutDOM
@@ -10,6 +10,7 @@ from bokeh.models import LayoutDOM
 from ..config import config
 from ..io.resources import bundled_files
 from ..util import classproperty
+from .interaction_store import InteractionStore
 
 ECHARTS_VERSION = "6.0.0"
 
@@ -65,3 +66,5 @@ class ECharts(LayoutDOM):
     renderer = Enum("canvas", "svg")
 
     theme = String("default")
+
+    interaction_store = Nullable(Instance(InteractionStore))

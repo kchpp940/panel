@@ -2,9 +2,11 @@ import {ModelEvent} from "@bokehjs/core/bokeh_events"
 import {div} from "@bokehjs/core/dom"
 import type * as p from "@bokehjs/core/properties"
 import type {Attrs} from "@bokehjs/core/types"
+import {Ref} from "@bokehjs/core/kinds"
 
 import {serializeEvent} from "./event-to-object"
 import {HTMLBox, HTMLBoxView} from "./layout"
+import {InteractionStore, type InteractionEventType} from "./interaction_store"
 import {transformJsPlaceholders} from "./util"
 
 const mouse_events = [
@@ -45,6 +47,33 @@ export class EChartsView extends HTMLBoxView {
   _loading_interval: ReturnType<typeof setInterval> | null = null
   _loading_timeout: ReturnType<typeof setTimeout> | null = null
   _loading_el: HTMLDivElement | null = null
+
+  _publish_interaction(type: InteractionEventType, data: any): void {
+    if (this.model.interaction_store == null) {
+      return
+    }
+    this.model.interaction_store.publish(type, this.model.id, "echarts", data)
+  }
+
+  _classify_echarts_event(name: string, event: any): InteractionEventType {
+    const lower = name.toLowerCase()
+    if (lower.includes("mouseover") || lower.includes("mouseenter")) {
+      return "hover"
+    }
+    if (lower.includes("mouseout") || lower.includes("globalout")) {
+      return "hover"
+    }
+    if (lower.includes("click") || lower.includes("select") || lower.includes("legendselect")) {
+      return "selection"
+    }
+    if (lower.includes("brush") || lower.includes("brushselected") || lower.includes("datarangeselected")) {
+      return "selection"
+    }
+    if (lower.includes("zoom") || lower.includes("roam") || lower.includes("datarange") || lower.includes("timelinechanged")) {
+      return "viewport"
+    }
+    return "selection"
+  }
 
   override connect_signals(): void {
     super.connect_signals()
@@ -214,6 +243,8 @@ export class EChartsView extends HTMLBoxView {
           processed.event = serializeEvent(event.event?.event)
           const serialized = JSON.parse(JSON.stringify(processed))
           this.model.trigger_event(new EChartsEvent(event_type, serialized, query))
+          const itype = this._classify_echarts_event(event_type, serialized)
+          this._publish_interaction(itype, {event: event_type, query, data: serialized})
         }
         if (query != null) {
           this._chart.on(event_type, query, callback)
@@ -253,6 +284,7 @@ export namespace ECharts {
     js_events: p.Property<any>
     renderer: p.Property<string>
     theme: p.Property<string>
+    interaction_store: p.Property<InteractionStore | null>
   }
 }
 
@@ -270,13 +302,14 @@ export class ECharts extends HTMLBox {
   static {
     this.prototype.default_view = EChartsView
 
-    this.define<ECharts.Props>(({Any, Str}) => ({
+    this.define<ECharts.Props>(({Any, Str, Nullable, Ref}) => ({
       data:          [ Any,           {} ],
       options:       [ Any,           {} ],
       event_config:  [ Any,           {} ],
       js_events:     [ Any,           {} ],
       theme:         [ Str,  "default"],
       renderer:      [ Str,   "canvas"],
+      interaction_store: [ Nullable(Ref(InteractionStore)), null ],
     }))
   }
 }

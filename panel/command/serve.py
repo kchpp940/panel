@@ -318,16 +318,6 @@ class Serve(_BkServe):
             action  = 'store_true',
             help    = "Whether to add a global loading spinner to the application(s).",
         )),
-        ('--snapshots', Argument(
-            action  = 'store_true',
-            help    = "Enable dashboard state snapshot management (REST API + sidebar widget).",
-        )),
-        ('--snapshot-endpoint', Argument(
-            action  = 'store',
-            type    = str,
-            help    = "The endpoint for the snapshot REST API.",
-            default = "_snapshots"
-        )),
     )) # type: ignore[assignment, ty:invalid-assignment]
 
     # Supported file extensions
@@ -488,58 +478,6 @@ class Serve(_BkServe):
             argvs = {f: args.args for f in files}
             applications = build_single_handler_applications(files, argvs)
             patterns += [(rf"/{args.liveness_endpoint}", LivenessHandler, dict(applications=applications))]
-
-        if args.snapshots:
-            from ..io.snapshot_api import snapshot_rest_provider
-            from ..io.snapshot import SNAPSHOT_BASE_URL
-
-            endpoint = args.snapshot_endpoint or SNAPSHOT_BASE_URL
-            patterns += snapshot_rest_provider(endpoint)
-
-            def _snapshot_session_created(session_context):
-                doc = session_context._document
-                with set_curdoc(doc):
-                    try:
-                        from ..widgets.snapshot import SnapshotManager
-                        sm = SnapshotManager(name="Snapshots")
-                    except Exception as e:
-                        state.log(
-                            f"Failed to instantiate SnapshotManager: {e}",
-                            level='warning',
-                        )
-                        return
-
-                    injected = False
-                    try:
-                        tpl = state.template
-                    except Exception:
-                        tpl = None
-                    if tpl is not None and hasattr(tpl, 'sidebar'):
-                        try:
-                            tpl.sidebar.append(sm)
-                            injected = True
-                        except Exception as e:
-                            state.log(
-                                f"Failed to add SnapshotManager to sidebar: {e}",
-                                level='warning',
-                            )
-
-                    if not injected and doc is not None:
-                        try:
-                            existing_roots = list(getattr(doc, 'roots', []) or [])
-                            for root in existing_roots:
-                                viewable = getattr(root, '_panel_viewable', None)
-                                if viewable is not None and hasattr(viewable, 'append'):
-                                    viewable.append(sm)
-                                    injected = True
-                                    break
-                        except Exception as e:
-                            state.log(
-                                f"Failed to inject SnapshotManager into layout: {e}",
-                                level='warning',
-                            )
-
-            state._on_session_created_internal.append(_snapshot_session_created)
 
         config.profiler = args.profiler
         if args.admin:

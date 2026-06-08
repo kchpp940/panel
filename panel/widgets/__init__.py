@@ -61,7 +61,6 @@ from .slider import (  # noqa
     DiscreteSlider, EditableFloatSlider, EditableIntSlider,
     EditableRangeSlider, FloatSlider, IntRangeSlider, IntSlider, RangeSlider,
 )
-from .snapshot import SnapshotManager  # noqa
 from .speech_to_text import Grammar, GrammarList, SpeechToText  # noqa
 from .tables import DataFrame, Tabulator  # noqa
 from .terminal import Terminal  # noqa
@@ -130,7 +129,6 @@ __all__ = (
     "RangeSlider",
     "Select",
     "SpeechToText",
-    "SnapshotManager",
     "Spinner",
     "StaticText",
     "Switch",

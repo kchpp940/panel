@@ -15,6 +15,7 @@ from bokeh.models import ColumnDataSource, LayoutDOM
 from ..config import config
 from ..io.resources import bundled_files
 from ..util import classproperty
+from .interaction_store import InteractionStore
 
 VEGA_VERSION = "6.1.2"
 VEGA_LITE_VERSION = "6.3.0"
@@ -78,3 +79,5 @@ class VegaPlot(LayoutDOM):
     theme = Nullable(Enum(VegaTheme))
 
     throttle = Dict(String, Int)
+
+    interaction_store = Nullable(Instance(InteractionStore))

@@ -14,6 +14,7 @@ from bokeh.models.widgets.tables import TableColumn
 from ..config import config
 from ..io.resources import bundled_files
 from ..util import classproperty
+from .interaction_store import InteractionStore
 from .layout import HTMLBox
 
 TABULATOR_VERSION = "6.4.0"
@@ -170,6 +171,8 @@ class DataTabulator(HTMLBox):
     theme_classes = List(String)
 
     container_popup  = Bool(True)
+
+    interaction_store = Nullable(Instance(InteractionStore))
 
     __css_raw__ = CSS_URLS
 
