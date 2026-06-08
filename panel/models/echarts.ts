@@ -46,8 +46,6 @@ export class EChartsView extends HTMLBoxView {
   _loading_timeout: ReturnType<typeof setTimeout> | null = null
   _loading_el: HTMLDivElement | null = null
 
-  _theme_bound: (() => void) | null = null
-
   override connect_signals(): void {
     super.connect_signals()
     const {width, height, renderer, theme, event_config, js_events, data} = this.model.properties
@@ -62,12 +60,6 @@ export class EChartsView extends HTMLBoxView {
     this.on_change([event_config, js_events], () => this._subscribe())
   }
 
-  _on_panel_theme_change(_e: CustomEvent): void {
-    if (this._chart != null) {
-      this._chart.resize()
-    }
-  }
-
   override render(): void {
     if (this._chart != null) {
       try {
@@ -80,11 +72,6 @@ export class EChartsView extends HTMLBoxView {
     super.render()
     this.container = div({style: {height: "100%", width: "100%"}})
     this.shadow_el.append(this.container)
-
-    if (this._theme_bound == null) {
-      this._theme_bound = this._on_panel_theme_change.bind(this)
-      document.addEventListener('panel:themechange', this._theme_bound as EventListener)
-    }
 
     if ((window as any).echarts == null) {
       this._show_loading()
@@ -176,10 +163,6 @@ export class EChartsView extends HTMLBoxView {
 
   override remove(): void {
     this._clear_loading_timer()
-    if (this._theme_bound != null) {
-      document.removeEventListener('panel:themechange', this._theme_bound as EventListener)
-      this._theme_bound = null
-    }
     super.remove()
     if (this._chart != null) {
       try {

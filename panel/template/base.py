@@ -39,9 +39,8 @@ from ..pane import (
 )
 from ..pane.image import ImageBase
 from ..reactive import ReactiveHTML
-from ..models.theme_manager import ThemeManager
 from ..theme.base import (
-    THEMES, DarkTheme, DefaultTheme, Design, Theme,
+    THEMES, DefaultTheme, Design, Theme,
 )
 from ..theme.native import Native
 from ..util import isurl
@@ -88,7 +87,7 @@ class BaseTemplate(param.Parameterized, MimeRenderMixin, ServableMixin, Resource
         the location root with : {{ embed(roots.location) }}.""")
 
     theme = param.ClassSelector(class_=Theme, default=DefaultTheme,
-                                is_instance=False, instantiate=False)
+                                constant=True, is_instance=False, instantiate=False)
 
     # Dictionary of property overrides by Viewable type
     modifiers: t.ClassVar[dict[type[Viewable], dict[str, t.Any]]] = {}
@@ -145,325 +144,9 @@ class BaseTemplate(param.Parameterized, MimeRenderMixin, ServableMixin, Resource
         self._layout = self._build_layout()
         self._setup_design()
 
-    @param.depends('design', 'theme', watch=True)
+    @param.depends('design', watch=True)
     def _setup_design(self):
-        if hasattr(self, '_design') and self._design is not None:
-            old_theme_name = self._design.get_theme_name()
-        else:
-            old_theme_name = None
-        theme_name = self.theme._name if isinstance(self.theme, type) else getattr(self.theme, '_name', 'default')
-        self._design = self.design(theme=theme_name)
-        if hasattr(self, '_theme_manager') and self._theme_manager is not None:
-            self._design._sync_theme_manager(self._theme_manager)
-        if old_theme_name is not None and old_theme_name != theme_name:
-            self._design._reapply_to_active_documents()
-
-    def _init_theme_manager(self, doc: Document) -> None:
-        """
-        Initializes the ThemeManager model for the given document and
-        syncs the current design/theme state to it.
-
-        On page load, restores design/theme from URL query parameters
-        (set by the cross-design soft-reload flow) so that the user's
-        chosen design persists after the reload.
-        """
-        if not hasattr(self, '_theme_manager') or self._theme_manager is None:
-            self._theme_manager = ThemeManager()
-
-        restored = self._restore_from_url_params(doc)
-        if not restored:
-            self._design._sync_theme_manager(self._theme_manager)
-
-        if self._theme_manager.document is None:
-            doc.add_root(self._theme_manager)
-
-    def _get_theme_manager(self, doc: Document) -> ThemeManager | None:
-        """
-        Returns the ThemeManager model associated with the given document,
-        creating one if it doesn't exist yet.
-        """
-        if hasattr(self, '_theme_manager') and self._theme_manager is not None:
-            return self._theme_manager
-        self._init_theme_manager(doc)
-        return self._theme_manager if hasattr(self, '_theme_manager') else None
-
-    def _restore_from_url_params(self, doc: Document) -> bool:
-        """
-        [Early phase] Checks URL query parameters for design/theme shell
-        switch after a cross-design soft reload:
-
-          ?design=bootstrap&theme=dark&_pst=<token>
-
-        Only handles design/theme selection (must happen before Jinja
-        template render so the correct DOM shell is emitted). Widget
-        state restore from the _pst token happens later in
-        _restore_widget_state_from_token(), after all views are
-        registered in state._views.
-
-        Returns True if design/theme was restored.
-        """
-        from ..io.state import state
-        from ..theme import Bootstrap, Fast, Material, Native
-        import logging
-
-        logger = logging.getLogger('panel.template')
-
-        design_map = {
-            'fast': Fast,
-            'bootstrap': Bootstrap,
-            'material': Material,
-            'native': Native,
-        }
-
-        self._last_restore_result: dict[str, t.Any] = {
-            'design_theme_restored': False,
-            'state_restore': None,
-            'warnings': [],
-        }
-
-        try:
-            location = getattr(state, 'location', None)
-            if location is None:
-                return False
-
-            href = getattr(location, 'href', None) or ''
-            if not href:
-                return False
-
-            from urllib.parse import parse_qs, urlparse
-            parsed = urlparse(href)
-            params = parse_qs(parsed.query)
-
-            restored_any = False
-
-            if 'design' in params and params['design']:
-                design_name = params['design'][0].lower()
-                if design_name in design_map and design_map[design_name] is not self.design:
-                    try:
-                        self.design = design_map[design_name]
-                        restored_any = True
-                        self._last_restore_result['design_theme_restored'] = True
-                    except Exception as e:
-                        self._last_restore_result['warnings'].append(f'design restore failed: {e}')
-                        logger.warning('Failed to restore design from URL: %s', e)
-
-            if 'theme' in params and params['theme']:
-                theme_name = params['theme'][0].lower()
-                if theme_name in ('default', 'dark'):
-                    try:
-                        theme_cls = DarkTheme if theme_name == 'dark' else self.design._themes['default']
-                        self.theme = theme_cls
-                        restored_any = True
-                        self._last_restore_result['design_theme_restored'] = True
-                    except Exception as e:
-                        self._last_restore_result['warnings'].append(f'theme restore failed: {e}')
-                        logger.warning('Failed to restore theme from URL: %s', e)
-
-            if restored_any:
-                try:
-                    self._design._sync_theme_manager(self._theme_manager)
-                except Exception:
-                    pass
-
-            if '_pst' in params and params['_pst']:
-                self._pending_state_token = params['_pst'][0]
-
-            return restored_any
-        except Exception as e:
-            logger.warning('Unexpected error in _restore_from_url_params: %s', e)
-            return False
-
-    def _restore_widget_state_from_token(self, doc: Document) -> dict[str, t.Any]:
-        """
-        [Late phase] Restores widget/location/tabs state from the
-        _pst token that was captured in _restore_from_url_params().
-        Must be called AFTER all render items have been added to
-        state._views (i.e. after add_to_doc loop in _init_doc).
-
-        Degrades gracefully: token expiry, invalid token, or partial
-        restore failures are recorded in _last_restore_result but
-        never raise.
-        """
-        from ..io.state import state
-        import logging
-
-        logger = logging.getLogger('panel.template')
-        default_result: dict[str, t.Any] = {
-            'restored': [],
-            'failed': [],
-            'location_restored': False,
-            'token_expired': False,
-        }
-
-        token = getattr(self, '_pending_state_token', '')
-        if not token:
-            return default_result
-
-        try:
-            restore_result = state._restore_design_snapshot(token, doc)
-            self._last_restore_result['state_restore'] = restore_result
-            if restore_result.get('token_expired'):
-                msg = (
-                    'design-switch state token expired or not found; '
-                    'design/theme still applied but widget values were lost'
-                )
-                self._last_restore_result['warnings'].append(msg)
-                logger.warning('Cross-design state restore token expired or not found')
-            else:
-                restored_count = len(restore_result.get('restored', []))
-                failed_count = len(restore_result.get('failed', []))
-                if failed_count:
-                    logger.info(
-                        'Cross-design state restore: %d widgets restored, '
-                        '%d items failed to restore',
-                        restored_count, failed_count,
-                    )
-            return restore_result
-        except Exception as e:
-            self._last_restore_result['warnings'].append(f'state restore error: {e}')
-            logger.warning('Error during cross-design state restore: %s', e)
-            default_result['failed'].append(('*', str(e)))
-            return default_result
-
-    #----------------------------------------------------------------
-    # Runtime theme/design switching (Public API)
-    #----------------------------------------------------------------
-
-    def set_theme(self, theme: t.Union[str, type[Theme], Theme]) -> None:
-        """
-        Switches the color theme at runtime without page reload.
-        Updates all rendered components, CSS variables, and Bokeh plots.
-
-        Parameters
-        ----------
-        theme : str, Theme class, or Theme instance
-            - If a string, must be one of: 'default' (light), 'dark'
-            - If a class, must be a subclass of Theme (e.g. DarkTheme)
-            - If an instance, must be an instance of Theme
-
-        Examples
-        --------
-        >>> template.set_theme('dark')
-        >>> template.set_theme('default')
-        >>> from panel.theme import DarkTheme
-        >>> template.set_theme(DarkTheme)
-        """
-        if isinstance(theme, str):
-            if theme not in THEMES:
-                raise ValueError(
-                    f"Theme '{theme}' is not valid. "
-                    f"Valid themes: {list(THEMES.keys())}"
-                )
-            theme_cls = THEMES[theme]
-        elif isinstance(theme, type) and issubclass(theme, Theme):
-            theme_cls = theme
-        elif isinstance(theme, Theme):
-            theme_cls = type(theme)
-        else:
-            raise TypeError(
-                f"theme must be str, Theme class, or Theme instance, got {type(theme).__name__}"
-            )
-        self.theme = theme_cls
-
-    def set_design(self, design: t.Union[str, type[Design], Design]) -> None:
-        """
-        Switches the design system at runtime. Uses a two-tier strategy:
-
-        1. Same Design class (e.g. Fast→Fast): performs a no-reload
-           switch via apply_runtime_to_document() — only applies for
-           subclasses or design parameter adjustments that share the
-           same template DOM structure.
-        2. Cross Design (e.g. Fast→Bootstrap, Native→Material): since
-           Fast/Bootstrap/Material templates have incompatible DOM shells
-           (Web Components vs. BS5 classes vs. MDC components), a soft
-           page reload is triggered while preserving widget state via
-           URL parameters and sessionStorage.
-
-        Parameters
-        ----------
-        design : str, Design class, or Design instance
-            - If a string, must be one of: 'fast', 'bootstrap', 'material', 'native'
-            - If a class, must be a subclass of Design
-            - If an instance, must be an instance of Design
-
-        Examples
-        --------
-        >>> template.set_design('fast')
-        >>> template.set_design('bootstrap')
-        >>> from panel.theme import Material
-        >>> template.set_design(Material)
-        """
-        from ..io.state import state
-        from ..theme import Bootstrap, Fast, Material, Native
-
-        design_map = {
-            'fast': Fast,
-            'bootstrap': Bootstrap,
-            'material': Material,
-            'native': Native,
-        }
-        if isinstance(design, str):
-            if design not in design_map:
-                raise ValueError(
-                    f"Design '{design}' is not valid. "
-                    f"Valid designs: {list(design_map.keys())}"
-                )
-            design_cls = design_map[design]
-            design_name = design
-        elif isinstance(design, type) and issubclass(design, Design):
-            design_cls = design
-            design_name = design_cls.__name__.lower().replace('design', '')
-        elif isinstance(design, Design):
-            design_cls = type(design)
-            design_name = design_cls.__name__.lower().replace('design', '')
-        else:
-            raise TypeError(
-                f"design must be str, Design class, or Design instance, got {type(design).__name__}"
-            )
-
-        if design_cls is self.design:
-            return
-
-        same_design_family = (
-            (issubclass(design_cls, Fast) and issubclass(self.design, Fast)) or
-            (issubclass(design_cls, Bootstrap) and issubclass(self.design, Bootstrap)) or
-            (issubclass(design_cls, Material) and issubclass(self.design, Material)) or
-            (issubclass(design_cls, Native) and issubclass(self.design, Native))
-        )
-
-        current_theme_name = self._design.get_theme_name() if hasattr(self, '_design') and self._design else 'default'
-
-        if same_design_family:
-            self.design = design_cls
-            new_design = self._design
-            for doc, tpl in state._templates.items():
-                if tpl is not self:
-                    continue
-                new_design.apply_runtime_to_document(doc, self)
-            return
-
-        self.design = design_cls
-
-        for doc, tpl in state._templates.items():
-            if tpl is not self:
-                continue
-            theme_mgr = self._get_theme_manager(doc)
-            if theme_mgr is not None:
-                try:
-                    token = state._save_design_snapshot(doc)
-                except Exception:
-                    token = ''
-                theme_mgr.reload_design = design_name
-                theme_mgr.reload_theme = current_theme_name
-                theme_mgr.reload_token = token
-
-    def toggle_theme(self) -> None:
-        """
-        Toggles between the default (light) and dark themes.
-        """
-        current_theme_name = self._design.get_theme_name()
-        new_theme = 'dark' if current_theme_name == 'default' else 'default'
-        self.set_theme(new_theme)
+        self._design = self.design(theme=self.theme)
 
     def _update_vars(self, *args) -> None:
         """
@@ -591,14 +274,6 @@ class BaseTemplate(param.Parameterized, MimeRenderMixin, ServableMixin, Resource
         col._preprocess(preprocess_root)
         col._documents[document] = preprocess_root
         document.on_session_destroyed(col._server_destroy) # type: ignore
-
-        # Initialize ThemeManager for runtime theme switching
-        self._init_theme_manager(document)
-
-        # Restore widget/location/tabs state from _pst token (late phase —
-        # must run after all render items have been added to state._views).
-        if getattr(self, '_pending_state_token', ''):
-            self._restore_widget_state_from_token(document)
 
         # Apply the jinja2 template and update template variables
         if notebook:
@@ -900,7 +575,7 @@ class BaseTemplate(param.Parameterized, MimeRenderMixin, ServableMixin, Resource
 class TemplateActions(ReactiveHTML):
     """
     A component added to templates that allows triggering events such
-    as opening and closing a modal, and toggling the theme.
+    as opening and closing a modal.
     """
 
     open_modal = param.Integer(default=0, doc="""
@@ -910,13 +585,6 @@ class TemplateActions(ReactiveHTML):
     close_modal = param.Integer(default=0, doc="""
         The number of times the close modal action has been triggered.
         This is used to trigger the close modal script.""")
-
-    toggle_theme = param.Integer(default=0, doc="""
-        The number of times the theme toggle has been triggered.
-        Used to trigger a theme change (dark/light) without page reload.""")
-
-    set_theme_name = param.String(default='', doc="""
-        Set to a theme name ('default' or 'dark') to trigger a theme switch.""")
 
     _template: t.ClassVar[str] = ""
 
@@ -1092,19 +760,10 @@ class BasicTemplate(BaseTemplate):
         self.modal.param.watch(self._update_render_items, ['objects'])
         self.sidebar.param.watch(self._update_render_items, ['objects'])
         self.header.param.watch(self._update_render_items, ['objects'])
-
-        # Watch for theme toggle/set actions
-        self._actions.param.watch(lambda e: self.toggle_theme(), 'toggle_theme')
-        self._actions.param.watch(self._on_set_theme_name, 'set_theme_name')
-
         self.main.param.trigger('objects')
         self.sidebar.param.trigger('objects')
         self.header.param.trigger('objects')
         self.modal.param.trigger('objects')
-
-    def _on_set_theme_name(self, event: param.parameterized.Event) -> None:
-        if event.new and event.new != event.old:
-            self.set_theme(event.new)
 
     def _init_doc(
         self, doc: Document | None = None, comm: Comm | None = None,

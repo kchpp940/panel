@@ -72,10 +72,3 @@ class Bootstrap(Design):
             'bootstrap': JS_URLS['bootstrap5']
         }
     }
-
-    def get_bs_theme(self) -> str:
-        """
-        Returns the Bootstrap theme attribute ('light' or 'dark')
-        from the current theme.
-        """
-        return getattr(self.theme, '_bs_theme', 'dark' if self.is_dark_theme() else 'light')

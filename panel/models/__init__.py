@@ -16,7 +16,6 @@ from .location import Location  # noqa
 from .markup import HTML, JSON, PDF  # noqa
 from .reactive_html import ReactiveHTML  # noqa
 from .state import State  # noqa
-from .theme_manager import ThemeManager  # noqa
 from .time_picker import TimePicker  # noqa
 from .trend import TrendIndicator  # noqa
 from .widgets import (  # noqa

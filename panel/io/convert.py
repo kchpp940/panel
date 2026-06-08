@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import ast
 import base64
 import concurrent.futures
 import dataclasses
 import json
 import os
 import pathlib
+import re
 import typing as t
 import uuid
 
+from collections import Counter
 from html import escape
 from urllib.parse import urlparse
 from zipfile import ZipFile
@@ -78,6 +81,393 @@ PWA_IMAGES = [
 ]
 
 Runtimes = t.Literal['pyodide', 'pyscript', 'pyodide-worker', 'pyscript-worker']
+
+_URL_RE = re.compile(r'https?://[^\s"\'<>)]+')
+
+
+@dataclasses.dataclass
+class WheelInfo:
+    name: str
+    source: str
+    size_kb: float | None = None
+    local: bool = False
+
+
+@dataclasses.dataclass
+class ResourceInfo:
+    path: str
+    type: t.Literal['js', 'css', 'image', 'font', 'other']
+    source: t.Literal['cdn', 'local', 'inline', 'external']
+    size_kb: float | None = None
+    referenced_by: str = ''
+
+
+@dataclasses.dataclass
+class ThemeInfo:
+    name: str
+    css_files: list[str]
+    bokeh_theme: str | None = None
+
+
+@dataclasses.dataclass
+class SWCacheStrategy:
+    pre_cache_files: list[str]
+    strategy: t.Literal['cache-first', 'network-first', 'stale-while-revalidate'] = 'cache-first'
+    runtime_caching: bool = True
+
+
+@dataclasses.dataclass
+class PageAssets:
+    page_name: str
+    html_file: str
+    wheels: list[WheelInfo] = dataclasses.field(default_factory=list)
+    js_resources: list[ResourceInfo] = dataclasses.field(default_factory=list)
+    css_resources: list[ResourceInfo] = dataclasses.field(default_factory=list)
+    theme: ThemeInfo | None = None
+    user_resources: list[str] = dataclasses.field(default_factory=list)
+    runtime_urls: list[str] = dataclasses.field(default_factory=list)
+    total_size_kb: float = 0.0
+
+
+@dataclasses.dataclass
+class DiagnosticIssue:
+    severity: t.Literal['error', 'warning', 'info']
+    category: t.Literal['missing', 'duplicate', 'non-localized', 'size-warning']
+    resource: str
+    message: str
+    source: str = ''
+
+
+@dataclasses.dataclass
+class AssetsReport:
+    generated_at: str
+    runtime: str
+    is_pwa: bool
+    pages: list[PageAssets] = dataclasses.field(default_factory=list)
+    sw_cache: SWCacheStrategy | None = None
+    issues: list[DiagnosticIssue] = dataclasses.field(default_factory=list)
+    total_size_kb: float = 0.0
+
+    def to_dict(self) -> dict:
+        return dataclasses.asdict(self)
+
+    def to_markdown(self) -> str:
+        lines = [
+            '# Panel Convert Assets Report',
+            '',
+            f'- **Generated at**: {self.generated_at}',
+            f'- **Runtime**: {self.runtime}',
+            f'- **PWA enabled**: {self.is_pwa}',
+            f'- **Total estimated size**: {self.total_size_kb:.1f} KB',
+            '',
+        ]
+        if self.sw_cache:
+            lines.extend([
+                '## Service Worker Cache Strategy',
+                '',
+                f'- **Strategy**: {self.sw_cache.strategy}',
+                f'- **Runtime caching**: {self.sw_cache.runtime_caching}',
+                f'- **Pre-cached files** ({len(self.sw_cache.pre_cache_files)}):',
+            ])
+            for f in self.sw_cache.pre_cache_files:
+                lines.append(f'  - `{f}`')
+            lines.append('')
+        for page in self.pages:
+            lines.extend([
+                f'## Page: {page.page_name}',
+                '',
+                f'- **HTML file**: `{page.html_file}`',
+                f'- **Estimated size**: {page.total_size_kb:.1f} KB',
+                '',
+            ])
+            if page.wheels:
+                lines.append(f'### Python Wheels ({len(page.wheels)})')
+                lines.append('')
+                lines.append('| Name | Source | Size (KB) | Local |')
+                lines.append('|------|--------|-----------|-------|')
+                for w in page.wheels:
+                    size = f'{w.size_kb:.1f}' if w.size_kb else 'N/A'
+                    lines.append(f'| {w.name} | {w.source} | {size} | {w.local} |')
+                lines.append('')
+            if page.js_resources:
+                lines.append(f'### JavaScript Resources ({len(page.js_resources)})')
+                lines.append('')
+                lines.append('| Path | Source | Size (KB) |')
+                lines.append('|------|--------|-----------|')
+                for r in page.js_resources:
+                    size = f'{r.size_kb:.1f}' if r.size_kb else 'N/A'
+                    lines.append(f'| {r.path} | {r.source} | {size} |')
+                lines.append('')
+            if page.css_resources:
+                lines.append(f'### CSS Resources ({len(page.css_resources)})')
+                lines.append('')
+                lines.append('| Path | Source | Size (KB) |')
+                lines.append('|------|--------|-----------|')
+                for r in page.css_resources:
+                    size = f'{r.size_kb:.1f}' if r.size_kb else 'N/A'
+                    lines.append(f'| {r.path} | {r.source} | {size} |')
+                lines.append('')
+            if page.theme:
+                lines.append(f'### Theme: {page.theme.name}')
+                lines.append('')
+                if page.theme.bokeh_theme:
+                    lines.append(f'- **Bokeh theme**: {page.theme.bokeh_theme}')
+                lines.append('- **CSS files**:')
+                for css in page.theme.css_files:
+                    lines.append(f'  - `{css}`')
+                lines.append('')
+            if page.user_resources:
+                lines.append(f'### User Resources ({len(page.user_resources)})')
+                lines.append('')
+                for r in page.user_resources:
+                    lines.append(f'- `{r}`')
+                lines.append('')
+            if page.runtime_urls:
+                lines.append(f'### Runtime Network URLs ({len(page.runtime_urls)})')
+                lines.append('')
+                lines.append('> These URLs are referenced in the code and may be fetched at runtime.')
+                lines.append('> They must be reachable or cached for the app to work offline.')
+                lines.append('')
+                for url in page.runtime_urls:
+                    lines.append(f'- `{url}`')
+                lines.append('')
+        if self.issues:
+            lines.extend([
+                '## Diagnostics',
+                '',
+            ])
+            by_severity: dict[str, list[DiagnosticIssue]] = {}
+            for issue in self.issues:
+                by_severity.setdefault(issue.severity, []).append(issue)
+            for severity in ('error', 'warning', 'info'):
+                if severity in by_severity:
+                    sev_label = severity.upper()
+                    lines.append(f'### {sev_label} ({len(by_severity[severity])})')
+                    lines.append('')
+                    for issue in by_severity[severity]:
+                        src = f' (source: `{issue.source}`)' if issue.source else ''
+                        lines.append(f'- **[{issue.category}]** {issue.resource}: {issue.message}{src}')
+                    lines.append('')
+        return '\n'.join(lines)
+
+
+def _classify_resource_type(path: str) -> t.Literal['js', 'css', 'image', 'font', 'other']:
+    ext = pathlib.Path(urlparse(path).path).suffix.lower()
+    if ext in ('.js', '.mjs'):
+        return 'js'
+    if ext == '.css':
+        return 'css'
+    if ext in ('.png', '.jpg', '.jpeg', '.gif', '.svg', '.ico', '.webp'):
+        return 'image'
+    if ext in ('.woff', '.woff2', '.ttf', '.otf', '.eot'):
+        return 'font'
+    return 'other'
+
+
+def _classify_resource_source(
+    path: str,
+) -> t.Literal['cdn', 'local', 'inline', 'external']:
+    if path.startswith('data:'):
+        return 'inline'
+    parsed = urlparse(path)
+    if parsed.scheme in ('http', 'https'):
+        if CDN_DIST in path or CDN_ROOT in path:
+            return 'cdn'
+        return 'external'
+    return 'local'
+
+
+def _get_file_size_kb(path: str, base_dir: pathlib.Path | None = None) -> float | None:
+    parsed = urlparse(path)
+    if parsed.scheme in ('http', 'https'):
+        return None
+    local_path = pathlib.Path(parsed.path)
+    if not local_path.is_absolute() and base_dir:
+        local_path = base_dir / local_path
+    try:
+        if local_path.is_file():
+            return local_path.stat().st_size / 1024
+    except OSError:
+        pass
+    return None
+
+
+def _extract_runtime_urls(code: str) -> list[str]:
+    urls = set()
+    for match in _URL_RE.findall(code):
+        if not match.endswith(('.whl', '.js', '.css', '.png', '.jpg', '.jpeg', '.gif', '.svg', '.ico')):
+            urls.add(match.rstrip('.,;:'))
+    try:
+        tree = ast.parse(code)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                for match in _URL_RE.findall(node.value):
+                    if not match.endswith(('.whl', '.js', '.css', '.png', '.jpg', '.jpeg', '.gif', '.svg', '.ico')):
+                        urls.add(match.rstrip('.,;:'))
+    except SyntaxError:
+        pass
+    return sorted(urls)
+
+
+def _detect_theme(document: Document) -> ThemeInfo | None:
+    from ..theme.base import Design, Theme
+    try:
+        for root in document.roots:
+            design = getattr(root, 'design', None)
+            if design and isinstance(design, Design):
+                theme = design.theme
+                css_files = []
+                if theme and theme.base_css:
+                    css_files.append(str(theme.base_css))
+                if theme and theme.css:
+                    css_files.append(str(theme.css))
+                bokeh_theme = None
+                if theme and theme.bokeh_theme:
+                    bokeh_theme = str(theme.bokeh_theme) if isinstance(theme.bokeh_theme, str) else type(theme.bokeh_theme).__name__
+                return ThemeInfo(
+                    name=type(design).__name__ + ':' + (theme._name if theme else 'default'),
+                    css_files=css_files,
+                    bokeh_theme=bokeh_theme,
+                )
+    except Exception:
+        pass
+    return None
+
+
+def diagnose_assets(
+    pages: list[PageAssets],
+    dest_path: pathlib.Path,
+) -> list[DiagnosticIssue]:
+    issues: list[DiagnosticIssue] = []
+    all_resources: list[tuple[str, str]] = []
+    for page in pages:
+        for w in page.wheels:
+            all_resources.append((w.source, page.page_name))
+            if not w.local:
+                parsed = urlparse(w.source)
+                if parsed.scheme in ('http', 'https'):
+                    issues.append(DiagnosticIssue(
+                        severity='warning',
+                        category='non-localized',
+                        resource=w.name,
+                        message=f'Wheel loaded from remote URL {w.source}, will not work fully offline',
+                        source=page.page_name,
+                    ))
+            else:
+                local_path = pathlib.Path(w.source.replace('file:', ''))
+                if not local_path.is_file():
+                    issues.append(DiagnosticIssue(
+                        severity='error',
+                        category='missing',
+                        resource=w.name,
+                        message=f'Local wheel not found at {w.source}',
+                        source=page.page_name,
+                    ))
+        for rtype in ('js_resources', 'css_resources'):
+            for r in getattr(page, rtype):
+                all_resources.append((r.path, page.page_name))
+                if r.source in ('cdn', 'external'):
+                    issues.append(DiagnosticIssue(
+                        severity='warning',
+                        category='non-localized',
+                        resource=r.path,
+                        message=f'{rtype.split("_")[0].upper()} resource loaded from remote URL, may fail offline',
+                        source=page.page_name,
+                    ))
+                elif r.source == 'local':
+                    local_path = pathlib.Path(r.path)
+                    if not local_path.is_absolute():
+                        local_path = dest_path / local_path
+                    if not local_path.is_file():
+                        issues.append(DiagnosticIssue(
+                            severity='error',
+                            category='missing',
+                            resource=r.path,
+                            message=f'Local resource file not found',
+                            source=page.page_name,
+                        ))
+        for ur in page.user_resources:
+            all_resources.append((ur, page.page_name))
+            local_path = pathlib.Path(ur)
+            if not local_path.is_absolute():
+                local_path = dest_path / local_path
+            if not local_path.is_file():
+                issues.append(DiagnosticIssue(
+                    severity='error',
+                    category='missing',
+                    resource=ur,
+                    message='User resource file not found in output directory',
+                    source=page.page_name,
+                ))
+    counts = Counter(path for path, _ in all_resources)
+    for path, count in counts.items():
+        if count > 1:
+            pages_with = sorted(set(pg for p, pg in all_resources if p == path))
+            issues.append(DiagnosticIssue(
+                severity='info',
+                category='duplicate',
+                resource=path,
+                message=f'Resource included {count} times across pages: {", ".join(pages_with)}',
+                source=', '.join(pages_with),
+            ))
+    for page in pages:
+        if page.total_size_kb > 5000:
+            issues.append(DiagnosticIssue(
+                severity='warning',
+                category='size-warning',
+                resource=page.page_name,
+                message=f'Page assets exceed 5MB ({page.total_size_kb:.1f} KB), consider optimizing wheels and resources',
+                source=page.page_name,
+            ))
+    return issues
+
+
+def print_diagnostics(issues: list[DiagnosticIssue]) -> None:
+    if not issues:
+        print('\n✅ No asset issues detected.')
+        return
+    by_severity: dict[str, list[DiagnosticIssue]] = {}
+    for issue in issues:
+        by_severity.setdefault(issue.severity, []).append(issue)
+    print()
+    for severity in ('error', 'warning', 'info'):
+        if severity not in by_severity:
+            continue
+        sev_items = by_severity[severity]
+        prefix = {'error': '❌', 'warning': '⚠️', 'info': 'ℹ️'}[severity]
+        label = severity.upper()
+        print(f'{prefix} {label}: {len(sev_items)} issue(s)')
+        for issue in sev_items:
+            src = f' [{issue.source}]' if issue.source else ''
+            print(f'   [{issue.category}] {issue.resource}: {issue.message}{src}')
+    print()
+
+
+def write_assets_report(
+    report: AssetsReport,
+    dest_path: pathlib.Path,
+) -> tuple[pathlib.Path, pathlib.Path]:
+    json_path = dest_path / 'assets_report.json'
+    md_path = dest_path / 'assets_report.md'
+    with open(json_path, 'w', encoding='utf-8') as f:
+        json.dump(report.to_dict(), f, indent=2, default=str)
+    with open(md_path, 'w', encoding='utf-8') as f:
+        f.write(report.to_markdown())
+    return json_path, md_path
+
+
+_HREF_RE = re.compile(r'href=["\']([^"\']+)["\']')
+_SRC_RE = re.compile(r'src=["\']([^"\']+)["\']')
+
+
+def _extract_urls_from_html(html: str) -> list[str]:
+    urls: list[str] = []
+    for match in _HREF_RE.findall(html):
+        urls.append(match)
+    for match in _SRC_RE.findall(html):
+        urls.append(match)
+    return urls
+
 
 PRE = """
 import asyncio
@@ -321,7 +711,7 @@ def script_to_html(
     manifest: str | None = None,
     inline: bool = False,
     compiled: bool = True
-) -> tuple[str, str | None]:
+) -> tuple[str, str | None, list[ResourceInfo], list[ResourceInfo], ThemeInfo | None, list[str]]:
     """
     Converts a Panel or Bokeh script to a standalone WASM Python
     application.
@@ -490,7 +880,33 @@ def script_to_html(
             .replace('<link rel="stylesheet"', '<link rel="stylesheet" crossorigin="anonymous"')
             .replace('<link rel="icon"', '<link rel="icon" crossorigin="anonymous"')
         )
-    return html, web_worker
+    js_infos: list[ResourceInfo] = []
+    css_infos: list[ResourceInfo] = []
+    all_urls = _extract_urls_from_html(bokeh_js) + _extract_urls_from_html(bokeh_css)
+    seen_urls = set()
+    for url in all_urls:
+        if url in seen_urls:
+            continue
+        seen_urls.add(url)
+        rtype = _classify_resource_type(url)
+        rsrc = _classify_resource_source(url)
+        size_kb = _get_file_size_kb(url)
+        info = ResourceInfo(
+            path=url,
+            type=rtype,
+            source=rsrc,
+            size_kb=size_kb,
+        )
+        if rtype == 'js':
+            js_infos.append(info)
+        elif rtype == 'css':
+            css_infos.append(info)
+        else:
+            if rsrc in ('cdn', 'external'):
+                js_infos.append(info)
+    theme_info = _detect_theme(document)
+    runtime_urls = _extract_runtime_urls(source)
+    return html, web_worker, js_infos, css_infos, theme_info, runtime_urls
 
 
 def convert_app(
@@ -523,19 +939,51 @@ def convert_app(
     # prepare wheels to be available via emscripten MEMFS
     parsed_requirements_rewritten = []
     wheels2pack: dict[str | os.PathLike, str] = {}
+    wheel_infos: list[WheelInfo] = []
 
     for req in parsed_requirements:
         try:
             req_as_url = urlparse(req)
             if req_as_url.scheme == 'file':
                 wheel_name = os.path.basename(req_as_url.path)
+                wheel_path = req_as_url.path
+                size_kb = _get_file_size_kb(wheel_path)
+                wheel_infos.append(WheelInfo(
+                    name=wheel_name,
+                    source=wheel_path,
+                    size_kb=size_kb,
+                    local=True,
+                ))
                 emfs_wheel_path = 'packed_wheels' + '/' + wheel_name
                 parsed_requirements_rewritten.append(f'emfs:{emfs_wheel_path}')
                 wheels2pack[req_as_url.path] = emfs_wheel_path
             else:
+                is_local = req_as_url.scheme not in ('http', 'https')
+                size_kb = _get_file_size_kb(req) if is_local else None
+                try:
+                    req_obj = Requirement(req.split('==')[0].split('>=')[0].split('<=')[0].split('~=')[0].split('!=')[0])
+                    wname = req_obj.name
+                except Exception:
+                    wname = req
+                wheel_infos.append(WheelInfo(
+                    name=wname,
+                    source=req,
+                    size_kb=size_kb,
+                    local=is_local,
+                ))
                 parsed_requirements_rewritten.append(req)
         except ValueError:
             # no url, so must be a properly formatted requirement
+            try:
+                req_obj = Requirement(req.split('==')[0].split('>=')[0].split('<=')[0].split('~=')[0].split('!=')[0])
+                wname = req_obj.name
+            except Exception:
+                wname = req
+            wheel_infos.append(WheelInfo(
+                name=wname,
+                source=req,
+                local=False,
+            ))
             parsed_requirements_rewritten.append(req)
 
     # make a zip out of resources
@@ -562,9 +1010,13 @@ def convert_app(
         app_resources_packfile = None
 
     # try to convert the app to a standalone package
+    js_infos: list[ResourceInfo] = []
+    css_infos: list[ResourceInfo] = []
+    theme_info: ThemeInfo | None = None
+    runtime_urls: list[str] = []
     try:
         with set_resource_mode('inline' if inline else 'cdn'):
-            html, worker = script_to_html(
+            html, worker, js_infos, css_infos, theme_info, runtime_urls = script_to_html(
                 app,
                 requirements=parsed_requirements_rewritten,
                 app_resources=app_resources_packfile,
@@ -591,9 +1043,34 @@ def convert_app(
         ext = 'py' if runtime.startswith('pyscript') else 'js'
         with open(dest_path / f'{app_name}.{ext}', 'w', encoding="utf-8") as out:
             out.write(worker)
+
+    user_resources = list(resources_validated.values())
+    if app_resources_packfile:
+        user_resources.append(app_resources_packfile)
+
+    total_size = 0.0
+    for w in wheel_infos:
+        if w.size_kb:
+            total_size += w.size_kb
+    for r in js_infos + css_infos:
+        if r.size_kb:
+            total_size += r.size_kb
+
+    page_assets = PageAssets(
+        page_name=app_name.replace('_', ' '),
+        html_file=filename,
+        wheels=wheel_infos,
+        js_resources=js_infos,
+        css_resources=css_infos,
+        theme=theme_info,
+        user_resources=user_resources,
+        runtime_urls=runtime_urls,
+        total_size_kb=total_size,
+    )
+
     if verbose:
         print(f'Successfully converted {app} to {runtime} target and wrote output to {filename}.')
-    return (app_name.replace('_', ' '), filename)
+    return (app_name.replace('_', ' '), filename, page_assets)
 
 
 def _convert_process_pool(
@@ -608,6 +1085,7 @@ def _convert_process_pool(
     from concurrent.futures import ProcessPoolExecutor
 
     files = {}
+    page_assets: list[PageAssets] = []
     groups = [apps[i:i+max_workers] for i in range(0, len(apps), max_workers)]
     for group in groups:
         with ProcessPoolExecutor(
@@ -626,9 +1104,10 @@ def _convert_process_pool(
             for future in concurrent.futures.as_completed(futures):
                 result = future.result()
                 if result is not None:
-                    name, filename = result
+                    name, filename, pa = result
                     files[name] = filename
-    return files
+                    page_assets.append(pa)
+    return files, page_assets
 
 
 def convert_apps(
@@ -649,6 +1128,7 @@ def convert_apps(
     inline: bool = False,
     compiled: bool = False,
     verbose: bool = True,
+    generate_assets_report: bool = True,
 ):
     """
     Parameters
@@ -693,7 +1173,13 @@ def convert_apps(
         Whether to inline resources.
     compiled: bool
         Whether to use the compiled and faster version of Pyodide.
+    generate_assets_report: bool
+        Whether to generate an assets report (assets_report.json and
+        assets_report.md) and print diagnostic information about
+        missing, duplicate and non-localized resources.
     """
+    import datetime as _dt
+
     if isinstance(apps, (str, os.PathLike)):
         apps = [apps]
     if dest_path is None:
@@ -729,13 +1215,17 @@ def convert_apps(
         'local_prefix': local_prefix,
     }
 
+    all_page_assets: list[PageAssets] = []
     if state._is_pyodide:
-        files = {
-            app: convert_app(app, dest_path, **kwargs)  # type: ignore
-            for app in apps
-        }
+        files = {}
+        for app in apps:
+            result = convert_app(app, dest_path, **kwargs)  # type: ignore
+            if result is not None:
+                name, filename, pa = result
+                files[name] = filename
+                all_page_assets.append(pa)
     else:
-        files = _convert_process_pool(
+        files, all_page_assets = _convert_process_pool(
             apps, dest_path, max_workers=max_workers, **kwargs  # type: ignore
         )
 
@@ -746,34 +1236,63 @@ def convert_apps(
         if verbose:
             print('Successfully wrote index.html.')
 
-    if not build_pwa:
+    if not build_pwa and not generate_assets_report:
         return
 
-    # Write icons
-    imgs_path = (dest_path / 'images')
-    imgs_path.mkdir(exist_ok=True)
-    img_rel = []
-    for img in PWA_IMAGES:
-        with open(imgs_path / img.name, 'wb') as f:
-            f.write(img.read_bytes())
-        img_rel.append(f'images/{img.name}')
-    if verbose:
-        print('Successfully wrote icons and images.')
+    sw_cache: SWCacheStrategy | None = None
+    img_rel: list[str] = []
 
-    # Write manifest
-    manifest = build_pwa_manifest(files, title=title, **pwa_config)
-    with open(dest_path / 'site.webmanifest', 'w', encoding='utf-8') as f:
-        f.write(manifest)
-    if verbose:
-        print('Successfully wrote site.manifest.')
+    if build_pwa:
+        # Write icons
+        imgs_path = (dest_path / 'images')
+        imgs_path.mkdir(exist_ok=True)
+        img_rel = []
+        for img in PWA_IMAGES:
+            with open(imgs_path / img.name, 'wb') as f:
+                f.write(img.read_bytes())
+            img_rel.append(f'images/{img.name}')
+        if verbose:
+            print('Successfully wrote icons and images.')
 
-    # Write service worker
-    worker = SERVICE_WORKER_TEMPLATE.render(
-        uuid=uuid.uuid4().hex,
-        name=title or 'Panel Pyodide App',
-        pre_cache=', '.join([repr(p) for p in img_rel])
-    )
-    with open(dest_path / 'serviceWorker.js', 'w', encoding='utf-8') as f:
-        f.write(worker)
-    if verbose:
-        print('Successfully wrote serviceWorker.js.')
+        # Write manifest
+        manifest_content = build_pwa_manifest(files, title=title, **pwa_config)
+        with open(dest_path / 'site.webmanifest', 'w', encoding='utf-8') as f:
+            f.write(manifest_content)
+        if verbose:
+            print('Successfully wrote site.manifest.')
+
+        # Write service worker
+        worker = SERVICE_WORKER_TEMPLATE.render(
+            uuid=uuid.uuid4().hex,
+            name=title or 'Panel Pyodide App',
+            pre_cache=', '.join([repr(p) for p in img_rel])
+        )
+        with open(dest_path / 'serviceWorker.js', 'w', encoding='utf-8') as f:
+            f.write(worker)
+        if verbose:
+            print('Successfully wrote serviceWorker.js.')
+
+        sw_cache = SWCacheStrategy(
+            pre_cache_files=img_rel,
+            strategy='cache-first',
+            runtime_caching=True,
+        )
+
+    if generate_assets_report:
+        issues: list[DiagnosticIssue] = []
+        if all_page_assets:
+            issues = diagnose_assets(all_page_assets, dest_path)
+        total_size = sum(pa.total_size_kb for pa in all_page_assets)
+        report = AssetsReport(
+            generated_at=_dt.datetime.now().isoformat(),
+            runtime=runtime,
+            is_pwa=build_pwa,
+            pages=all_page_assets,
+            sw_cache=sw_cache,
+            issues=issues,
+            total_size_kb=total_size,
+        )
+        json_path, md_path = write_assets_report(report, dest_path)
+        if verbose:
+            print(f'Successfully wrote assets report to {json_path.name} and {md_path.name}.')
+            print_diagnostics(issues)

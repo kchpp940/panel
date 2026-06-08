@@ -399,15 +399,6 @@ export class DataTabulatorView extends HTMLBoxView {
   _last_after_resize_el_width: number | null = null
   _last_after_resize_el_height: number | null = null
 
-  _theme_bound: (() => void) | null = null
-
-  _on_panel_theme_change(_e: CustomEvent): void {
-    this._updating_scroll = true
-    this.tabulator?.redraw(true)
-    this._updating_scroll = false
-    this.setStyles()
-  }
-
   override connect_signals(): void {
     super.connect_signals()
     const {
@@ -688,10 +679,6 @@ export class DataTabulatorView extends HTMLBoxView {
     this._resize_pending = false
     this._last_after_resize_el_width = null
     this._last_after_resize_el_height = null
-    if (this._theme_bound != null) {
-      document.removeEventListener('panel:themechange', this._theme_bound as EventListener)
-      this._theme_bound = null
-    }
     this.tabulator?.destroy()
     super.remove()
   }
@@ -709,11 +696,6 @@ export class DataTabulatorView extends HTMLBoxView {
     this.setCSSClasses(el)
     container.appendChild(el)
     this.shadow_el.appendChild(container)
-
-    if (this._theme_bound == null) {
-      this._theme_bound = this._on_panel_theme_change.bind(this)
-      document.addEventListener('panel:themechange', this._theme_bound as EventListener)
-    }
 
     const configuration = this.getConfiguration()
     this.tabulator = new Tabulator(el, configuration)
