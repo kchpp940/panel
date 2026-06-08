@@ -273,8 +273,9 @@ export class PlotlyPlotView extends HTMLBoxView {
       values.push(v)
     }
     const dataset_id = this._get_dataset_id()
-    const fields = collect_fields(values)
-    const filters = build_point_filters(values, indices)
+    const allowed_fields = this.model.interaction_fields
+    const fields = collect_fields(values, [], allowed_fields)
+    const filters = build_point_filters(values, indices, allowed_fields)
     return {mode: "point", dataset_id, indices, fields, values, filters}
   }
 
@@ -303,8 +304,9 @@ export class PlotlyPlotView extends HTMLBoxView {
       return null
     }
     const dataset_id = this._get_dataset_id()
-    const fields = collect_fields(values, Object.keys(ranges))
-    const filters = build_range_filters(ranges)
+    const allowed_fields = this.model.interaction_fields
+    const fields = collect_fields(values, Object.keys(ranges), allowed_fields)
+    const filters = build_range_filters(ranges, allowed_fields)
     if (indices.length > 0) {
       filters.unshift({field: "index", op: "in", value: indices.slice()})
     }
@@ -320,8 +322,9 @@ export class PlotlyPlotView extends HTMLBoxView {
       }
     }
     const dataset_id = this._get_dataset_id()
+    const allowed_fields = this.model.interaction_fields
     const fields = Object.keys(ranges)
-    const filters = build_range_filters(ranges)
+    const filters = build_range_filters(ranges, allowed_fields)
     return {dataset_id, fields, ranges, filters}
   }
 
@@ -676,6 +679,7 @@ export namespace PlotlyPlot {
     viewport_update_throttle: p.Property<number>
     _render_count: p.Property<number>
     interaction_store: p.Property<InteractionStore | null>
+    interaction_fields: p.Property<string[] | null>
   }
 }
 
@@ -708,6 +712,7 @@ export class PlotlyPlot extends HTMLBox {
       viewport_update_throttle: [ Float, 200 ],
       _render_count: [ Float, 0 ],
       interaction_store: [ Nullable(Ref(InteractionStore)), null ],
+      interaction_fields: [ Nullable(List(Str)), null ],
     }))
   }
 }

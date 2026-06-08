@@ -173,6 +173,7 @@ class DataTabulator(HTMLBox):
     container_popup  = Bool(True)
 
     interaction_store = Nullable(Instance(InteractionStore))
+    interaction_fields = Nullable(List(String))
 
     __css_raw__ = CSS_URLS
 

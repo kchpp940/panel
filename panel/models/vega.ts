@@ -119,8 +119,9 @@ export class VegaPlotView extends LayoutDOMView {
       }
       if (is_range) {
         const dataset_id = this._get_dataset_id()
-        const fields = collect_fields(values, Object.keys(ranges))
-        const filters = build_range_filters(ranges)
+        const allowed_fields = this.model.interaction_fields
+        const fields = collect_fields(values, Object.keys(ranges), allowed_fields)
+        const filters = build_range_filters(ranges, allowed_fields)
         if (indices.length > 0) {
           filters.unshift({field: "index", op: "in", value: indices.slice()})
         }
@@ -140,8 +141,9 @@ export class VegaPlotView extends LayoutDOMView {
       return null
     }
     const dataset_id = this._get_dataset_id()
-    const fields = collect_fields(values)
-    const filters = build_point_filters(values, indices)
+    const allowed_fields = this.model.interaction_fields
+    const fields = collect_fields(values, [], allowed_fields)
+    const filters = build_point_filters(values, indices, allowed_fields)
     return {mode: "point", dataset_id, indices, fields, values, filters}
   }
 
@@ -162,8 +164,9 @@ export class VegaPlotView extends LayoutDOMView {
       return null
     }
     const dataset_id = this._get_dataset_id()
+    const allowed_fields = this.model.interaction_fields
     const fields = Object.keys(ranges)
-    const filters = build_range_filters(ranges)
+    const filters = build_range_filters(ranges, allowed_fields)
     return {dataset_id, fields, ranges, filters}
   }
 
@@ -331,6 +334,7 @@ export namespace VegaPlot {
     theme: p.Property<string | null>
     throttle: p.Property<any>
     interaction_store: p.Property<InteractionStore | null>
+    interaction_fields: p.Property<string[] | null>
   }
 }
 
@@ -351,11 +355,12 @@ export class VegaPlot extends LayoutDOM {
     this.define<VegaPlot.Props>(({Any, List, Bool, Nullable, Str, Ref}) => ({
       data:         [ Any,                {} ],
       data_sources: [ Any,                {} ],
-      events:       [ List(Str),      [] ],
-      show_actions: [ Bool,         false ],
-      theme:        [ Nullable(Str), null ],
+      events:       [ List(Str),          [] ],
+      show_actions: [ Bool,            false ],
+      theme:        [ Nullable(Str),   null ],
       throttle:     [ Any,                {} ],
       interaction_store: [ Nullable(Ref(InteractionStore)), null ],
+      interaction_fields: [ Nullable(List(Str)), null ],
     }))
   }
 }

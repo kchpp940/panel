@@ -133,16 +133,17 @@ export class EChartsView extends HTMLBoxView {
       }
     }
     const dataset_id = this.model.options?.dataset?.[0]?.source?.name
+    const allowed_fields = this.model.interaction_fields
     if (is_range || Object.keys(ranges).length > 0) {
-      const fields = collect_fields(values, Object.keys(ranges))
-      const filters = build_range_filters(ranges)
+      const fields = collect_fields(values, Object.keys(ranges), allowed_fields)
+      const filters = build_range_filters(ranges, allowed_fields)
       return {mode: "range", dataset_id, ranges, fields, indices, values, filters}
     }
     if (indices.length === 0 && values.length === 0) {
       return null
     }
-    const fields = collect_fields(values)
-    const filters = build_point_filters(values, indices)
+    const fields = collect_fields(values, [], allowed_fields)
+    const filters = build_point_filters(values, indices, allowed_fields)
     return {mode: "point", dataset_id, indices, fields, values, filters}
   }
 
@@ -166,8 +167,9 @@ export class EChartsView extends HTMLBoxView {
       return null
     }
     const dataset_id = this.model.options?.dataset?.[0]?.source?.name
+    const allowed_fields = this.model.interaction_fields
     const fields = Object.keys(ranges)
-    const filters = build_range_filters(ranges)
+    const filters = build_range_filters(ranges, allowed_fields)
     return {dataset_id, fields, ranges, filters}
   }
 
@@ -388,6 +390,7 @@ export namespace ECharts {
     renderer: p.Property<string>
     theme: p.Property<string>
     interaction_store: p.Property<InteractionStore | null>
+    interaction_fields: p.Property<string[] | null>
   }
 }
 
@@ -405,7 +408,7 @@ export class ECharts extends HTMLBox {
   static {
     this.prototype.default_view = EChartsView
 
-    this.define<ECharts.Props>(({Any, Str, Nullable, Ref}) => ({
+    this.define<ECharts.Props>(({Any, Str, Nullable, Ref, List}) => ({
       data:          [ Any,           {} ],
       options:       [ Any,           {} ],
       event_config:  [ Any,           {} ],
@@ -413,6 +416,7 @@ export class ECharts extends HTMLBox {
       theme:         [ Str,  "default"],
       renderer:      [ Str,   "canvas"],
       interaction_store: [ Nullable(Ref(InteractionStore)), null ],
+      interaction_fields: [ Nullable(List(Str)), null ],
     }))
   }
 }

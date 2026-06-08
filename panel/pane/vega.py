@@ -219,6 +219,21 @@ class Vega(ModelPane):
         """,
     )
 
+    interaction_fields = param.List(
+        default=None,
+        item_type=str,
+        allow_None=True,
+        doc="""
+        Explicit list of data-column field names that are allowed to be
+        turned into filter conditions in interaction events. When None
+        (the default), only the row-index filter is emitted so that
+        display-formatting or internal payload fields cannot leak into
+        cross-component filtering. Set to e.g. ``["x", "y", "category"]``
+        to also generate ``{field, op: \"in\", value: [...]}`` filters for
+        those columns when points or rows are selected.
+        """,
+    )
+
     selection = param.ClassSelector(class_=param.Parameterized, doc="""
         The Selection object reflects any selections available on the
         supplied vega plot into Python.""")

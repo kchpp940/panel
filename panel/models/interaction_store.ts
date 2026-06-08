@@ -83,24 +83,30 @@ export interface InteractionEventPayload {
 
 /**
  * Build a list of point filters from a list of row records.
- * For each distinct field across all rows, emits an `{field, op: "in", value: [...]}`
- * filter, plus an index-based `{field: "index", op: "in", value: indices}` filter
- * when indices are provided.
+ *
+ * `allowed_fields` controls which payload fields get turned into business-data `in` filters.
+ * When `allowed_fields` is null/empty, only the `{field: "index", op: "in", value: indices}
+ * index filter is emitted (if indices are provided), to avoid guessing business conditions from
+ * display/internal/formatting payload keys leaking into the filter.
  */
 export function build_point_filters(
   values: Array<{[field: string]: any}>,
   indices: number[] | null = null,
+  allowed_fields: string[] | null = null,
 ): InteractionFilter[] {
   const filters: InteractionFilter[] = []
   if (indices != null && indices.length > 0) {
     filters.push({field: "index", op: "in", value: indices.slice()})
   }
+  if (allowed_fields == null || allowed_fields.length === 0) {
+    return filters
+  }
+  const allowedSet = new Set(allowed_fields)
   const fieldValues = new Map<string, Set<any>>()
   for (const row of values) {
     for (const [f, v] of Object.entries(row)) {
-      if (v === undefined || v === null) {
-        continue
-      }
+      if (!allowedSet.has(f)) continue
+      if (v === undefined || v === null) continue
       if (!fieldValues.has(f)) fieldValues.set(f, new Set())
       fieldValues.get(f)!.add(v)
     }
@@ -113,20 +119,27 @@ export function build_point_filters(
 
 /**
  * Build a list of range filters from an axis→[min,max] mapping.
+ *
+ * When `allowed_fields` controls which axes get normalized into business-data `range` filters.
+ * axis names are normalized (e.g. `xaxis.range` → `x`) then filtered by the allowlist;
+ * when empty/null, range axis range is allowed filters only if `range filters are emitted.
  */
-export function build_range_filters(ranges: {[axis: string]: [any, any]}): InteractionFilter[] {
+export function build_range_filters(
+  ranges: {[axis: string]: [any, any]},
+  allowed_fields: string[] | null = null,
+): InteractionFilter[] {
   const filters: InteractionFilter[] = []
+  const allowedSet = allowed_fields != null && allowed_fields.length > 0 ? new Set(allowed_fields) : null
   for (const [axis, range] of Object.entries(ranges)) {
-    if (Array.isArray(range) && range.length === 2) {
-      // Normalize axis name: plotly uses "xaxis.range", vega uses "x", echarts uses "x"
-      let field = axis
-      const match = axis.match(/^(x|y|xaxis|yaxis)(\d*)\.range$/)
-      if (match) {
-        const base = match[1].replace("axis", "")
-        field = base + (match[2] || "")
-      }
-      filters.push({field, op: "range", value: range})
+    if (!Array.isArray(range) || range.length !== 2) continue
+    let field = axis
+    const match = axis.match(/^(x|y|xaxis|yaxis)(\d*)\.range$/)
+    if (match) {
+      const base = match[1].replace("axis", "")
+      field = base + (match[2] || "")
     }
+    if (allowedSet != null && !allowedSet.has(field)) continue
+    filters.push({field, op: "range", value: range})
   }
   return filters
 }
@@ -134,11 +147,20 @@ export function build_range_filters(ranges: {[axis: string]: [any, any]}): Inter
 /**
  * Given a list of row records and optional column name hints, collect
  * all distinct field names.
+ *
+ * When `allowed_fields` is provided, the union of hints and value keys is
+ * intersected with the allowlist; the allowlist is then returned deduplicated.
+ * When `allowed_fields` is null/empty, the union of hints and actual value keys
+ * is returned.
  */
 export function collect_fields(
   values: Array<{[field: string]: any}>,
   hints: string[] = [],
+  allowed_fields: string[] | null = null,
 ): string[] {
+  if (allowed_fields != null && allowed_fields.length > 0) {
+    return Array.from(new Set(allowed_fields))
+  }
   const fields = new Set<string>(hints)
   for (const row of values) {
     for (const f of Object.keys(row)) fields.add(f)

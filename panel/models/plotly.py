@@ -79,3 +79,4 @@ class PlotlyPlot(LayoutDOM):
     _render_count = Int()
 
     interaction_store = Nullable(Instance(InteractionStore))
+    interaction_fields = Nullable(List(String))

@@ -1227,6 +1227,21 @@ class Tabulator(BaseTable):
         """,
     )
 
+    interaction_fields = param.List(
+        default=None,
+        item_type=str,
+        allow_None=True,
+        doc="""
+        Explicit list of data-column field names that are allowed to be
+        turned into filter conditions in interaction events. When None
+        (the default), only the row-index filter is emitted so that
+        display-formatting or internal payload fields cannot leak into
+        cross-component filtering. Set to e.g. ``["x", "y", "category"]``
+        to also generate ``{field, op: \"in\", value: [...]}`` filters for
+        those columns when points or rows are selected.
+        """,
+    )
+
     expanded = param.List(default=[], item_type=int, nested_refs=True, doc="""
         List of expanded rows, only applicable if a row_content function
         has been defined.""")

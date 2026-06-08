@@ -433,8 +433,9 @@ export class DataTabulatorView extends HTMLBoxView {
       }
     }
     const dataset_id = this.model.source?.name ?? undefined
-    const fields = collect_fields(values)
-    const filters = build_point_filters(values, indices)
+    const allowed_fields = this.model.interaction_fields
+    const fields = collect_fields(values, [], allowed_fields)
+    const filters = build_point_filters(values, indices, allowed_fields)
     return {mode: "rows", dataset_id, indices, fields, values, filters}
   }
 
@@ -446,8 +447,9 @@ export class DataTabulatorView extends HTMLBoxView {
     }
     values.push(row)
     const dataset_id = this.model.source?.name ?? undefined
-    const fields = collect_fields(values)
-    const filters = build_point_filters(values, [index])
+    const allowed_fields = this.model.interaction_fields
+    const fields = collect_fields(values, [], allowed_fields)
+    const filters = build_point_filters(values, [index], allowed_fields)
     return {mode: "point", dataset_id, indices: [index], fields, values, filters}
   }
 
@@ -1731,6 +1733,7 @@ export namespace DataTabulator {
     theme_classes: p.Property<string[]>
     container_popup: p.Property<boolean>
     interaction_store: p.Property<InteractionStore | null>
+    interaction_fields: p.Property<string[] | null>
   }
 }
 
@@ -1779,6 +1782,7 @@ export class DataTabulator extends HTMLBox {
       theme_classes:  [ List(Str),           [] ],
       container_popup: [ Bool, true ],
       interaction_store: [ Nullable(Ref(InteractionStore)), null ],
+      interaction_fields: [ Nullable(List(Str)), null ],
     }))
   }
 }

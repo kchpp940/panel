@@ -81,3 +81,4 @@ class VegaPlot(LayoutDOM):
     throttle = Dict(String, Int)
 
     interaction_store = Nullable(Instance(InteractionStore))
+    interaction_fields = Nullable(List(String))

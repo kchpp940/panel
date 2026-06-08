@@ -68,3 +68,4 @@ class ECharts(LayoutDOM):
     theme = String("default")
 
     interaction_store = Nullable(Instance(InteractionStore))
+    interaction_fields = Nullable(List(String))
