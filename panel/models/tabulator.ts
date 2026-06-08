@@ -5,7 +5,7 @@ import {isArray, isBoolean, isFunction, isString, isNumber} from "@bokehjs/core/
 import {ModelEvent} from "@bokehjs/core/bokeh_events"
 import type {StyleSheetLike} from "@bokehjs/core/dom"
 import {div} from "@bokehjs/core/dom"
-import {Enum, Ref} from "@bokehjs/core/kinds"
+import {Enum} from "@bokehjs/core/kinds"
 import type * as p from "@bokehjs/core/properties"
 import type {LayoutDOM} from "@bokehjs/models/layouts/layout_dom"
 import {ColumnDataSource} from "@bokehjs/models/sources/column_data_source"
@@ -16,7 +16,6 @@ import {debounce} from "debounce"
 
 import {comm_settings} from "./comm_manager"
 import {transform_cds_to_records} from "./data"
-import {InteractionStore, type InteractionEventKind, type InteractionSelection, build_point_filters, collect_fields} from "./interaction_store"
 import {HTMLBox, HTMLBoxView} from "./layout"
 import {schedule_when, transformJsPlaceholders} from "./util"
 
@@ -61,6 +60,20 @@ export class SelectionEvent extends ModelEvent {
 
   static {
     this.prototype.event_name = "selection-change"
+  }
+}
+
+export class ColumnProfileEvent extends ModelEvent {
+  constructor(readonly action: string, readonly profile?: any, readonly name?: string) {
+    super()
+  }
+
+  protected override get event_values(): Attrs {
+    return {model: this.origin, action: this.action, profile: this.profile, name: this.name}
+  }
+
+  static {
+    this.prototype.event_name = "column-profile"
   }
 }
 
@@ -399,59 +412,8 @@ export class DataTabulatorView extends HTMLBoxView {
   _automatic_page_size: boolean = false
   _last_after_resize_el_width: number | null = null
   _last_after_resize_el_height: number | null = null
-
-  _publish(
-    kind: InteractionEventKind,
-    selection: InteractionSelection | null,
-    payload: any,
-  ): void {
-    if (this.model.interaction_store == null) {
-      return
-    }
-    this.model.interaction_store.publish_event({
-      kind,
-      source: "tabulator",
-      source_id: this.model.id,
-      payload,
-      selection: selection ?? undefined,
-    })
-  }
-
-  _row_selection_from_indices(indices: number[]): InteractionSelection | null {
-    if (indices.length === 0) {
-      return null
-    }
-    const values: Array<{[field: string]: any}> = []
-    for (const i of indices) {
-      const row = this.model.source.data[i]
-      if (row != null) {
-        const v: {[field: string]: any} = {}
-        for (const col of this.model.source.columns()) {
-          v[col] = this.model.source.data[col][i]
-        }
-        values.push(v)
-      }
-    }
-    const dataset_id = this.model.source?.name ?? undefined
-    const allowed_fields = this.model.interaction_fields
-    const fields = collect_fields(values, [], allowed_fields)
-    const filters = build_point_filters(values, indices, allowed_fields)
-    return {mode: "rows", dataset_id, indices, fields, values, filters}
-  }
-
-  _point_selection_from_cell(index: number, column: string): InteractionSelection {
-    const values: Array<{[field: string]: any}> = []
-    const row: {[field: string]: any} = {}
-    for (const col of this.model.source.columns()) {
-      row[col] = this.model.source.data[col][index]
-    }
-    values.push(row)
-    const dataset_id = this.model.source?.name ?? undefined
-    const allowed_fields = this.model.interaction_fields
-    const fields = collect_fields(values, [], allowed_fields)
-    const filters = build_point_filters(values, [index], allowed_fields)
-    return {mode: "point", dataset_id, indices: [index], fields, values, filters}
-  }
+  _updating_column_state: boolean = false
+  _updating_profile: boolean = false
 
   override connect_signals(): void {
     super.connect_signals()
@@ -459,6 +421,7 @@ export class DataTabulatorView extends HTMLBoxView {
       configuration, layout, columns, groupby, visible, download,
       children, expanded, cell_styles, hidden_columns, page_size,
       page, max_page, frozen_rows, sorters, theme_classes,
+      column_widths, column_order, column_profiles, active_profile,
     } = this.model.properties
 
     this.on_change([configuration, layout, groupby], debounce(() => {
@@ -516,8 +479,25 @@ export class DataTabulatorView extends HTMLBoxView {
       this.setStyles()
     })
     this.on_change(hidden_columns, () => {
-      this.setHidden()
-      this.tabulator.redraw(true)
+      if (!this._updating_column_state) {
+        this.setHidden()
+        this.tabulator.redraw(true)
+      }
+    })
+    this.on_change(column_widths, () => {
+      if (!this._updating_column_state) {
+        this.setColumnWidths()
+      }
+    })
+    this.on_change(column_order, () => {
+      if (!this._updating_column_state) {
+        this.setColumnOrder()
+      }
+    })
+    this.on_change(active_profile, () => {
+      if (!this._updating_profile) {
+        this.applyActiveProfile()
+      }
     })
     this.on_change(page_size, () => this.setPageSize())
     this.on_change(page, () => {
@@ -840,6 +820,15 @@ export class DataTabulatorView extends HTMLBoxView {
         this._updating_sort = false
       }
     })
+    this.tabulator.on("columnResized", (column: any) => {
+      this.syncColumnStateFromFrontend()
+    })
+    this.tabulator.on("columnVisibilityChanged", (column: any, visible: boolean) => {
+      this.syncColumnStateFromFrontend()
+    })
+    this.tabulator.on("columnMoved", (column: any, columns: any[]) => {
+      this.syncColumnStateFromFrontend()
+    })
   }
 
   tableBuilt(): void {
@@ -866,6 +855,10 @@ export class DataTabulatorView extends HTMLBoxView {
       this.tabulator.setPage(this.model.page)
     }
     this._initializing = this._building = false
+    this.syncColumnStateFromFrontend()
+    if (this.model.active_profile) {
+      this.applyActiveProfile()
+    }
     this._request_resize_redraw()
   }
 
@@ -1286,9 +1279,6 @@ export class DataTabulatorView extends HTMLBoxView {
         const index = cell.getData()._index
         const event = new CellClickEvent(column.field, index)
         this.model.trigger_event(event)
-        const payload = {column: column.field, index, mode: "cell_click"}
-        const sel = this._point_selection_from_cell(index, column.field)
-        this._publish("selection", sel, payload)
       }
       if (config_columns == null) {
         columns.push(tab_column)
@@ -1305,9 +1295,6 @@ export class DataTabulatorView extends HTMLBoxView {
           const index = cell.getData()._index
           const event = new CellClickEvent(col, index)
           this.model.trigger_event(event)
-          const payload = {column: col, index, mode: "button_click"}
-          const sel = this._point_selection_from_cell(index, col)
-          this._publish("selection", sel, payload)
         },
       }
       columns.push(button_column)
@@ -1486,6 +1473,140 @@ export class DataTabulatorView extends HTMLBoxView {
     }
   }
 
+  getColumnState(): any {
+    const column_widths: any = {}
+    const hidden_columns: string[] = []
+    const column_order: string[] = []
+    for (const column of this.tabulator.getColumns()) {
+      const col = column._column
+      if (col.field == "_index") {
+        continue
+      }
+      column_order.push(col.field)
+      if (!column.isVisible()) {
+        hidden_columns.push(col.field)
+      }
+      const width = column.getWidth()
+      if (width != null) {
+        column_widths[col.field] = width
+      }
+    }
+    const sorters: any[] = []
+    for (const sort of this.model.sorters) {
+      sorters.push({field: sort.field, dir: sort.dir})
+    }
+    const filters: any[] = []
+    for (const filt of this.model.filters) {
+      filters.push({...filt})
+    }
+    const groupby = [...this.model.groupby]
+    return {
+      column_widths,
+      hidden_columns,
+      column_order,
+      sorters,
+      filters,
+      groupby,
+    }
+  }
+
+  syncColumnStateFromFrontend(): void {
+    if (this._updating_column_state || this._building || this._initializing) {
+      return
+    }
+    this._updating_column_state = true
+    try {
+      const state = this.getColumnState()
+      this.model.column_widths = state.column_widths
+      this.model.hidden_columns = state.hidden_columns
+      this.model.column_order = state.column_order
+    } finally {
+      this._updating_column_state = false
+    }
+  }
+
+  setColumnWidths(): void {
+    const widths = this.model.column_widths
+    if (!widths) {
+      return
+    }
+    for (const column of this.tabulator.getColumns()) {
+      const col = column._column
+      if (col.field in widths) {
+        try {
+          this.tabulator.setColumnWidth(col.field, widths[col.field], true)
+        } catch (e) {}
+      }
+    }
+  }
+
+  setColumnOrder(): void {
+    const order = this.model.column_order
+    if (!order || order.length === 0) {
+      return
+    }
+    const current_columns = this.tabulator.getColumns()
+    const current_order: string[] = []
+    for (const col of current_columns) {
+      const field = col._column.field
+      if (field !== "_index") {
+        current_order.push(field)
+      }
+    }
+    if (JSON.stringify(current_order) === JSON.stringify(order)) {
+      return
+    }
+    try {
+      for (let i = 0; i < order.length; i++) {
+        const field = order[i]
+        this.tabulator.moveColumn(field, i + 1, true)
+      }
+    } catch (e) {}
+  }
+
+  applyActiveProfile(): void {
+    const active_name = this.model.active_profile
+    if (!active_name) {
+      return
+    }
+    const profiles = this.model.column_profiles
+    if (!profiles || !(active_name in profiles)) {
+      return
+    }
+    const profile = profiles[active_name]
+    this._updating_profile = true
+    this._updating_column_state = true
+    try {
+      if (profile.hidden_columns != null) {
+        this.model.hidden_columns = profile.hidden_columns
+        this.setHidden()
+      }
+      if (profile.column_widths != null) {
+        this.model.column_widths = profile.column_widths
+        this.setColumnWidths()
+      }
+      if (profile.column_order != null) {
+        this.model.column_order = profile.column_order
+        this.setColumnOrder()
+      }
+      if (profile.sorters != null) {
+        this.model.sorters = profile.sorters
+        this.setSorters()
+      }
+      if (profile.filters != null) {
+        this.model.filters = profile.filters
+      }
+      if (profile.groupby != null) {
+        this.model.groupby = profile.groupby
+        this.setGroupBy()
+      }
+      this.tabulator.redraw(true)
+    } finally {
+      this._updating_profile = false
+      this._updating_column_state = false
+    }
+  }
+
   setMaxPage(): void {
     this.tabulator.setMaxPage(this.model.max_page)
     if (this.tabulator.modules.page.pagesElement) {
@@ -1620,9 +1741,6 @@ export class DataTabulatorView extends HTMLBoxView {
       selected.indices = filtered
     }
     this.model.trigger_event(new SelectionEvent(indices, !includes, flush))
-    const payload = {indices: filtered, selected: !includes, mode: "row_click"}
-    const sel = this._row_selection_from_indices(filtered)
-    this._publish("row_selection", sel, payload)
     this._selection_updating = false
   }
 
@@ -1653,25 +1771,16 @@ export class DataTabulatorView extends HTMLBoxView {
       if (selected_indices.length > 0) {
         this._selection_updating = true
         this.model.trigger_event(new SelectionEvent(selected_indices, true, false))
-        const payload = {indices: selected_indices, selected: true, mode: "tabulator_select"}
-        const sel = this._row_selection_from_indices(selected_indices)
-        this._publish("row_selection", sel, payload)
       }
       if (deselected_indices.length > 0) {
         this._selection_updating = true
         this.model.trigger_event(new SelectionEvent(deselected_indices, false, false))
-        const payload = {indices: deselected_indices, selected: false, mode: "tabulator_deselect"}
-        const sel = this._row_selection_from_indices(deselected_indices)
-        this._publish("row_selection", sel, payload)
       }
     } else {
       const indices: number[] = data.map((row: any) => row._index)
       const filtered = this._filter_selected(indices)
       this._selection_updating = indices.length === filtered.length
       this.model.source.selected.indices = filtered
-      const payload = {indices: filtered, selected: filtered.length > 0, mode: "tabulator_change"}
-      const sel = this._row_selection_from_indices(filtered)
-      this._publish("row_selection", sel, payload)
     }
     this._selection_updating = false
   }
@@ -1732,8 +1841,10 @@ export namespace DataTabulator {
     cell_styles: p.Property<any>
     theme_classes: p.Property<string[]>
     container_popup: p.Property<boolean>
-    interaction_store: p.Property<InteractionStore | null>
-    interaction_fields: p.Property<string[] | null>
+    column_order: p.Property<string[]>
+    column_profiles: p.Property<any>
+    column_widths: p.Property<any>
+    active_profile: p.Property<string | null>
   }
 }
 
@@ -1781,8 +1892,10 @@ export class DataTabulator extends HTMLBox {
       cell_styles:    [ Any,                     {} ],
       theme_classes:  [ List(Str),           [] ],
       container_popup: [ Bool, true ],
-      interaction_store: [ Nullable(Ref(InteractionStore)), null ],
-      interaction_fields: [ Nullable(List(Str)), null ],
+      column_order:   [ List(Str),             [] ],
+      column_profiles:[ Any,                     {} ],
+      column_widths:  [ Any,                     {} ],
+      active_profile: [ Nullable(Str),       null ],
     }))
   }
 }

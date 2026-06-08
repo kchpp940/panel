@@ -12,7 +12,6 @@ import param
 from bokeh.models import ColumnDataSource
 from pyviz_comms import JupyterComm
 
-from ..io.interaction_store import InteractionStore
 from ..util import lazy_load, try_datetime64_to_datetime
 from ..util.checks import datetime_types, isdatetime
 from ..viewable import Layoutable
@@ -56,30 +55,6 @@ class Plotly(ModelPane):
         Plotly configuration options. See https://plotly.com/javascript/configuration-options/""")
 
     hover_data = param.Dict(doc="Hover event data from `plotly_hover` and `plotly_unhover` events.")
-
-    interaction_store = param.ClassSelector(
-        class_=InteractionStore,
-        default=None,
-        doc="""
-        An optional InteractionStore that collects hover, selection and
-        viewport events from this pane and allows cross-component linkage.
-        """,
-    )
-
-    interaction_fields = param.List(
-        default=None,
-        item_type=str,
-        allow_None=True,
-        doc="""
-        Explicit list of data-column field names that are allowed to be
-        turned into filter conditions in interaction events. When None
-        (the default), only the row-index filter is emitted so that
-        display-formatting or internal payload fields cannot leak into
-        cross-component filtering. Set to e.g. ``["x", "y", "category"]``
-        to also generate ``{field, op: \"in\", value: [...]}`` filters for
-        those columns when points or rows are selected.
-        """,
-    )
 
     link_figure = param.Boolean(default=True, doc="""
        Attach callbacks to the Plotly figure to update output when it
@@ -128,8 +103,7 @@ class Plotly(ModelPane):
         'click_data': None,
         'clickannotation_data': None,
         'hover_data': None,
-        'selected_data': None,
-        'interaction_store': None,
+        'selected_data': None
     }
 
     @classmethod
@@ -378,17 +352,7 @@ class Plotly(ModelPane):
         Plotly._bokeh_model = lazy_load(
             'panel.models.plotly', 'PlotlyPlot', isinstance(comm, JupyterComm), root
         )
-        if self.interaction_store is not None:
-            store_model = self.interaction_store.get_root(doc, comm=comm, preprocess=False)
-            self._models.setdefault(root.ref['id'] if root else store_model.ref['id'], (store_model, None))
-            props = self._get_properties(doc)
-            props['interaction_store'] = store_model
-            model = Plotly._bokeh_model(**props)
-            root = root or model
-            self._models[root.ref['id']] = (model, parent)
-            self._link_props(model, self._linked_properties, doc, root, comm)
-        else:
-            model = super()._get_model(doc, root, parent, comm)
+        model = super()._get_model(doc, root, parent, comm)
         self._register_events('plotly_event', model=model, doc=doc, comm=comm)
         return model
 

@@ -26,7 +26,6 @@ from bokeh.util.serialization import convert_datetime_array
 from param.parameterized import transform_reference
 from pyviz_comms import JupyterComm
 
-from ..io.interaction_store import InteractionStore
 from ..io.model import JSCode
 from ..io.resources import CDN_DIST, CSS_URLS
 from ..io.state import state
@@ -48,7 +47,7 @@ if t.TYPE_CHECKING:
     from pyviz_comms import Comm
 
     from ..models.tabulator import (
-        CellClickEvent, SelectionEvent, TableEditEvent,
+        CellClickEvent, ColumnProfileEvent, SelectionEvent, TableEditEvent,
     )
     from ..reactive import TDataColumn
 
@@ -1218,30 +1217,6 @@ class Tabulator(BaseTable):
         If True, popups will appear within the table container, otherwise
         popups will be appended to the body element of the DOM.""")
 
-    interaction_store = param.ClassSelector(
-        class_=InteractionStore,
-        default=None,
-        doc="""
-        An optional InteractionStore that collects row_selection and selection
-        events from this widget and allows cross-component linkage.
-        """,
-    )
-
-    interaction_fields = param.List(
-        default=None,
-        item_type=str,
-        allow_None=True,
-        doc="""
-        Explicit list of data-column field names that are allowed to be
-        turned into filter conditions in interaction events. When None
-        (the default), only the row-index filter is emitted so that
-        display-formatting or internal payload fields cannot leak into
-        cross-component filtering. Set to e.g. ``["x", "y", "category"]``
-        to also generate ``{field, op: \"in\", value: [...]}`` filters for
-        those columns when points or rows are selected.
-        """,
-    )
-
     expanded = param.List(default=[], item_type=int, nested_refs=True, doc="""
         List of expanded rows, only applicable if a row_content function
         has been defined.""")
@@ -1287,6 +1262,21 @@ class Tabulator(BaseTable):
 
     hidden_columns = param.List(default=[], item_type=str, nested_refs=True, doc="""
         List of columns to hide.""")  # type: ignore[assignment, ty:invalid-assignment]
+
+    column_order = param.List(default=[], item_type=str, nested_refs=True, doc="""
+        List of column field names defining the display order of columns.""")
+
+    column_profiles = param.Dict(default={}, nested_refs=True, doc="""
+        Dictionary mapping profile names to column configuration dictionaries.
+        Each profile may contain keys: 'hidden_columns', 'column_widths',
+        'column_order', 'sorters', 'filters', 'groupby'.""")
+
+    column_widths = param.Dict(default={}, nested_refs=True, doc="""
+        Dictionary mapping column field names to their display widths.""")
+
+    active_profile = param.String(default=None, allow_None=True, doc="""
+        The name of the currently active column profile. Setting this to a
+        profile name will apply that profile's column configuration.""")
 
     layout: t.Literal[
         'fit_data', 'fit_data_fill', 'fit_data_stretch', 'fit_data_table',
@@ -1382,7 +1372,9 @@ class Tabulator(BaseTable):
        header title.""")
 
     _data_params: t.ClassVar[list[str]] = [
-        'value', 'page', 'page_size', 'pagination', 'sorters', 'filters'
+        'value', 'page', 'page_size', 'pagination', 'sorters', 'filters',
+        'hidden_columns', 'column_widths', 'column_order', 'column_profiles',
+        'active_profile',
     ]
 
     _config_params: t.ClassVar[list[str]] = [
@@ -1399,8 +1391,7 @@ class Tabulator(BaseTable):
         'selection': None, 'row_content': None, 'row_height': None,
         'text_align': None, 'header_align': None, 'header_filters': None,
         'header_tooltips': None, 'styles': 'cell_styles',
-        'title_formatters': None, 'sortable': None, 'initial_page_size': None,
-        'interaction_store': None
+        'title_formatters': None, 'sortable': None, 'initial_page_size': None
     }
 
     # Determines the maximum size limits beyond which (local, remote)
@@ -1500,6 +1491,10 @@ class Tabulator(BaseTable):
         if event.event_name == 'selection-change':
             if self.pagination == 'remote':
                 self._update_selection(event)
+            return
+
+        if event.event_name == 'column-profile':
+            self._process_column_profile_event(event)
             return
 
         event_col = self._renamed_cols.get(event.column, event.column)
@@ -2019,19 +2014,22 @@ class Tabulator(BaseTable):
         Tabulator._widget_type = lazy_load(
             'panel.models.tabulator', 'DataTabulator', isinstance(comm, JupyterComm), root
         )
-        if self.interaction_store is not None:
-            store_model = self.interaction_store.get_root(doc, comm=comm, preprocess=False)
-            self._models.setdefault(root.ref['id'] if root else store_model.ref['id'], (store_model, None))
         model = super()._get_model(doc, root, parent, comm)
         root = root or model
-        if self.interaction_store is not None:
-            store_model = self.interaction_store.get_root(doc, comm=comm, preprocess=False)
-            model.interaction_store = store_model
         self._child_panels, removed, expanded = self._get_children()
         model.expanded = expanded
         model.children = self._get_model_children(doc, root, parent, comm)
-        self._link_props(model, ['page', 'sorters', 'expanded', 'filters', 'page_size'], doc, root, comm)
-        self._register_events('cell-click', 'table-edit', 'selection-change', model=model, doc=doc, comm=comm)
+        self._link_props(
+            model,
+            ['page', 'sorters', 'expanded', 'filters', 'page_size',
+             'hidden_columns', 'column_widths', 'column_order',
+             'column_profiles', 'active_profile'],
+            doc, root, comm,
+        )
+        self._register_events(
+            'cell-click', 'table-edit', 'selection-change', 'column-profile',
+            model=model, doc=doc, comm=comm,
+        )
         return model
 
     def _get_filter_spec(self, column: TableColumn) -> FilterSpec:
@@ -2372,3 +2370,141 @@ class Tabulator(BaseTable):
             return df
         df = self._filter_dataframe(df, header_filters=True, internal_filters=False)
         return self._sort_df(df)
+
+    def _process_column_profile_event(self, event: "ColumnProfileEvent") -> None:
+        action = event.action
+        if action == 'save':
+            name = event.name or 'default'
+            profile = event.profile or self.get_column_state()
+            self.save_profile(name, profile)
+        elif action == 'load':
+            name = event.name
+            if name:
+                self.load_profile(name)
+        elif action == 'delete':
+            name = event.name
+            if name:
+                self.delete_profile(name)
+
+    def get_column_state(self) -> dict[str, t.Any]:
+        """
+        Returns the current column view state as a dictionary.
+
+        The returned dictionary contains:
+        - ``hidden_columns``: List of hidden column field names
+        - ``column_widths``: Dict mapping field name -> pixel width
+        - ``column_order``: List of field names in display order
+        - ``sorters``: Current sort configuration
+        - ``filters``: Current filter configuration
+        - ``groupby``: Current groupby configuration
+
+        Returns
+        -------
+        dict
+            The current column state.
+        """
+        return {
+            'hidden_columns': list(self.hidden_columns),
+            'column_widths': dict(self.column_widths),
+            'column_order': list(self.column_order),
+            'sorters': [dict(s) for s in self.sorters],
+            'filters': [dict(f) for f in self.filters],
+            'groupby': list(self.groupby),
+        }
+
+    def set_column_state(self, state: dict[str, t.Any]) -> None:
+        """
+        Applies a column state dictionary to the table.
+
+        Parameters
+        ----------
+        state : dict
+            A dictionary with keys: 'hidden_columns', 'column_widths',
+            'column_order', 'sorters', 'filters', 'groupby'.
+            All keys are optional; only provided keys will be applied.
+        """
+        if 'hidden_columns' in state:
+            self.hidden_columns = list(state['hidden_columns'])
+        if 'column_widths' in state:
+            self.column_widths = dict(state['column_widths'])
+        if 'column_order' in state:
+            self.column_order = list(state['column_order'])
+        if 'sorters' in state:
+            self.sorters = [dict(s) for s in state['sorters']]
+        if 'filters' in state:
+            self.filters = [dict(f) for f in state['filters']]
+        if 'groupby' in state:
+            self.groupby = list(state['groupby'])
+
+    def save_profile(self, name: str, state: dict[str, t.Any] | None = None) -> dict[str, t.Any]:
+        """
+        Saves the current column view state (or a provided state) as a
+        named profile.
+
+        Parameters
+        ----------
+        name : str
+            The name of the profile to save.
+        state : dict, optional
+            The state to save. If not provided, the current column
+            state is captured via ``get_column_state()``.
+
+        Returns
+        -------
+        dict
+            The profile that was saved.
+        """
+        if state is None:
+            state = self.get_column_state()
+        profiles = dict(self.column_profiles)
+        profiles[name] = dict(state)
+        self.column_profiles = profiles
+        return profiles[name]
+
+    def load_profile(self, name: str) -> dict[str, t.Any] | None:
+        """
+        Loads (applies) a previously saved column view profile.
+
+        Parameters
+        ----------
+        name : str
+            The name of the profile to load.
+
+        Returns
+        -------
+        dict or None
+            The profile that was applied, or None if the profile does
+            not exist.
+        """
+        if name not in self.column_profiles:
+            return None
+        state = dict(self.column_profiles[name])
+        self.set_column_state(state)
+        self.active_profile = name
+        return state
+
+    def delete_profile(self, name: str) -> bool:
+        """
+        Deletes a saved column view profile.
+
+        If the deleted profile is the currently active one,
+        ``active_profile`` is set to None.
+
+        Parameters
+        ----------
+        name : str
+            The name of the profile to delete.
+
+        Returns
+        -------
+        bool
+            True if the profile was deleted, False if it did not exist.
+        """
+        if name not in self.column_profiles:
+            return False
+        profiles = dict(self.column_profiles)
+        del profiles[name]
+        self.column_profiles = profiles
+        if self.active_profile == name:
+            self.active_profile = None
+        return True

@@ -14,7 +14,6 @@ from bokeh.models.widgets.tables import TableColumn
 from ..config import config
 from ..io.resources import bundled_files
 from ..util import classproperty
-from .interaction_store import InteractionStore
 from .layout import HTMLBox
 
 TABULATOR_VERSION = "6.4.0"
@@ -99,6 +98,23 @@ class CellClickEvent(ModelEvent):
         )
 
 
+class ColumnProfileEvent(ModelEvent):
+
+    event_name = 'column-profile'
+
+    def __init__(self, model, action, profile=None, name=None):
+        self.action = action
+        self.profile = profile
+        self.name = name
+        super().__init__(model=model)
+
+    def __repr__(self):
+        return (
+            f'{type(self).__name__}(action={self.action}, name={self.name}, '
+            f'profile={self.profile})'
+        )
+
+
 CSS_URLS = []
 for theme in TABULATOR_THEMES:
     if theme == 'default':
@@ -154,6 +170,14 @@ class DataTabulator(HTMLBox):
 
     cell_styles = Dict(String, Either(String, Dict(Int, Dict(Int, List(Either(String, Tuple(String, String)))))))
 
+    column_order = List(String)
+
+    column_profiles = Dict(String, Any)
+
+    column_widths = Dict(String, Any)
+
+    active_profile = Nullable(String)
+
     pagination = Nullable(String)
 
     page = Nullable(Int)
@@ -171,9 +195,6 @@ class DataTabulator(HTMLBox):
     theme_classes = List(String)
 
     container_popup  = Bool(True)
-
-    interaction_store = Nullable(Instance(InteractionStore))
-    interaction_fields = Nullable(List(String))
 
     __css_raw__ = CSS_URLS
 

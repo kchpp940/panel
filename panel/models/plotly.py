@@ -10,7 +10,6 @@ from bokeh.models import ColumnDataSource, LayoutDOM
 from ..config import config
 from ..io.resources import bundled_files
 from ..util import classproperty
-from .interaction_store import InteractionStore
 
 PLOTLY_VERSION = '3.1.0'
 
@@ -77,6 +76,3 @@ class PlotlyPlot(LayoutDOM):
     viewport_update_policy = Enum( "mouseup", "continuous", "throttle")
     viewport_update_throttle = Int()
     _render_count = Int()
-
-    interaction_store = Nullable(Instance(InteractionStore))
-    interaction_fields = Nullable(List(String))

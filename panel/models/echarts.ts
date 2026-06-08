@@ -2,19 +2,9 @@ import {ModelEvent} from "@bokehjs/core/bokeh_events"
 import {div} from "@bokehjs/core/dom"
 import type * as p from "@bokehjs/core/properties"
 import type {Attrs} from "@bokehjs/core/types"
-import {Ref} from "@bokehjs/core/kinds"
 
 import {serializeEvent} from "./event-to-object"
 import {HTMLBox, HTMLBoxView} from "./layout"
-import {
-  InteractionStore,
-  type InteractionEventKind,
-  type InteractionSelection,
-  type InteractionViewport,
-  build_point_filters,
-  build_range_filters,
-  collect_fields,
-} from "./interaction_store"
 import {transformJsPlaceholders} from "./util"
 
 const mouse_events = [
@@ -55,123 +45,6 @@ export class EChartsView extends HTMLBoxView {
   _loading_interval: ReturnType<typeof setInterval> | null = null
   _loading_timeout: ReturnType<typeof setTimeout> | null = null
   _loading_el: HTMLDivElement | null = null
-
-  _publish(
-    kind: InteractionEventKind,
-    selection: InteractionSelection | null,
-    viewport: InteractionViewport | null,
-    payload: any,
-  ): void {
-    if (this.model.interaction_store == null) {
-      return
-    }
-    this.model.interaction_store.publish_event({
-      kind,
-      source: "echarts",
-      source_id: this.model.id,
-      payload,
-      selection: selection ?? undefined,
-      viewport: viewport ?? undefined,
-    })
-  }
-
-  _classify_echarts_event(name: string): InteractionEventKind {
-    const lower = name.toLowerCase()
-    if (lower.includes("mouseover") || lower.includes("mouseenter")) {
-      return "hover"
-    }
-    if (lower.includes("zoom") || lower.includes("roam") || lower.includes("timelinechanged")) {
-      return "viewport"
-    }
-    return "selection"
-  }
-
-  _normalize_selection(event_type: string, event: any): InteractionSelection | null {
-    const indices: number[] = []
-    const values: Array<{[field: string]: any}> = []
-    const ranges: {[axis: string]: [any, any]} = {}
-    if (event == null) {
-      return null
-    }
-    if (typeof event.dataIndex === "number") {
-      indices.push(event.dataIndex)
-    }
-    if (event.data != null && typeof event.data === "object") {
-      values.push({...event.data})
-    }
-    if (event.name != null) {
-      values.push({name: event.name})
-    }
-    if (event.batch != null && Array.isArray(event.batch)) {
-      for (const b of event.batch) {
-        if (b.selected != null) {
-          for (const item of b.selected) {
-            if (typeof item.dataIndex === "number") indices.push(item.dataIndex)
-            if (item.data != null) values.push({...item.data})
-          }
-        }
-      }
-    }
-    if (event.fromName != null || event.toName != null) {
-      if (Array.isArray(event.range)) {
-        ranges[event.fromName || "x"] = event.range
-      }
-    }
-    const lower = event_type.toLowerCase()
-    const is_range = (
-      lower.includes("brush") ||
-      lower.includes("axisareaselected") ||
-      (event.batch != null && event.batch.some((b: any) => b.brushType != null))
-    )
-    if (is_range && Object.keys(ranges).length === 0) {
-      if (event.areas != null && Array.isArray(event.areas)) {
-        for (const area of event.areas) {
-          if (area.coordRange != null) {
-            ranges[`area_${Object.keys(ranges).length}`] = area.coordRange
-          }
-        }
-      }
-    }
-    const dataset_id = this.model.options?.dataset?.[0]?.source?.name
-    const allowed_fields = this.model.interaction_fields
-    if (is_range || Object.keys(ranges).length > 0) {
-      const fields = collect_fields(values, Object.keys(ranges), allowed_fields)
-      const filters = build_range_filters(ranges, allowed_fields)
-      return {mode: "range", dataset_id, ranges, fields, indices, values, filters}
-    }
-    if (indices.length === 0 && values.length === 0) {
-      return null
-    }
-    const fields = collect_fields(values, [], allowed_fields)
-    const filters = build_point_filters(values, indices, allowed_fields)
-    return {mode: "point", dataset_id, indices, fields, values, filters}
-  }
-
-  _normalize_viewport(event_type: string, event: any): InteractionViewport | null {
-    const ranges: {[axis: string]: [any, any]} = {}
-    if (event == null) {
-      return null
-    }
-    if (Array.isArray(event.start) && Array.isArray(event.end)) {
-      ranges["x"] = [event.start[0], event.end[0]]
-      ranges["y"] = [event.start[1], event.end[1]]
-    }
-    if (event.batch != null && Array.isArray(event.batch)) {
-      for (const b of event.batch) {
-        if (b.startValue != null && b.endValue != null) {
-          ranges[b.zoomId || b.dataZoomId || "x"] = [b.startValue, b.endValue]
-        }
-      }
-    }
-    if (Object.keys(ranges).length === 0) {
-      return null
-    }
-    const dataset_id = this.model.options?.dataset?.[0]?.source?.name
-    const allowed_fields = this.model.interaction_fields
-    const fields = Object.keys(ranges)
-    const filters = build_range_filters(ranges, allowed_fields)
-    return {dataset_id, fields, ranges, filters}
-  }
 
   override connect_signals(): void {
     super.connect_signals()
@@ -341,15 +214,6 @@ export class EChartsView extends HTMLBoxView {
           processed.event = serializeEvent(event.event?.event)
           const serialized = JSON.parse(JSON.stringify(processed))
           this.model.trigger_event(new EChartsEvent(event_type, serialized, query))
-          const kind = this._classify_echarts_event(event_type)
-          const payload = {event: event_type, query, data: serialized}
-          if (kind === "viewport") {
-            const vp = this._normalize_viewport(event_type, serialized)
-            this._publish(kind, null, vp, payload)
-          } else {
-            const sel = this._normalize_selection(event_type, serialized)
-            this._publish(kind, sel, null, payload)
-          }
         }
         if (query != null) {
           this._chart.on(event_type, query, callback)
@@ -389,8 +253,6 @@ export namespace ECharts {
     js_events: p.Property<any>
     renderer: p.Property<string>
     theme: p.Property<string>
-    interaction_store: p.Property<InteractionStore | null>
-    interaction_fields: p.Property<string[] | null>
   }
 }
 
@@ -408,15 +270,13 @@ export class ECharts extends HTMLBox {
   static {
     this.prototype.default_view = EChartsView
 
-    this.define<ECharts.Props>(({Any, Str, Nullable, Ref, List}) => ({
+    this.define<ECharts.Props>(({Any, Str}) => ({
       data:          [ Any,           {} ],
       options:       [ Any,           {} ],
       event_config:  [ Any,           {} ],
       js_events:     [ Any,           {} ],
       theme:         [ Str,  "default"],
       renderer:      [ Str,   "canvas"],
-      interaction_store: [ Nullable(Ref(InteractionStore)), null ],
-      interaction_fields: [ Nullable(List(Str)), null ],
     }))
   }
 }

@@ -11,7 +11,6 @@ from bokeh.core.serialization import Serializer
 from bokeh.models import CustomJS
 from pyviz_comms import JupyterComm
 
-from ..io.interaction_store import InteractionStore
 from ..util import lazy_load
 from ..viewable import Viewable
 from .base import ModelPane
@@ -53,33 +52,9 @@ class ECharts(ModelPane):
         default="default", objects=["default", "light", "dark"], doc="""
        Theme to apply to plots.""")  # type: ignore[assignment, ty:invalid-assignment]
 
-    interaction_store = param.ClassSelector(
-        class_=InteractionStore,
-        default=None,
-        doc="""
-        An optional InteractionStore that collects selection, hover and
-        viewport events from this pane and allows cross-component linkage.
-        """,
-    )
-
-    interaction_fields = param.List(
-        default=None,
-        item_type=str,
-        allow_None=True,
-        doc="""
-        Explicit list of data-column field names that are allowed to be
-        turned into filter conditions in interaction events. When None
-        (the default), only the row-index filter is emitted so that
-        display-formatting or internal payload fields cannot leak into
-        cross-component filtering. Set to e.g. ``["x", "y", "category"]``
-        to also generate ``{field, op: \"in\", value: [...]}`` filters for
-        those columns when points or rows are selected.
-        """,
-    )
-
     priority: t.ClassVar[float | bool | None] = None
 
-    _rename: t.ClassVar[Mapping[str, str | None]] = {"object": "data", "interaction_store": None}
+    _rename: t.ClassVar[Mapping[str, str | None]] = {"object": "data"}
 
     _rerender_params: t.ClassVar[list[str]] = []
 
@@ -175,17 +150,7 @@ class ECharts(ModelPane):
         ECharts._bokeh_model = lazy_load(
             'panel.models.echarts', 'ECharts', isinstance(comm, JupyterComm), root
         )
-        if self.interaction_store is not None:
-            store_model = self.interaction_store.get_root(doc, comm=comm, preprocess=False)
-            self._models.setdefault(root.ref['id'] if root else store_model.ref['id'], (store_model, None))
-            props = self._get_properties(doc)
-            props['interaction_store'] = store_model
-            model = ECharts._bokeh_model(**props)
-            root = root or model
-            self._models[root.ref['id']] = (model, parent)
-            self._link_props(model, self._linked_properties, doc, root, comm)
-        else:
-            model = super()._get_model(doc, root, parent, comm)
+        model = super()._get_model(doc, root, parent, comm)
         self._register_events('echarts_event', model=model, doc=doc, comm=comm)
         return model
 
