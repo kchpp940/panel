@@ -129,6 +129,17 @@ class Layoutable(param.Parameterized):
         Can be useful for templating or for storing metadata on
         the model.""")  # type: ignore[assignment, ty:invalid-assignment]
 
+    snapshot_key = param.String(default=None, allow_None=True, doc="""
+        A user-assigned stable identifier used by
+        ``state.snapshot()`` / ``state.restore_snapshot()``.
+
+        When set, this key takes priority over the automatically
+        generated structural key and remains stable across layout
+        reordering and across sessions. Components without an explicit
+        ``snapshot_key`` will still be snapshotted under an
+        auto-generated structural key (valid only within the same
+        root/layout).""")
+
     width = param.Integer(default=None, bounds=(0, None), doc="""
         The width of the component (in pixels). This can be either
         fixed or preferred width, depending on width sizing policy.""")
@@ -313,6 +324,40 @@ class Layoutable(param.Parameterized):
         if 'design' not in params and self.param.design.default is None:
             params['design'] = config.design
         super().__init__(**params)
+
+    # ------------------------------------------------------------------
+    # Snapshot protocol (per-component hooks)
+    #
+    # Components with rich interactive state (Plotly viewport, Tabulator
+    # sorting/filtering/selection, Vega signals, etc.) can override
+    # these two hooks to expose that state through the unified
+    # ``state.snapshot()`` / ``state.restore_snapshot()`` API.
+    #
+    # ``_get_snapshot_state()`` returns a JSON-serialisable dict (or
+    # ``None`` to fall back to the default param-based collector).
+    # ``_apply_snapshot_state(data)`` receives whatever the collector
+    # returned and should restore the component's state.
+    # ------------------------------------------------------------------
+
+    def _get_snapshot_state(self) -> dict[str, t.Any] | None:
+        """
+        Return the component-specific snapshot data, or ``None`` to use
+        the default param-based collector.
+
+        Subclasses that have non-param interactive state (plot viewport,
+        table selection/sort/filter, etc.) should override this method.
+        """
+        return None
+
+    def _apply_snapshot_state(self, data: dict[str, t.Any]) -> None:
+        """
+        Apply component-specific snapshot data previously produced by
+        :meth:`_get_snapshot_state`.
+
+        The default implementation ignores the data; subclasses that
+        override :meth:`_get_snapshot_state` must also override this.
+        """
+        return None
 
 
 class ServableMixin:
@@ -731,12 +776,6 @@ class Viewable(Renderable, Layoutable, ServableMixin):
     loading = param.Boolean(doc="""
         Whether or not the Viewable is loading. If True a loading spinner
         is shown on top of the Viewable.""")
-
-    snapshot_key = param.String(default=None, allow_None=True, doc="""
-        A unique key used to identify this component in state snapshots.
-        If None (default), this component will not be included in
-        state.snapshot() output. Set to a string to opt into
-        snapshot collection and restoration.""")
 
     _preprocessing_hooks: t.ClassVar[list[Callable[[Viewable, Model], None]]] = []
 

@@ -286,6 +286,13 @@ def _collect_params_for(obj: Viewable) -> dict[str, t.Any]:
         _try_serialize("active")
         return out
 
+    from ..pane.base import PaneBase
+
+    if isinstance(obj, PaneBase):
+        for pname in ("object", "disabled", "visible"):
+            _try_serialize(pname)
+        return out
+
     _try_serialize("value")
 
     for pname in ("active", "disabled", "visible", "options"):
@@ -372,20 +379,39 @@ def collect_state(root: t.Any = None, *extra_roots: t.Any) -> dict[str, t.Any]:
     used_structural: set[str] = set()
 
     for comp, comp_root, path in _iter_component_tree(roots):
+        # 1) Try the per-component snapshot hook (Plotly/Tabulator/Vega/... custom state)
+        custom_state: dict[str, t.Any] | None = None
+        try:
+            hook_result = comp._get_snapshot_state()
+            if isinstance(hook_result, dict):
+                # Ensure the custom payload is JSON-serialisable; if not, discard
+                # fall back silently so the snapshot remains valid.
+                json.dumps(hook_result)
+                custom_state = hook_result
+        except Exception:
+            custom_state = None
+
+        # 2) Fallback/default param-based collector (value, active, ...)
         params = _collect_params_for(comp)
-        if not params:
+
+        if not params and custom_state is None:
             continue
+
+        entry: dict[str, t.Any] = {
+            "type": type(comp).__name__,
+        }
+        if custom_state is not None:
+            entry["custom"] = custom_state
+        if params:
+            entry["params"] = params
 
         explicit_key = getattr(comp, "snapshot_key", None)
         if isinstance(explicit_key, str) and explicit_key and explicit_key not in used_explicit:
             used_explicit.add(explicit_key)
             skey = _structural_key(comp, comp_root, path)
-            snapshot["components"][explicit_key] = {
-                "type": type(comp).__name__,
-                "key_source": "explicit",
-                "structural_key": skey,
-                "params": params,
-            }
+            entry["key_source"] = "explicit"
+            entry["structural_key"] = skey
+            snapshot["components"][explicit_key] = entry
             used_structural.add(skey)
             continue
 
@@ -393,11 +419,8 @@ def collect_state(root: t.Any = None, *extra_roots: t.Any) -> dict[str, t.Any]:
         if skey in used_structural:
             continue
         used_structural.add(skey)
-        snapshot["components"][skey] = {
-            "type": type(comp).__name__,
-            "key_source": "structural",
-            "params": params,
-        }
+        entry["key_source"] = "structural"
+        snapshot["components"][skey] = entry
 
     loc = state.location
     if loc is not None:
@@ -497,6 +520,7 @@ def apply_state(
 
         key_source = info.get("key_source", "explicit")
         params = info.get("params", {})
+        custom = info.get("custom")
 
         obj: Viewable | None = None
         if key_source == "explicit":
@@ -513,11 +537,24 @@ def apply_state(
             continue
 
         try:
+            applied_any = False
+            # 1) Component-specific snapshot hook (viewport, selection, ...)
+            if isinstance(custom, dict):
+                try:
+                    obj._apply_snapshot_state(custom)
+                    applied_any = True
+                except Exception:
+                    pass
+            # 2) Default param-based restore (value, active, ...)
             updates = _deserialize_params_for(obj, params)
             if updates:
                 with edit_readonly(obj):
                     obj.param.update(**updates)
-            result["applied"].append(key)
+                applied_any = True
+            if applied_any:
+                result["applied"].append(key)
+            else:
+                result["failed"].append(key)
         except Exception:
             result["failed"].append(key)
 
