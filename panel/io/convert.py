@@ -308,6 +308,119 @@ def _is_remote_url(path: str) -> bool:
     return parsed.scheme in ('http', 'https')
 
 
+_STATIC_EXTS = {
+    '.js', '.mjs', '.css', '.wasm', '.data', '.whl', '.zip',
+    '.png', '.jpg', '.jpeg', '.gif', '.svg', '.ico', '.webp',
+    '.woff', '.woff2', '.ttf', '.otf', '.eot',
+    '.json', '.map', '.csv', '.parquet', '.arrow',
+}
+
+_KNOWN_STATIC_HOSTS = (
+    'cdn.holoviz.org',
+    'cdn.bokeh.org',
+    'pyscript.net',
+    'cdn.jsdelivr.net',
+    'unpkg.com',
+    'cdnjs.cloudflare.com',
+    'cdn.jsdelivr.net',
+)
+
+
+def _is_static_resource_url(url: str) -> bool:
+    """
+    Decide whether a URL found in source code references a static asset
+    (wheel, JS, CSS, image, zip archive) vs. a business API endpoint.
+
+    Used when scanning workers so that we do not flag legitimate REST /
+    RPC calls as missing assets.
+    """
+    stripped = url.strip().strip("'\"`")
+    if not stripped:
+        return False
+    if stripped.startswith(('http://', 'https://', '//', './', '/', '../')):
+        parsed = urlparse(stripped)
+        ext = pathlib.Path(parsed.path).suffix.lower()
+        if ext in _STATIC_EXTS:
+            return True
+        if parsed.netloc and parsed.netloc.endswith(_KNOWN_STATIC_HOSTS):
+            return True
+        return False
+    # Relative path or bare filename with extension
+    if '/' in stripped or stripped.startswith('.'):
+        ext = pathlib.Path(urlparse(stripped).path).suffix.lower()
+        return ext in _STATIC_EXTS
+    # Bare name – could be a wheel name in micropip.install([...])
+    # Only treat as static if it has a static extension or looks like a wheel
+    if stripped.endswith('.whl'):
+        return True
+    return False
+
+
+_IMPORT_SCRIPTS_RE = re.compile(r'importScripts\s*\(\s*([^)]+)\s*\)')
+_MICROPIP_INSTALL_RE = re.compile(
+    r'micropip\.install\s*\(\s*(\[[^\]]*\]|[^)]+)\s*\)'
+)
+_FETCH_RE = re.compile(r'fetch\s*\(\s*([^,)]+)')
+_QUOTED_STR_RE = re.compile(r'''["']([^"']+)["']''')
+
+
+def _scan_worker_for_static_urls(
+    text: str,
+    worker_filename: str,
+) -> list[tuple[str, str]]:
+    """
+    Scan a worker JS/PY file for URLs that reference static assets.
+    Returns list of (url, context) where context describes where the URL
+    was found (importScripts / micropip.install / fetch / string-literal).
+    """
+    results: list[tuple[str, str]] = []
+    seen: set[str] = set()
+
+    def _add(url: str, ctx: str) -> None:
+        u = url.strip().strip("'\"`")
+        if not u or u in seen or not _is_static_resource_url(u):
+            return
+        seen.add(u)
+        results.append((u, ctx))
+
+    for m in _IMPORT_SCRIPTS_RE.finditer(text):
+        for inner in _QUOTED_STR_RE.findall(m.group(1)):
+            _add(inner, f'{worker_filename}:importScripts')
+        for raw in m.group(1).split(','):
+            _add(raw, f'{worker_filename}:importScripts')
+
+    for m in _MICROPIP_INSTALL_RE.finditer(text):
+        arg = m.group(1).strip()
+        for inner in _QUOTED_STR_RE.findall(arg):
+            _add(inner, f'{worker_filename}:micropip.install')
+        # Also try to split comma-separated list items
+        for item in re.split(r'[,\s]+', arg.strip('[] \t\n')):
+            if item:
+                _add(item, f'{worker_filename}:micropip.install')
+
+    for m in _FETCH_RE.finditer(text):
+        arg = m.group(1).strip()
+        for inner in _QUOTED_STR_RE.findall(arg):
+            _add(inner, f'{worker_filename}:fetch')
+        _add(arg, f'{worker_filename}:fetch')
+
+    # Catch-all: http(s) URLs in string literals (already static by nature)
+    for m in _URL_RE.finditer(text):
+        _add(m.group(0), f'{worker_filename}:string-literal')
+
+    # Catch-all: all quoted strings that look like static resource paths
+    for m in _QUOTED_STR_RE.finditer(text):
+        s = m.group(1)
+        if s.startswith(('http://', 'https://', '//', './', '/', '../')):
+            _add(s, f'{worker_filename}:string-literal')
+        elif '/' in s or s.startswith('.'):
+            _add(s, f'{worker_filename}:string-literal')
+        elif s.endswith('.whl'):
+            _add(s, f'{worker_filename}:string-literal')
+
+    return results
+
+
 def _classify_resource_type(path: str) -> t.Literal['js', 'css', 'image', 'font', 'other']:
     ext = pathlib.Path(urlparse(path).path).suffix.lower()
     if ext in ('.js', '.mjs'):
@@ -464,7 +577,8 @@ def _collect_resources_into_manifest(
 
     component_resources: dict[str, tuple[ManifestOrigin, str]] = {}
 
-    for model_id, model in document.models.items():
+    for model in document.models:
+        model_id = model.id
         mcls = type(model)
         cls_name = mcls.__name__
         owner_prefix = f'{cls_name}#{model_id}'
@@ -848,6 +962,95 @@ def _validate_manifest_vs_output(
         for e in manifest.entries:
             if e.local_path and e.local_path in sw_precache and e.cache_policy != 'precache':
                 e.cache_policy = 'precache'
+
+    all_worker_entries = [
+        e for e in manifest.entries
+        if e.category == 'service-worker'
+        or (e.local_path and (
+            e.local_path.endswith('.js') and 'worker' in e.local_path.lower()
+        ))
+        or (e.local_path and e.local_path.endswith('.py') and e.origin == 'app-worker')
+    ]
+    for wk_e in all_worker_entries:
+        if not wk_e.local_path:
+            continue
+        wk_path = dest / wk_e.local_path
+        if not wk_path.is_file():
+            continue
+        try:
+            wk_text = wk_path.read_text(encoding='utf-8')
+        except OSError:
+            continue
+
+        found_urls = _scan_worker_for_static_urls(wk_text, wk_e.local_path)
+        for url, ctx in found_urls:
+            is_remote = _is_remote_url(url)
+            matched: ManifestEntry | None = None
+            for e in manifest.entries:
+                if e.remote_url and (url in e.remote_url or e.remote_url in url):
+                    matched = e
+                    break
+                if e.local_path:
+                    url_basename = os.path.basename(urlparse(url).path)
+                    lp_basename = os.path.basename(e.local_path)
+                    if url_basename and lp_basename and url_basename == lp_basename:
+                        matched = e
+                        break
+                    if e.local_path == url or url.endswith('/' + e.local_path):
+                        matched = e
+                        break
+                if e.note and e.note in url:
+                    matched = e
+                    break
+
+            if matched is None:
+                cat = _url_to_category(url)
+                issues.append(DiagnosticIssue(
+                    severity='warning' if is_remote else 'info',
+                    category='inconsistency',
+                    resource=url,
+                    message=(
+                        f'Static resource {url!r} referenced by worker context `{ctx}` '
+                        f'but not tracked by manifest; may leak to network'
+                    ),
+                    page=wk_e.page,
+                    origin='worker-scan',
+                    owner=ctx,
+                ))
+                untracked_entry = ManifestEntry(
+                    page=wk_e.page,
+                    category=cat,
+                    origin='unknown',
+                    owner=ctx,
+                    local_path=None if is_remote else url,
+                    remote_url=url if is_remote else None,
+                    cache_policy='runtime-only',
+                    localized=False,
+                    note=f'Found in worker: {ctx}',
+                    failure_reason='not tracked by manifest; discovered during worker scan',
+                )
+                manifest.add(untracked_entry)
+                continue
+
+            if is_remote and matched.remote_url and matched.cache_policy == 'precache' and not matched.localized:
+                issues.append(DiagnosticIssue(
+                    severity='error',
+                    category='inconsistency',
+                    resource=matched.display_name,
+                    message=(
+                        f'Worker {wk_e.local_path!r} still references remote URL {url!r} '
+                        f'(via {ctx}); manifest marks cache_policy=precache but URL was not rewritten'
+                    ),
+                    page=wk_e.page,
+                    origin=matched.origin,
+                    owner=matched.owner,
+                ))
+
+            if is_remote and matched.remote_url and not matched.remote_url.startswith('emfs:'):
+                if not matched.failure_reason:
+                    matched.failure_reason = (
+                        f'still referenced as remote URL in worker via {ctx}'
+                    )
 
     return issues
 
