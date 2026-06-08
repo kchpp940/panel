@@ -419,6 +419,7 @@ export class DataTabulatorView extends HTMLBoxView {
   _profile_name_input: HTMLInputElement | null = null
   _profile_save_btn: HTMLButtonElement | null = null
   _profile_delete_btn: HTMLButtonElement | null = null
+  _profile_groupby_select: HTMLSelectElement | null = null
 
   override connect_signals(): void {
     super.connect_signals()
@@ -436,6 +437,7 @@ export class DataTabulatorView extends HTMLBoxView {
     this.on_change(groupby, debounce(() => {
       this.invalidate_render()
       this.syncColumnStateFromFrontend()
+      this.renderProfileToolbar()
     }, 20, false))
 
     this.on_change(column_profiles, () => {
@@ -887,6 +889,7 @@ export class DataTabulatorView extends HTMLBoxView {
     }
     this._initializing = this._building = false
     this.syncColumnStateFromFrontend()
+    this.renderProfileToolbar()
     if (this.model.active_profile) {
       this.applyActiveProfile()
     }
@@ -1655,6 +1658,7 @@ export class DataTabulatorView extends HTMLBoxView {
         this.setGroupBy()
       }
       this.tabulator.redraw(true)
+      this.renderProfileToolbar()
     } finally {
       this._updating_profile = false
       this._updating_column_state = false
@@ -1674,6 +1678,47 @@ export class DataTabulatorView extends HTMLBoxView {
     toolbar.style.fontSize = "12px"
     toolbar.style.minHeight = "0"
     toolbar.style.flex = "0 0 auto"
+    toolbar.style.flexWrap = "wrap"
+
+    const groupby_label = document.createElement("span")
+    groupby_label.textContent = "Group by:"
+    groupby_label.style.color = "var(--text-secondary, #666)"
+    toolbar.appendChild(groupby_label)
+
+    const groupby_select = document.createElement("select")
+    groupby_select.multiple = true
+    groupby_select.className = "pnx-tabulator-profile-groupby"
+    groupby_select.style.padding = "2px 4px"
+    groupby_select.style.border = "1px solid var(--border-subtle, #ccc)"
+    groupby_select.style.borderRadius = "4px"
+    groupby_select.style.background = "var(--background, #fff)"
+    groupby_select.style.color = "var(--text, #333)"
+    groupby_select.style.minWidth = "160px"
+    groupby_select.style.maxHeight = "60px"
+    groupby_select.title = "Hold Ctrl/Cmd to select multiple columns"
+    groupby_select.addEventListener("change", () => {
+      const selected: string[] = []
+      for (const opt of Array.from(groupby_select.selectedOptions)) {
+        selected.push(opt.value)
+      }
+      this._updating_column_state = true
+      try {
+        this.model.groupby = selected
+      } finally {
+        this._updating_column_state = false
+      }
+      this.setGroupBy()
+      this.syncColumnStateFromFrontend()
+    })
+    this._profile_groupby_select = groupby_select
+    toolbar.appendChild(groupby_select)
+
+    const sep = document.createElement("div")
+    sep.style.width = "1px"
+    sep.style.height = "18px"
+    sep.style.background = "var(--border-subtle, #ddd)"
+    sep.style.margin = "0 4px"
+    toolbar.appendChild(sep)
 
     const label = document.createElement("span")
     label.textContent = "Profile:"
@@ -1778,6 +1823,30 @@ export class DataTabulatorView extends HTMLBoxView {
       select.value = current
     } else {
       select.value = ""
+    }
+
+    const groupby_select = this._profile_groupby_select
+    if (groupby_select && this.tabulator && this.tabulator.getColumns) {
+      const current_groupby = new Set(this.model.groupby || [])
+      const columns = this.tabulator.getColumns()
+      const selected_values: string[] = []
+      for (const opt of Array.from(groupby_select.selectedOptions)) {
+        selected_values.push(opt.value)
+      }
+      groupby_select.innerHTML = ""
+      for (const column of columns) {
+        const col = column._column
+        if (col.field == "_index") {
+          continue
+        }
+        const opt = document.createElement("option")
+        opt.value = col.field
+        opt.textContent = col.title || col.field
+        if (current_groupby.has(col.field)) {
+          opt.selected = true
+        }
+        groupby_select.appendChild(opt)
+      }
     }
   }
 
