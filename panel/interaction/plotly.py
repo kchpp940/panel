@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import typing as t
 
-from .base import AdapterEvent, InteractionAdapter
+from .base import AdapterEvent, InteractionAdapter, StandardEvent
 
 if t.TYPE_CHECKING:
     from ..pane.plotly import Plotly
@@ -12,11 +12,26 @@ class PlotlyAdapter(InteractionAdapter):
     """
     Interaction adapter for Plotly panes.
 
-    Handles plotly_event messages (click, hover, selected, relayout,
-    restyle, etc.) and extracts selection, viewport and payload.
+    **Owns the entire plotly_event handling flow:**
+      * Updates ``{event}_data`` on the component
+      * Extracts normalized ``selection`` / ``viewport`` / ``payload``
+      * Fires the legacy ``FigureWidget._handler_js2py_pointsCallback``
+        when the wrapped object is a FigureWidget
     """
 
     _event_names: tuple[str, ...] = ('plotly_event',)
+
+    _KIND_MAP: dict[str, str] = {
+        'click': 'point_click',
+        'doubleclick': 'point_doubleclick',
+        'clickannotation': 'annotation_click',
+        'hover': 'point_hover',
+        'unhover': 'point_leave',
+        'selected': 'selection',
+        'deselect': 'deselect',
+        'relayout': 'viewport_change',
+        'restyle': 'style_change',
+    }
 
     def __init__(
         self,
@@ -26,16 +41,6 @@ class PlotlyAdapter(InteractionAdapter):
         store=None,
     ) -> None:
         super().__init__(component, source_id, dataset_id, store)
-
-    _KIND_MAP: dict[str, str] = {
-        'click': 'point_click',
-        'doubleclick': 'point_doubleclick',
-        'clickannotation': 'annotation_click',
-        'hover': 'point_hover',
-        'selected': 'selection',
-        'relayout': 'viewport_change',
-        'restyle': 'style_change',
-    }
 
     def get_kind(self, event: AdapterEvent) -> str:
         raw = event.raw
@@ -99,6 +104,59 @@ class PlotlyAdapter(InteractionAdapter):
 
         return selection
 
+    def _extract_points_object(self, data: dict[str, t.Any]) -> dict[str, t.Any] | None:
+        """
+        Build the legacy points_object dict consumed by
+        FigureWidget._handler_js2py_pointsCallback.
+        """
+        if not data or 'points' not in data:
+            return None
+        points = data['points']
+        if not points:
+            return None
+
+        has_nested = all('pointNumbers' in (p or {}) for p in points)
+        has_z = points[0] is not None and 'z' in points[0]
+
+        points_object: dict[str, t.Any] = {
+            'trace_indexes': [],
+            'point_indexes': [],
+            'xs': [],
+            'ys': [],
+        }
+        if has_z:
+            points_object['zs'] = []
+
+        num_point_numbers = 0
+        if has_nested:
+            for point_obj in points:
+                n = len(point_obj.get('pointNumbers', []))
+                num_point_numbers += n
+                for i in range(n):
+                    points_object['point_indexes'].append(point_obj['pointNumbers'][i])
+                    points_object['xs'].append(point_obj.get('x'))
+                    points_object['ys'].append(point_obj.get('y'))
+                    points_object['trace_indexes'].append(point_obj['curveNumber'])
+                    if has_z and 'z' in point_obj:
+                        points_object['zs'].append(point_obj.get('z'))
+            single_trace = True
+            for i in range(1, num_point_numbers):
+                if points_object['trace_indexes'][i - 1] != points_object['trace_indexes'][i]:
+                    single_trace = False
+                    break
+            if single_trace:
+                points_object['point_indexes'].sort()
+        else:
+            for point_obj in points:
+                points_object['trace_indexes'].append(point_obj['curveNumber'])
+                points_object['point_indexes'].append(point_obj['pointNumber'])
+                points_object['xs'].append(point_obj.get('x'))
+                points_object['ys'].append(point_obj.get('y'))
+                if has_z and 'z' in point_obj:
+                    points_object['zs'].append(point_obj.get('z'))
+
+        return points_object
+
     def _extract_viewport(self, data: dict[str, t.Any] | None) -> dict[str, t.Any] | None:
         if not data:
             return None
@@ -121,21 +179,53 @@ class PlotlyAdapter(InteractionAdapter):
             etype = ''
             data = raw
 
-        result: dict[str, t.Any] = {}
+        result: dict[str, t.Any] = {'event_type': etype, 'raw_data': data}
 
         if etype in ('click', 'doubleclick', 'hover', 'selected') and data is not None:
             selection = self._extract_points(data)
             if selection:
                 result['selection'] = selection
+            points_object = self._extract_points_object(data)
+            if points_object:
+                result['_points_object'] = points_object
 
         if etype in ('relayout', 'restyle'):
             viewport = self._extract_viewport(data)
             if viewport:
                 result['viewport'] = viewport
 
-        result['event_type'] = etype
-        result['raw_data'] = data
         return result
+
+    def on_standardized_event(self, event: StandardEvent, raw: AdapterEvent) -> None:
+        comp = self._component
+        etype = event.payload.get('event_type', '')
+        data = event.payload.get('raw_data')
+
+        if etype:
+            pname = f'{etype}_data'
+            if hasattr(comp, pname):
+                if getattr(comp, pname) == data:
+                    comp.param.trigger(pname)
+                else:
+                    comp.param.update(**{pname: data})
+
+        if data is None or not hasattr(comp.object, '_handler_js2py_pointsCallback'):
+            return
+
+        points_object = event.payload.get('_points_object')
+        if not points_object:
+            return
+
+        comp._figure._handler_js2py_pointsCallback(
+            {
+                'new': dict(
+                    event_type=f'plotly_{etype}',
+                    points=points_object,
+                    selector=(event.selection or {}).get('selector'),
+                    device_state=(event.selection or {}).get('device_state'),
+                )
+            }
+        )
 
     def register_events(self, model, doc, comm=None) -> None:
         self._component._register_events('plotly_event', model=model, doc=doc, comm=comm)

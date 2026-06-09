@@ -44,24 +44,77 @@ class AdapterEvent:
 
 class InteractionStore:
     """
-    Central store for interaction events, providing event normalization,
-    subscription, and filter generation.
+    Central singleton store for interaction events.
+
+    Provides global publish/subscribe, last-event lookup, and shared
+    filter generation logic. Use ``InteractionStore.instance()`` to
+    obtain the process-wide singleton.
     """
+
+    _instance: InteractionStore | None = None
 
     def __init__(self) -> None:
         self._subscribers: list[Callable[[StandardEvent], None]] = []
+        self._source_subscribers: dict[str, list[Callable[[StandardEvent], None]]] = {}
+        self._kind_subscribers: dict[str, list[Callable[[StandardEvent], None]]] = {}
         self._last_events: dict[str, StandardEvent] = {}
+        self._last_by_source: dict[str, StandardEvent] = {}
 
-    def subscribe(self, callback: Callable[[StandardEvent], None]) -> None:
+    @classmethod
+    def instance(cls) -> InteractionStore:
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
+
+    def subscribe(
+        self,
+        callback: Callable[[StandardEvent], None],
+        *,
+        source_id: str | None = None,
+        kind: str | None = None,
+    ) -> None:
+        if source_id is not None:
+            self._source_subscribers.setdefault(source_id, []).append(callback)
+            return
+        if kind is not None:
+            self._kind_subscribers.setdefault(kind, []).append(callback)
+            return
         self._subscribers.append(callback)
 
-    def unsubscribe(self, callback: Callable[[StandardEvent], None]) -> None:
+    def unsubscribe(
+        self,
+        callback: Callable[[StandardEvent], None],
+        *,
+        source_id: str | None = None,
+        kind: str | None = None,
+    ) -> None:
+        if source_id is not None:
+            lst = self._source_subscribers.get(source_id, [])
+            if callback in lst:
+                lst.remove(callback)
+            return
+        if kind is not None:
+            lst = self._kind_subscribers.get(kind, [])
+            if callback in lst:
+                lst.remove(callback)
+            return
         if callback in self._subscribers:
             self._subscribers.remove(callback)
 
     def publish(self, event: StandardEvent) -> None:
         self._last_events[event.kind] = event
-        for subscriber in self._subscribers:
+        self._last_by_source[event.source_id] = event
+        for subscriber in list(self._subscribers):
+            try:
+                subscriber(event)
+            except Exception:
+                pass
+        for subscriber in list(self._source_subscribers.get(event.source_id, [])):
+            try:
+                subscriber(event)
+            except Exception:
+                pass
+        for subscriber in list(self._kind_subscribers.get(event.kind, [])):
             try:
                 subscriber(event)
             except Exception:
@@ -69,6 +122,9 @@ class InteractionStore:
 
     def get_last(self, kind: str) -> StandardEvent | None:
         return self._last_events.get(kind)
+
+    def get_last_by_source(self, source_id: str) -> StandardEvent | None:
+        return self._last_by_source.get(source_id)
 
     @staticmethod
     def generate_filters(selection: dict[str, t.Any] | None) -> list[dict[str, t.Any]]:
@@ -109,13 +165,25 @@ class InteractionAdapter(ABC):
     """
     Abstract base class for component interaction adapters.
 
-    Subclasses only need to implement ``extract_payload`` and
-    optionally ``event_names``; the shared logic for kind/source_id/
-    dataset_id/selection/viewport/filters generation lives here.
+    **Event flow contract:**
+      1. Component's ``_process_event`` calls ``adapter.handle_event(raw_event)``.
+      2. ``handle_event`` wraps the raw event in an ``AdapterEvent``.
+      3. ``standardize`` runs: ``extract_payload`` (subclass) -> fill
+         ``kind``/``source_id``/``dataset_id``/``selection``/``viewport``/``filters``.
+      4. ``on_standardized_event`` (subclass hook) is called with the
+         ``StandardEvent`` — this is where the component's legacy logic
+         should live (e.g. updating ``self.selection``, invoking user
+         callbacks, FigureWidget point handlers).
+      5. The event is published to the global ``InteractionStore``.
+
+    Subclasses only implement:
+      * ``extract_payload`` — pull selection / viewport / component-specific
+        fields out of the raw event.
+      * ``on_standardized_event`` (optional) — any per-component side
+        effects that must run after standardization.
     """
 
     _event_names: tuple[str, ...] = ()
-    _store: InteractionStore | None = None
 
     def __init__(
         self,
@@ -127,17 +195,15 @@ class InteractionAdapter(ABC):
         self._component = component
         self._source_id = source_id or getattr(component, 'name', None) or f'{type(component).__name__}-{id(component)}'
         self._dataset_id = dataset_id
-        self._store = store or self._default_store()
-
-    @classmethod
-    def _default_store(cls) -> InteractionStore:
-        if cls._store is None:
-            cls._store = InteractionStore()
-        return cls._store
+        self._store = store or InteractionStore.instance()
 
     @property
     def store(self) -> InteractionStore:
         return self._store
+
+    @property
+    def component(self) -> t.Any:
+        return self._component
 
     @property
     def event_names(self) -> tuple[str, ...]:
@@ -148,17 +214,16 @@ class InteractionAdapter(ABC):
         """
         Extract component-specific payload from a raw event.
 
-        Must return a dict that may include any of:
-          - selection: dict describing the user's selection
-          - viewport:  dict describing the current viewport/range
-          - filters:   list of filter dicts (if already computed)
-          - plus any component-specific fields under ``payload``
+        Return a dict that may contain:
+          * ``selection`` — normalized selection dict
+          * ``viewport`` — viewport / range dict
+          * ``filters`` — pre-computed filter list (optional, otherwise
+            ``InteractionStore.generate_filters`` is used)
+          * any additional component-specific fields — these end up in
+            ``StandardEvent.payload``
         """
 
     def get_kind(self, event: AdapterEvent) -> str:
-        """
-        Map the raw event name to a normalized kind.
-        """
         return event.event_name
 
     def get_source_id(self, event: AdapterEvent) -> str:
@@ -169,7 +234,12 @@ class InteractionAdapter(ABC):
 
     def standardize(self, event: AdapterEvent) -> StandardEvent:
         """
-        Convert a raw event into a StandardEvent using shared logic.
+        Convert a raw event into a ``StandardEvent``.
+
+        Shared logic for ``kind``/``source_id``/``dataset_id``/
+        ``selection``/``viewport``/``filters`` lives here; subclasses
+        only contribute via ``extract_payload`` and the optional
+        mapping hooks.
         """
         extracted = self.extract_payload(event)
         selection = extracted.pop('selection', None)
@@ -189,10 +259,42 @@ class InteractionAdapter(ABC):
             payload=extracted,
         )
 
-    def process_event(self, event: AdapterEvent) -> StandardEvent:
-        standardized = self.standardize(event)
+    def on_standardized_event(self, event: StandardEvent, raw: AdapterEvent) -> None:
+        """
+        Hook invoked after standardization but *before* publishing.
+
+        Override in subclasses to execute component-specific legacy
+        logic (e.g. updating component parameters, invoking user
+        callbacks). The default implementation is a no-op.
+        """
+
+    def handle_event(
+        self,
+        raw_event: t.Any,
+        event_name: str | None = None,
+    ) -> StandardEvent:
+        """
+        Main entry point — the component's ``_process_event`` should
+        delegate to this method.
+
+        Flow: wrap → standardize → ``on_standardized_event`` hook →
+        publish to ``InteractionStore``.
+        """
+        name = event_name or getattr(raw_event, 'event_name', 'unknown')
+        adapter_event = AdapterEvent(
+            event_name=name, raw=raw_event, source=self._component
+        )
+        standardized = self.standardize(adapter_event)
+        self.on_standardized_event(standardized, adapter_event)
         self._store.publish(standardized)
         return standardized
+
+    def __call__(
+        self,
+        raw_event: t.Any,
+        event_name: str | None = None,
+    ) -> StandardEvent:
+        return self.handle_event(raw_event, event_name)
 
     def register_events(
         self,
@@ -200,20 +302,7 @@ class InteractionAdapter(ABC):
         doc: Document,
         comm: Comm | None = None,
     ) -> None:
-        """
-        Register adapter event listeners on the underlying Bokeh model.
-
-        The default implementation delegates to the component's
-        ``_register_events`` method; subclasses may override.
-        """
         if hasattr(self._component, '_register_events'):
             self._component._register_events(
                 *self.event_names, model=model, doc=doc, comm=comm
             )
-
-    def __call__(self, raw_event: t.Any, event_name: str | None = None) -> StandardEvent:
-        name = event_name or getattr(raw_event, 'event_name', 'unknown')
-        adapter_event = AdapterEvent(
-            event_name=name, raw=raw_event, source=self._component
-        )
-        return self.process_event(adapter_event)

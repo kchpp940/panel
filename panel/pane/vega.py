@@ -414,17 +414,7 @@ class Vega(ModelPane):
         return sources
 
     def _process_event(self, event):
-        name = event.data['type']
-        stype = self._selections.get(name)
-        value = event.data['value']
-        if stype != 'interval':
-            value = list(value)
-        self.selection.param.update(**{name: value})
-
-        try:
-            self.interaction_adapter(event, event_name='vega_event')
-        except Exception:
-            pass
+        self.interaction_adapter.handle_event(event, event_name='vega_event')
 
     def _process_param_change(self, params):
         props = super()._process_param_change(params)

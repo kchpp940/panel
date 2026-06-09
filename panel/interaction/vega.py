@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import typing as t
 
-from .base import AdapterEvent, InteractionAdapter
+from .base import AdapterEvent, InteractionAdapter, StandardEvent
 
 if t.TYPE_CHECKING:
     from ..pane.vega import Vega
@@ -12,8 +12,9 @@ class VegaAdapter(InteractionAdapter):
     """
     Interaction adapter for Vega/Vega-Lite panes.
 
-    Handles vega_event messages representing selections (point or
-    interval) and extracts selection, viewport and payload.
+    **Owns the entire vega_event handling flow:**
+      * Normalizes interval vs point selections
+      * Updates the component's ``selection`` Parameterized object
     """
 
     _event_names: tuple[str, ...] = ('vega_event',)
@@ -85,12 +86,27 @@ class VegaAdapter(InteractionAdapter):
             name = ''
             value = raw
 
-        result: dict[str, t.Any] = {'selection_name': name}
+        result: dict[str, t.Any] = {'selection_name': name, 'raw_value': value}
         selection = self._extract_selection(name, value)
         if selection:
             result['selection'] = selection
-        result['raw_value'] = value
         return result
+
+    def on_standardized_event(self, event: StandardEvent, raw: AdapterEvent) -> None:
+        comp = self._component
+        name = event.payload.get('selection_name', '')
+        value = event.payload.get('raw_value')
+        if not name:
+            return
+        if not hasattr(comp.selection.param, name):
+            return
+        stype = getattr(comp, '_selections', {}).get(name)
+        if stype != 'interval' and isinstance(value, (list, tuple)):
+            value = list(value)
+        try:
+            comp.selection.param.update(**{name: value})
+        except Exception:
+            pass
 
     def register_events(self, model, doc, comm=None) -> None:
         self._component._register_events('vega_event', model=model, doc=doc, comm=comm)

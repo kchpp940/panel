@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import typing as t
 
-from .base import AdapterEvent, InteractionAdapter
+from .base import AdapterEvent, InteractionAdapter, StandardEvent
 
 if t.TYPE_CHECKING:
     from ..pane.echarts import ECharts
@@ -12,8 +12,9 @@ class EChartsAdapter(InteractionAdapter):
     """
     Interaction adapter for ECharts panes.
 
-    Handles echarts_event messages (click, selectchanged, datazoom,
-    etc.) and extracts selection, viewport and payload.
+    **Owns the entire echarts_event handling flow:**
+      * Normalizes click / selectchanged / datazoom / legend events
+      * Dispatches registered Python callbacks
     """
 
     _event_names: tuple[str, ...] = ('echarts_event',)
@@ -138,7 +139,23 @@ class EChartsAdapter(InteractionAdapter):
             result['viewport'] = viewport
 
         result['raw_data'] = data
+        result['_raw_event'] = raw
         return result
+
+    def on_standardized_event(self, event: StandardEvent, raw: AdapterEvent) -> None:
+        comp = self._component
+        raw_event = event.payload.get('_raw_event')
+        if raw_event is None:
+            return
+        etype = event.payload.get('event_type', '')
+        query = event.payload.get('query')
+        callbacks = comp._py_callbacks.get(etype, {})
+        for cb in callbacks.get(None, []):
+            cb(raw_event)
+        if query is None:
+            return
+        for cb in callbacks.get(query, []):
+            cb(raw_event)
 
     def register_events(self, model, doc, comm=None) -> None:
         self._component._register_events('echarts_event', model=model, doc=doc, comm=comm)

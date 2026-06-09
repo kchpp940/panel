@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import typing as t
 
-from .base import AdapterEvent, InteractionAdapter
+from functools import partial
+
+from ..io.state import state
+from .base import AdapterEvent, InteractionAdapter, StandardEvent
 
 if t.TYPE_CHECKING:
     from ..widgets.tables import Tabulator
@@ -12,8 +15,13 @@ class TabulatorAdapter(InteractionAdapter):
     """
     Interaction adapter for Tabulator widgets.
 
-    Handles cell-click, table-edit, selection-change and filter events
-    and extracts selection, filters, viewport and payload.
+    **Owns the entire Tabulator event flow:**
+      * selection-change  →  update remote-pagination selection
+      * cell-click  →  resolve row/column, invoke callbacks
+      * table-edit  →  handle pre/post edit, run filters check,
+                       invoke edit callbacks, update styler
+      * extracts filters (header + internal) and viewport (pagination,
+        sorters) into the standardized event
     """
 
     _event_names: tuple[str, ...] = (
@@ -136,29 +144,14 @@ class TabulatorAdapter(InteractionAdapter):
         if selection:
             result['selection'] = selection
 
-        if event_name == 'table-edit':
-            old = getattr(raw, 'old', None)
-            value = getattr(raw, 'value', None)
-            row = getattr(raw, 'row', None)
-            column = getattr(raw, 'column', None)
-            pre = getattr(raw, 'pre', False)
-            result['edit'] = {
-                'row': row,
-                'column': column,
-                'old': old,
-                'value': value,
-                'pre': pre,
-            }
+        if event_name in ('table-edit', 'cell-click'):
+            result['_row'] = getattr(raw, 'row', None)
+            result['_column'] = getattr(raw, 'column', None)
+            result['_value'] = getattr(raw, 'value', None)
 
-        if event_name == 'cell-click':
-            row = getattr(raw, 'row', None)
-            column = getattr(raw, 'column', None)
-            value = getattr(raw, 'value', None)
-            result['click'] = {
-                'row': row,
-                'column': column,
-                'value': value,
-            }
+        if event_name == 'table-edit':
+            result['_old'] = getattr(raw, 'old', None)
+            result['_pre'] = getattr(raw, 'pre', False)
 
         filters = self._extract_filters()
         if filters:
@@ -168,7 +161,54 @@ class TabulatorAdapter(InteractionAdapter):
         if viewport:
             result['viewport'] = viewport
 
+        result['_raw_event'] = raw
         return result
+
+    def on_standardized_event(self, event: StandardEvent, raw: AdapterEvent) -> None:
+        comp = self._component
+        raw_event = event.payload.get('_raw_event')
+        if raw_event is None:
+            return
+        event_name = event.payload.get('event_type', '')
+
+        if event_name == 'selection-change':
+            if comp.pagination == 'remote':
+                comp._update_selection(raw_event)
+            return
+
+        event_col = comp._renamed_cols.get(raw_event.column, raw_event.column)
+        if comp.pagination == 'remote':
+            nrows = comp.page_size or comp.initial_page_size
+            raw_event.row = raw_event.row + (comp.page - 1) * nrows
+
+        idx = comp._index_mapping.get(raw_event.row, raw_event.row)
+        iloc = comp.value.index.get_loc(idx)
+        comp._validate_iloc(idx, iloc)
+        raw_event.row = iloc
+        if event_col not in comp.buttons:
+            if event_col in comp.value.columns:
+                raw_event.value = comp.value[event_col].iloc[raw_event.row]
+            else:
+                raw_event.value = comp.value.index[raw_event.row]
+
+        if event_name == 'table-edit':
+            if raw_event.pre:
+                import pandas as pd
+                filter_df = pd.DataFrame({raw_event.column: [raw_event.value]})
+                filters = comp._get_header_filters(filter_df)
+                if filters and filters[0].any():
+                    comp._edited_indexes.append(idx)
+            else:
+                if comp._old_value is not None:
+                    raw_event.old = comp._old_value[event_col].iloc[raw_event.row]
+                for cb in comp._on_edit_callbacks:
+                    state.execute(partial(cb, raw_event), schedule=False)
+                comp._update_style()
+        else:
+            for cb in comp._on_click_callbacks.get(None, []):
+                state.execute(partial(cb, raw_event), schedule=False)
+            for cb in comp._on_click_callbacks.get(event_col, []):
+                state.execute(partial(cb, raw_event), schedule=False)
 
     def register_events(self, model, doc, comm=None) -> None:
         self._component._register_events(
