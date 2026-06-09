@@ -68,6 +68,13 @@ class SyncChecker:
     errors: list[SyncError] = field(default_factory=list)
     base_dir: Path = BASE_DIR
 
+    # --- per-checker strategy flags (override in subclasses) ---
+    # Set to False when the checker performs purely static analysis
+    # (AST walk, file existence, etc.) and never imports panel/param.
+    requires_runtime: t.ClassVar[bool] = True
+    # Human-readable description for --diagnose output.
+    description: t.ClassVar[str] = ""
+
     def add_error(
         self,
         file: Path | str,
@@ -184,6 +191,9 @@ REF_NAME_OVERRIDES: dict[str, dict[str, str]] = {
 
 class ReferencePathChecker(SyncChecker):
     """Verify that each reference notebook corresponds to an existing component."""
+
+    requires_runtime = True
+    description = "Matches reference notebook names to exported component symbols."
 
     def run(self) -> None:
         import importlib
@@ -388,6 +398,9 @@ def _get_dotted_chain(node: ast.AST) -> str | None:
 class GalleryParamChecker(SyncChecker):
     """Check that gallery & reference notebooks do not reference deleted parameters."""
 
+    requires_runtime = True
+    description = "Static-scans notebook code cells and validates keyword arg names against component signatures."
+
     def run(self) -> None:
         targets: list[Path] = []
         if GALLERY_DIR.is_dir():
@@ -482,17 +495,118 @@ PUBLIC_MODULES: list[tuple[str, Path]] = [
 
 
 class PublicImportChecker(SyncChecker):
-    """Verify that each item in __all__ is actually importable via the module."""
+    """Verify that every name declared in ``__all__`` has a corresponding
+    top-level binding (definition, import, or lazy ``__getattr__``) in the
+    module source. This checker is fully static and never imports the module,
+    so it cannot be defeated by optional-dependency import failures inside
+    the module body."""
+
+    requires_runtime = False
+    description = "Static AST check that each __all__ entry is defined/imported at the module top level."
+
+    # Names implicitly available on every module; never flagged as missing.
+    _IMPLICIT_NAMES: t.ClassVar[frozenset[str]] = frozenset({
+        "__name__", "__doc__", "__package__", "__loader__", "__spec__",
+        "__file__", "__cached__", "__builtins__", "__path__",
+        "__all__", "__version__",
+    })
+
+    @classmethod
+    def _collect_top_level_bindings(cls, tree: ast.Module) -> set[str]:
+        """Return all names bound at the top level of an AST module."""
+        bindings: set[str] = set()
+        for node in tree.body:
+            # def / async def / class
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                bindings.add(node.name)
+                continue
+            # import X, Y as Z
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    bindings.add(alias.asname if alias.asname else alias.name.split(".")[0])
+                continue
+            # from X import A, B as C
+            if isinstance(node, ast.ImportFrom):
+                for alias in node.names:
+                    if alias.name == "*":
+                        # Cannot statically enumerate; mark as wildcard import.
+                        bindings.add("*")
+                    else:
+                        bindings.add(alias.asname if alias.asname else alias.name)
+                continue
+            # Name = ... / (a, b) = ... / Name.attr = ...
+            if isinstance(node, ast.Assign):
+                for tgt in node.targets:
+                    bindings.update(cls._extract_assigned_names(tgt))
+                continue
+            # Name := ...
+            if isinstance(node, ast.NamedExpr):
+                bindings.update(cls._extract_assigned_names(node.target))
+                continue
+            # for / async for at top level (unusual but harmless)
+            if isinstance(node, (ast.For, ast.AsyncFor)):
+                bindings.update(cls._extract_assigned_names(node.target))
+                continue
+            # with X as Y
+            if isinstance(node, ast.With):
+                for item in node.items:
+                    if item.optional_vars is not None:
+                        bindings.update(cls._extract_assigned_names(item.optional_vars))
+                continue
+        return bindings
+
+    @classmethod
+    def _extract_assigned_names(cls, node: ast.AST) -> set[str]:
+        names: set[str] = set()
+
+        def _walk(t: ast.AST) -> None:
+            if isinstance(t, ast.Name):
+                names.add(t.id)
+            elif isinstance(t, (ast.Tuple, ast.List)):
+                for elt in t.elts:
+                    _walk(elt)
+            elif isinstance(t, ast.Starred):
+                _walk(t.value)
+            # ast.Attribute / ast.Subscript targets do not introduce new top-level names
+        _walk(node)
+        return names
+
+    @classmethod
+    def _has_lazy_getattr(cls, tree: ast.Module) -> bool:
+        """Return True if the module defines a top-level ``__getattr__``.
+
+        Panel uses this pattern to lazily expose optional-dependency symbols
+        without importing the heavy dependency at module load time (e.g.
+        ``panel.chat.langchain``).
+        """
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Assign)):
+                if isinstance(node, ast.Assign):
+                    for tgt in node.targets:
+                        if isinstance(tgt, ast.Name) and tgt.id == "__getattr__":
+                            return True
+                else:
+                    if node.name == "__getattr__":
+                        return True
+        return False
 
     def run(self) -> None:
-        import importlib
-
         for mod_name, mod_path in PUBLIC_MODULES:
             if not mod_path.is_file():
                 continue
-            tree = ast.parse(mod_path.read_text(encoding="utf-8"))
+            try:
+                tree = ast.parse(mod_path.read_text(encoding="utf-8"))
+            except SyntaxError as exc:
+                self.add_error(
+                    file=mod_path,
+                    kind="PublicImport",
+                    message=f"Failed to parse module source: {exc}",
+                )
+                continue
+
+            # Extract __all__
             all_names: list[str] = []
-            for node in ast.walk(tree):
+            for node in tree.body:
                 if (
                     isinstance(node, ast.Assign)
                     and len(node.targets) == 1
@@ -506,36 +620,47 @@ class PublicImportChecker(SyncChecker):
                     break
             if not all_names:
                 continue
-            try:
-                module = importlib.import_module(mod_name)
-            except Exception as exc:
-                if _is_optional_import_error(exc, mod_name):
-                    continue
-                self.add_error(
-                    file=mod_path,
-                    kind="PublicImport",
-                    message=f"Failed to import core module '{mod_name}': {exc}",
-                )
-                continue
+
+            bindings = self._collect_top_level_bindings(tree)
+            has_lazy = self._has_lazy_getattr(tree)
+
             for name in all_names:
-                # Lazy-exported names (e.g. panel.chat.langchain via __getattr__)
-                # are allowed; only flag names that are definitely absent.
-                try:
-                    present = hasattr(module, name)
-                except Exception as exc:
-                    if _is_optional_import_error(exc, f"{mod_name}.{name}"):
-                        continue
-                    raise
-                if not present:
+                if name in bindings or name in self._IMPLICIT_NAMES:
+                    continue
+                if "*" in bindings:
+                    # Wildcard import present; cannot statically prove absence.
+                    continue
+                full_dotted = f"{mod_name}.{name}"
+                # Explicit optional-dependency lazy exports are never flagged.
+                if any(root == full_dotted or full_dotted.startswith(root + ".")
+                       for root in OPTIONAL_DEPENDENCY_ROOTS):
+                    continue
+                if has_lazy:
+                    # Lazy __getattr__ is defined — the name may be resolved at
+                    # runtime but is NOT in the explicit optional list. Flag
+                    # as a soft mismatch so the author can either add a static
+                    # import or enroll it in the optional-dependency list.
                     self.add_error(
                         file=mod_path,
                         kind="PublicImport",
                         message=(
-                            f"Name '{name}' is declared in __all__ but is not exported "
-                            f"by module '{mod_name}'."
+                            f"Name '{name}' is declared in __all__ but not statically "
+                            f"bound in '{mod_name}'; it may be provided by the module's "
+                            f"lazy __getattr__, but '{full_dotted}' is not in the "
+                            f"OPTIONAL_DEPENDENCY_ROOTS whitelist."
                         ),
                         object_name=name,
                     )
+                    continue
+                self.add_error(
+                    file=mod_path,
+                    kind="PublicImport",
+                    message=(
+                        f"Name '{name}' is declared in __all__ but has no top-level "
+                        f"definition or import in '{mod_name}'."
+                    ),
+                    object_name=name,
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -554,6 +679,9 @@ REQUIRED_BASE_PARAMS = {
 
 class ComponentSignatureChecker(SyncChecker):
     """Verify that each public component exposes the expected base parameters."""
+
+    requires_runtime = True
+    description = "Ensures every exported Layoutable subclass carries the standard base param set."
 
     def run(self) -> None:
         import importlib
@@ -647,6 +775,9 @@ THEME_CSS_SRC_DIR = PANEL_DIR / "theme" / "css"
 
 class ResourceRefChecker(SyncChecker):
     """Verify that static resources referenced in docs & templates exist."""
+
+    requires_runtime = False
+    description = "Verifies _static/, bundled/, dist/, panel_dist/ references resolve to real files."
 
     def _collect_panel_dist_files(self) -> set[str]:
         bundled: set[str] = set()
@@ -798,30 +929,132 @@ def _probe_core_dependencies() -> Exception | None:
     return None
 
 
-def run_checks(verbose: bool = True) -> int:
-    # Core dependencies must be present for the docs build gate; anything
-    # less than a full runtime is a hard failure rather than a silent skip.
+def _diagnose_environment() -> dict[str, t.Any]:
+    """Collect a structured snapshot of the runtime/import environment."""
     core_exc = _probe_core_dependencies()
-    if core_exc is not None:
-        if verbose:
-            print(
-                f"{RED}FATAL{RESET} Core runtime dependencies missing for doc/source sync checks.\n"
-                f"  First failure: {core_exc}\n"
-                f"  Run this script inside the panel 'docs' environment, e.g.:\n"
-                f"    pixi run -e docs python scripts/docs_sync.py\n"
-                f"    pixi run -e docs docs-build\n"
-                f"  Alternatively install the project with documentation extras:\n"
-                f"    pip install -e '.[doc]'",
-                flush=True,
-            )
-        return 1
-
-    all_errors: list[SyncError] = []
+    info: dict[str, t.Any] = {
+        "core_dependencies_ok": core_exc is None,
+        "core_dependencies_error": str(core_exc) if core_exc else None,
+        "checkers": [],
+    }
     for cls in ALL_CHECKERS:
+        info["checkers"].append({
+            "name": cls.__name__,
+            "requires_runtime": cls.requires_runtime,
+            "description": cls.description,
+        })
+    return info
+
+
+def _print_diagnosis() -> None:
+    info = _diagnose_environment()
+    core_ok = info["core_dependencies_ok"]
+    core_status = f"{GREEN}OK{RESET}" if core_ok else f"{RED}MISSING{RESET}"
+    print(f"=== {CYAN}docs_sync environment diagnosis{RESET} ===")
+    print(f"  Core runtime dependencies (param + panel): {core_status}")
+    if not core_ok:
+        print(f"    Error: {info['core_dependencies_error']}")
+    print()
+    print(f"  {CYAN}Registered checkers:{RESET}")
+    for entry in info["checkers"]:
+        mode = "runtime" if entry["requires_runtime"] else "static"
+        mode_colored = f"{YELLOW}{mode}{RESET}" if entry["requires_runtime"] else f"{GREEN}{mode}{RESET}"
+        print(f"    - {entry['name']} [{mode_colored}]")
+        print(f"        {entry['description']}")
+    if not core_ok:
+        print()
+        print(f"  {YELLOW}Note:{RESET} Runtime checkers require a full docs environment:")
+        print(f"    pixi run -e docs python scripts/docs_sync.py")
+        print(f"    pixi run -e docs docs-build")
+        print(f"    pip install -e '.[doc]'")
+
+
+def _print_help() -> None:
+    print("Usage: python scripts/docs_sync.py [OPTIONS]")
+    print()
+    print("Panel doc/source sync validator — gates the docs build against stale")
+    print("references between notebooks, API docs, public imports, component")
+    print("signatures, and bundled frontend resources.")
+    print()
+    print("Options:")
+    print("  --static-only    Run only the checkers that never import panel/param")
+    print("                   (PublicImportChecker, ResourceRefChecker). Useful")
+    print("                   for fast pre-commit checks outside the docs env.")
+    print("  --diagnose       Print environment + checker inventory and exit.")
+    print("  -q, --quiet      Suppress per-checker progress lines.")
+    print("  -h, --help       Show this help.")
+    print()
+    print("Exit codes:")
+    print("  0  all applicable checks passed")
+    print("  1  one or more sync errors OR core runtime dependencies missing")
+    print("     (default mode only; --static-only and --diagnose never fail for")
+    print("      missing runtime deps)")
+
+
+def run_checks(
+    verbose: bool = True,
+    *,
+    static_only: bool = False,
+) -> int:
+    """Run the doc/source sync checkers.
+
+    Parameters
+    ----------
+    verbose : bool
+        Whether to print per-checker progress and per-error details.
+    static_only : bool
+        If True, only run checkers with ``requires_runtime = False`` and
+        do NOT treat missing core runtime dependencies as a failure.
+
+    Returns
+    -------
+    int
+        Process exit code (0 = pass, 1 = fail).
+    """
+    # --- dependency gating ---
+    core_exc = _probe_core_dependencies()
+    runtime_available = core_exc is None
+
+    if not runtime_available:
+        if static_only:
+            if verbose:
+                print(
+                    f"{YELLOW}INFO{RESET} Core runtime dependencies unavailable "
+                    f"({core_exc}); running static-only checkers.",
+                    flush=True,
+                )
+        else:
+            if verbose:
+                print(
+                    f"{RED}FATAL{RESET} Core runtime dependencies missing for "
+                    f"doc/source sync checks.\n"
+                    f"  First failure: {core_exc}\n"
+                    f"  Run this script inside the panel 'docs' environment, e.g.:\n"
+                    f"    pixi run -e docs python scripts/docs_sync.py\n"
+                    f"    pixi run -e docs docs-build\n"
+                    f"  Alternatively install the project with documentation extras:\n"
+                    f"    pip install -e '.[doc]'\n"
+                    f"  For a lightweight offline pass use:\n"
+                    f"    python scripts/docs_sync.py --static-only",
+                    flush=True,
+                )
+            return 1
+
+    # --- build the active checker list ---
+    active: list[type[SyncChecker]] = []
+    for cls in ALL_CHECKERS:
+        if static_only and cls.requires_runtime:
+            continue
+        active.append(cls)
+
+    # --- run ---
+    all_errors: list[SyncError] = []
+    for cls in active:
         name = cls.__name__
         checker = cls()
         if verbose:
-            print(f"{CYAN}Running{RESET} {name}...", flush=True)
+            mode = " (static)" if not cls.requires_runtime else ""
+            print(f"{CYAN}Running{RESET} {name}{mode}...", flush=True)
         try:
             checker.run()
         except Exception as exc:
@@ -832,9 +1065,11 @@ def run_checks(verbose: bool = True) -> int:
             if verbose:
                 for err in checker.errors:
                     print("  " + err.format(BASE_DIR), flush=True)
+
     if not all_errors:
         if verbose:
-            print(f"{GREEN}All doc/source sync checks passed.{RESET}", flush=True)
+            scope = "static " if static_only else ""
+            print(f"{GREEN}All {scope}doc/source sync checks passed.{RESET}", flush=True)
         return 0
     if verbose:
         print(
@@ -846,8 +1081,18 @@ def run_checks(verbose: bool = True) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
+
+    if "-h" in argv or "--help" in argv:
+        _print_help()
+        return 0
+    if "--diagnose" in argv:
+        _print_diagnosis()
+        return 0
+
     verbose = "-q" not in argv and "--quiet" not in argv
-    return run_checks(verbose=verbose)
+    static_only = "--static-only" in argv
+
+    return run_checks(verbose=verbose, static_only=static_only)
 
 
 if __name__ == "__main__":
