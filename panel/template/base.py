@@ -1021,18 +1021,3 @@ class Template(BaseTemplate):
                              'has a unique name by which it can be '
                              'referenced in the template.')
         self._render_variables[name] = value
-
-
-def _cleanup_templates(session_context) -> None:
-    doc = session_context._document
-    if doc in state._templates:
-        del state._templates[doc]
-
-
-from ..io.cleanup import session_cleanup_registry
-
-session_cleanup_registry.register(
-    name="templates",
-    func=_cleanup_templates,
-    priority=60,
-)

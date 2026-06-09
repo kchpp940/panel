@@ -56,6 +56,7 @@ if t.TYPE_CHECKING:
     from .browser import BrowserInfo
     from .cache import _Stack
     from .callbacks import PeriodicCallback
+    from .cleanup import CleanupResult
     from .location import Location
     from .notifications import NotificationAreaBase
     from .server import StoppableThread
@@ -364,8 +365,10 @@ class _state(param.Parameterized):
         })
         self.param.trigger('session_info')
 
-    def _destroy_session(self, session_context):
-        from .cleanup import session_cleanup_registry
+    def _destroy_session(self, session_context) -> CleanupResult:
+        from .cleanup import register_default_handlers, session_cleanup_registry
+
+        register_default_handlers()
         result = session_cleanup_registry.run_cleanup(session_context)
         if not result.success:
             for handler_name, exc in result.failures:
@@ -373,6 +376,7 @@ class _state(param.Parameterized):
                     "Session cleanup handler %r failed: %s: %s",
                     handler_name, type(exc).__name__, exc,
                 )
+        return result
 
     @property
     def _current_stack(self):
@@ -1313,40 +1317,6 @@ class _state(param.Parameterized):
 state = _state()
 
 
-def _cleanup_session_info(session_context) -> None:
-    session_id = session_context.id
-    sessions = state.session_info['sessions']
-    if session_id in sessions and sessions[session_id]['ended'] is None:
-        session = sessions[session_id]
-        if session['rendered'] is not None:
-            state.session_info['live'] -= 1
-        session['ended'] = dt.datetime.now().timestamp()
-        state.param.trigger('session_info')
+from .cleanup import register_default_handlers
 
-
-def _cleanup_document_state(session_context) -> None:
-    doc = session_context._document
-    state._connected.pop(doc, None)
-    state._loaded.pop(doc, None)
-    state._onload.pop(doc, None)
-    state._change_callbacks.pop(doc, None)
-    state._stylesheets.pop(doc, None)
-    state._extensions_.pop(doc, None)
-    state._rel_paths.pop(doc, None)
-    state._base_urls.pop(doc, None)
-    state._session_outputs.pop(doc, None)
-
-
-from .cleanup import session_cleanup_registry
-
-session_cleanup_registry.register(
-    name="session_info",
-    func=_cleanup_session_info,
-    priority=10,
-)
-
-session_cleanup_registry.register(
-    name="document_state",
-    func=_cleanup_document_state,
-    priority=70,
-)
+register_default_handlers()

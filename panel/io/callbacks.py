@@ -216,23 +216,3 @@ class PeriodicCallback(param.Parameterized):
                 if cb is not self._cleanup
             }
             self._doc = None
-
-
-def _cleanup_periodic_callbacks(session_context) -> None:
-    doc = session_context._document
-    if doc in state._periodic:
-        for cb in state._periodic[doc]:
-            try:
-                cb._cleanup(session_context)
-            except Exception:
-                pass
-        del state._periodic[doc]
-
-
-from .cleanup import session_cleanup_registry
-
-session_cleanup_registry.register(
-    name="periodic_callbacks",
-    func=_cleanup_periodic_callbacks,
-    priority=20,
-)

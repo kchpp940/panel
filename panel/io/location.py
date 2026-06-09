@@ -328,20 +328,3 @@ class Location(Syncable):
         self._synced = synced
         query = {k: v for k, v in self.query_params.items() if k not in unsynced}
         self.search = '?' + urlparse.urlencode(query) if query else ''
-
-
-def _cleanup_locations(session_context) -> None:
-    doc = session_context._document
-    if doc in state._locations:
-        loc = state._locations[doc]
-        loc._server_destroy(session_context)
-        del state._locations[doc]
-
-
-from .cleanup import session_cleanup_registry
-
-session_cleanup_registry.register(
-    name="locations",
-    func=_cleanup_locations,
-    priority=30,
-)
