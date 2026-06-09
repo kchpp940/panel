@@ -169,6 +169,7 @@ def convert_app(
     compiled: bool = False,
     verbose: bool = True,
     generate_assets_report: bool = True,
+    _return_report: bool = False,
 ):
     if dest_path is None:
         dest_path = pathlib.Path('./')
@@ -202,11 +203,11 @@ def convert_app(
         with set_resource_mode('inline' if inline else 'cdn'):
             persistence.persist_all()
     except KeyboardInterrupt:
-        return None
+        return (None, None, None) if _return_report else None
     except Exception as e:
         if verbose:
             print(f'Failed to convert {app} to {runtime} target: {e}')
-        return None
+        return (None, None, None) if _return_report else None
 
     validator = ManifestValidator(app_manifest)
     validator.validate_all()
@@ -231,10 +232,13 @@ def convert_app(
             pass
 
     if not app_report.success:
-        return None
+        return (None, None, None) if _return_report else None
 
     filename = f'{app_manifest.app_name}.html'
-    return (app_manifest.app_name.replace('_', ' '), filename)
+    result = (app_manifest.app_name.replace('_', ' '), filename)
+    if _return_report:
+        return (*result, app_report)
+    return result
 
 
 def _convert_process_pool(
@@ -248,6 +252,7 @@ def _convert_process_pool(
     from concurrent.futures import ProcessPoolExecutor
 
     files = {}
+    app_reports: list[AppReport] = []
     groups = [apps[i:i+max_workers] for i in range(0, len(apps), max_workers)]
     for group in groups:
         with ProcessPoolExecutor(
@@ -260,15 +265,19 @@ def _convert_process_pool(
                 else:
                     app_requires = requirements
                 f = executor.submit(
-                    convert_app, app, dest_path, requirements=app_requires, **kwargs
+                    convert_app, app, dest_path, requirements=app_requires,
+                    _return_report=True, **kwargs
                 )
                 futures.append(f)
             for future in concurrent.futures.as_completed(futures):
                 result = future.result()
-                if result is not None:
-                    name, filename = result
-                    files[name] = filename
-    return files
+                if result is None or result[0] is None:
+                    continue
+                name, filename, report = result
+                files[name] = filename
+                if report is not None:
+                    app_reports.append(report)
+    return files, app_reports
 
 
 def convert_apps(
@@ -289,6 +298,7 @@ def convert_apps(
     inline: bool = False,
     compiled: bool = False,
     verbose: bool = True,
+    generate_assets_report: bool = True,
 ):
     """
     Parameters
@@ -328,6 +338,10 @@ def convert_apps(
         Whether to inline resources.
     compiled: bool
         Whether to use the compiled and faster version of Pyodide.
+    generate_assets_report: bool
+        Whether to write the combined assets report (JSON + Markdown) to
+        ``dest_path``. Individual per-app reports are disabled when running
+        through ``convert_apps`` to avoid overwrite conflicts.
     """
     if isinstance(apps, (str, os.PathLike)):
         apps = [apps]
@@ -362,17 +376,31 @@ def convert_apps(
         'verbose': verbose,
         'compiled': compiled,
         'local_prefix': local_prefix,
+        'generate_assets_report': False,
     }
 
+    all_app_reports: list[AppReport] = []
+
     if state._is_pyodide:
-        files = {
-            app: convert_app(app, dest_path, **kwargs)  # type: ignore
-            for app in apps
-        }
+        files = {}
+        for app in apps:
+            if isinstance(app_requirements, dict):
+                app_reqs = app_requirements.get(app, 'auto')
+            else:
+                app_reqs = app_requirements
+            per_kwargs = {**kwargs, 'requirements': app_reqs}
+            result = convert_app(app, dest_path, _return_report=True, **per_kwargs)  # type: ignore
+            if result is None or result[0] is None:
+                continue
+            name, filename, report = result
+            files[name] = filename
+            if report is not None:
+                all_app_reports.append(report)
     else:
-        files = _convert_process_pool(
+        files, pool_reports = _convert_process_pool(
             apps, dest_path, max_workers=max_workers, **kwargs  # type: ignore
         )
+        all_app_reports.extend(pool_reports)
 
     files = {k: v for k, v in files.items() if v is not None}
 
@@ -382,6 +410,28 @@ def convert_apps(
             f.write(index)
         if verbose:
             print('Successfully wrote index.html.')
+
+    if generate_assets_report and dest_path.is_dir():
+        try:
+            extra_outputs = []
+            if (dest_path / 'index.html').is_file():
+                extra_outputs.append(str(dest_path / 'index.html'))
+            if (dest_path / 'site.webmanifest').is_file():
+                extra_outputs.append(str(dest_path / 'site.webmanifest'))
+            if (dest_path / 'serviceWorker.js').is_file():
+                extra_outputs.append(str(dest_path / 'serviceWorker.js'))
+            renderer = ReportRenderer(verbose=False)
+            conv_report = ConversionReport(
+                total_apps=len(apps),
+                succeeded=len(files),
+                failed=max(0, len(apps) - len(files)),
+                app_reports=all_app_reports,
+                extra_outputs=extra_outputs,
+                pwa_enabled=build_pwa,
+            )
+            renderer.write_assets_report(conv_report, dest_path, format='both')
+        except Exception:
+            pass
 
     if not build_pwa:
         return
@@ -409,25 +459,3 @@ def convert_apps(
         f.write(worker)
     if verbose:
         print('Successfully wrote serviceWorker.js.')
-
-    if verbose and dest_path.is_dir():
-        try:
-            extra_outputs = []
-            if (dest_path / 'index.html').is_file():
-                extra_outputs.append(str(dest_path / 'index.html'))
-            if (dest_path / 'site.webmanifest').is_file():
-                extra_outputs.append(str(dest_path / 'site.webmanifest'))
-            if (dest_path / 'serviceWorker.js').is_file():
-                extra_outputs.append(str(dest_path / 'serviceWorker.js'))
-            renderer = ReportRenderer(verbose=False)
-            conv_report = ConversionReport(
-                total_apps=len(files),
-                succeeded=len(files),
-                failed=max(0, len(apps) - len(files)),
-                app_reports=[],
-                extra_outputs=extra_outputs,
-                pwa_enabled=build_pwa,
-            )
-            renderer.write_assets_report(conv_report, dest_path, format='both')
-        except Exception:
-            pass
