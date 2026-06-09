@@ -248,6 +248,21 @@ class Vega(ModelPane):
         return self._interaction_adapter
 
     @property
+    def interaction_store(self):
+        """
+        The per-component event store for standardized interaction
+        events. Subscribe here to consume normalized events from this
+        Vega pane independent of the raw vega_event protocol.
+        """
+        return self.interaction_adapter.store
+
+    def subscribe_interaction(self, callback, *, kind: str | None = None) -> None:
+        self.interaction_store.subscribe(callback, kind=kind)
+
+    def unsubscribe_interaction(self, callback, *, kind: str | None = None) -> None:
+        self.interaction_store.unsubscribe(callback, kind=kind)
+
+    @property
     def _selections(self):
         return _get_selections(self.object)
 

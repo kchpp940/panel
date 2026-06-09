@@ -12,7 +12,7 @@ import param
 from bokeh.models import ColumnDataSource
 from pyviz_comms import JupyterComm
 
-from ..interaction import PlotlyAdapter
+from ..interaction import InteractionStore, PlotlyAdapter
 from ..util import lazy_load, try_datetime64_to_datetime
 from ..util.checks import datetime_types, isdatetime
 from ..viewable import Layoutable
@@ -126,6 +126,41 @@ class Plotly(ModelPane):
         if self._interaction_adapter is None:
             self._interaction_adapter = PlotlyAdapter(self)
         return self._interaction_adapter
+
+    @property
+    def interaction_store(self) -> "InteractionStore":
+        """
+        The per-component event store for standardized interaction
+        events. Subscribe here to consume normalized events from this
+        Plotly pane independent of the raw plotly_event protocol.
+        """
+        return self.interaction_adapter.store
+
+    def subscribe_interaction(
+        self,
+        callback,
+        *,
+        kind: str | None = None,
+    ) -> None:
+        """
+        Register a callback for standardized interaction events.
+
+        Parameters
+        ----------
+        callback : callable
+            Invoked with a :class:`StandardEvent` instance.
+        kind : str, optional
+            If provided, only fire on events whose ``.kind`` matches.
+        """
+        self.interaction_store.subscribe(callback, kind=kind)
+
+    def unsubscribe_interaction(
+        self,
+        callback,
+        *,
+        kind: str | None = None,
+    ) -> None:
+        self.interaction_store.unsubscribe(callback, kind=kind)
 
     def _to_figure(self, obj):
         import plotly.graph_objs as go

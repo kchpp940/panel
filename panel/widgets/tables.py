@@ -1422,6 +1422,22 @@ class Tabulator(BaseTable):
             self._interaction_adapter = TabulatorAdapter(self)
         return self._interaction_adapter
 
+    @property
+    def interaction_store(self):
+        """
+        The per-component event store for standardized interaction
+        events. Subscribe here to consume normalized events from this
+        Tabulator widget independent of the raw Tabulator event
+        protocol.
+        """
+        return self.interaction_adapter.store
+
+    def subscribe_interaction(self, callback, *, kind: str | None = None) -> None:
+        self.interaction_store.subscribe(callback, kind=kind)
+
+    def unsubscribe_interaction(self, callback, *, kind: str | None = None) -> None:
+        self.interaction_store.unsubscribe(callback, kind=kind)
+
     @param.depends('value', watch=True, on_init=True)
     def _apply_max_size(self):
         """

@@ -73,6 +73,21 @@ class ECharts(ModelPane):
             self._interaction_adapter = EChartsAdapter(self)
         return self._interaction_adapter
 
+    @property
+    def interaction_store(self):
+        """
+        The per-component event store for standardized interaction
+        events. Subscribe here to consume normalized events from this
+        ECharts pane independent of the raw echarts_event protocol.
+        """
+        return self.interaction_adapter.store
+
+    def subscribe_interaction(self, callback, *, kind: str | None = None) -> None:
+        self.interaction_store.subscribe(callback, kind=kind)
+
+    def unsubscribe_interaction(self, callback, *, kind: str | None = None) -> None:
+        self.interaction_store.unsubscribe(callback, kind=kind)
+
     @classmethod
     def applies(cls, object: t.Any, **params) -> float | bool | None:
         if isinstance(object, dict):
