@@ -18,6 +18,7 @@ import {comm_settings} from "./comm_manager"
 import {transform_cds_to_records} from "./data"
 import {HTMLBox, HTMLBoxView} from "./layout"
 import {schedule_when, transformJsPlaceholders} from "./util"
+import {ColumnProfile, type TabulatorModelLike} from "./column_profile"
 
 import tabulator_css from "styles/models/tabulator.css"
 
@@ -375,11 +376,9 @@ export class DataTabulatorView extends HTMLBoxView {
   tabulator: any
   columns: Map<string, any> = new Map()
   container: HTMLDivElement | null = null
+  column_profile: ColumnProfile | null = null
   _tabulator_cell_updating: boolean=false
-  _updating_page: boolean = false
   _updating_expanded: boolean = false
-  _updating_sort: boolean = false
-  _updating_page_size: boolean = false
   _selection_updating: boolean = false
   _selection_pending: boolean = true
   _last_selected_row: any = null
@@ -517,6 +516,9 @@ export class DataTabulatorView extends HTMLBoxView {
   }
 
   get sorters(): any[] {
+    if (this.column_profile) {
+      return this.column_profile.getFormattedSorters()
+    }
     const sorters = []
     if (this.model.sorters.length > 0) {
       sorters.push({column: "_index", dir: "asc"})
@@ -699,6 +701,7 @@ export class DataTabulatorView extends HTMLBoxView {
 
     const configuration = this.getConfiguration()
     this.tabulator = new Tabulator(el, configuration)
+    this.column_profile = new ColumnProfile(this.tabulator, this.model as unknown as TabulatorModelLike)
     this.watch_stylesheets()
     this.init_callbacks()
   }
@@ -741,7 +744,7 @@ export class DataTabulatorView extends HTMLBoxView {
       this.setStyles()
     }, 50, false))
 
-    // Sync state with model
+    // Sync state with model - using ColumnProfile for column and pagination state
     this.tabulator.on("rowSelectionChanged", (data: any, rows: any, selected: any, deselected: any) => {
       this.rowSelectionChanged(data, rows, selected, deselected)
     })
@@ -749,7 +752,11 @@ export class DataTabulatorView extends HTMLBoxView {
     this.tabulator.on("cellEdited", (cell: any) => this.cellEdited(cell))
     this.tabulator.on("dataFiltering", (filters: any) => {
       this.record_scroll()
-      this.model.filters = filters
+      if (this.column_profile) {
+        this.column_profile.syncFiltersFromTabulatorToModel()
+      } else {
+        this.model.filters = filters
+      }
     })
     this.tabulator.on("dataFiltered", (_: any, rows: any[]) => {
       if (this._building) {
@@ -774,16 +781,22 @@ export class DataTabulatorView extends HTMLBoxView {
       this.postUpdate()
     })
     this.tabulator.on("dataSorting", (sorters: any[]) => {
-      const sorts = []
-      for (const s of sorters) {
-        if (s.field !== "_index") {
-          sorts.push({field: s.field, dir: s.dir})
+      if (this.column_profile) {
+        if (this.model.pagination !== "remote") {
+          this.column_profile.syncSortersFromTabulatorToModel()
         }
-      }
-      if (this.model.pagination !== "remote") {
-        this._updating_sort = true
-        this.model.sorters = sorts.reverse()
-        this._updating_sort = false
+      } else {
+        const sorts = []
+        for (const s of sorters) {
+          if (s.field !== "_index") {
+            sorts.push({field: s.field, dir: s.dir})
+          }
+        }
+        if (this.model.pagination !== "remote") {
+          this._updating_sort = true
+          this.model.sorters = sorts.reverse()
+          this._updating_sort = false
+        }
       }
     })
   }
@@ -848,11 +861,15 @@ export class DataTabulatorView extends HTMLBoxView {
           page_size -= 1
         }
       }
-      this._updating_page_size = true
-      try {
-        this.model.page_size = Math.max(page_size || 1, 1)
-      } finally {
-        this._updating_page_size = false
+      if (this.column_profile) {
+        this.column_profile.syncPageSizeToModel(Math.max(page_size || 1, 1))
+      } else {
+        this._updating_page_size = true
+        try {
+          this.model.page_size = Math.max(page_size || 1, 1)
+        } finally {
+          this._updating_page_size = false
+        }
       }
     }
   }
@@ -861,20 +878,24 @@ export class DataTabulatorView extends HTMLBoxView {
     return new Promise((resolve: any, reject: any) => {
       try {
         if (page != null && sorters != null) {
-          this._updating_sort = true
-          const sorts = []
-          for (const s of sorters) {
-            if (s.field !== "_index") {
-              sorts.push({field: s.field, dir: s.dir})
+          if (this.column_profile) {
+            this.column_profile.syncRemotePaginationToModel(page, sorters)
+          } else {
+            this._updating_sort = true
+            const sorts = []
+            for (const s of sorters) {
+              if (s.field !== "_index") {
+                sorts.push({field: s.field, dir: s.dir})
+              }
             }
-          }
-          this.model.sorters = sorts
-          this._updating_sort = false
-          this._updating_page = true
-          try {
-            this.model.page = page || 1
-          } finally {
-            this._updating_page = false
+            this.model.sorters = sorts
+            this._updating_sort = false
+            this._updating_page = true
+            try {
+              this.model.page = page || 1
+            } finally {
+              this._updating_page = false
+            }
           }
         }
         resolve([])
@@ -1360,11 +1381,16 @@ export class DataTabulatorView extends HTMLBoxView {
   }
 
   updatePage(pageno: number): void {
-    if (this.model.pagination === "local" && this.model.page !== pageno && !this._updating_page) {
-      this._updating_page = true
-      this.model.page = pageno
-      this._updating_page = false
+    if (this.column_profile) {
+      this.column_profile.syncPageFromTabulatorToModel(pageno)
       this.setStyles()
+    } else {
+      if (this.model.pagination === "local" && this.model.page !== pageno && !this._updating_page) {
+        this._updating_page = true
+        this.model.page = pageno
+        this._updating_page = false
+        this.setStyles()
+      }
     }
   }
 
@@ -1373,10 +1399,16 @@ export class DataTabulatorView extends HTMLBoxView {
   }
 
   setSorters(): void {
-    if (this._updating_sort) {
-      return
+    if (this.column_profile) {
+      if (!this.column_profile.isUpdatingSort()) {
+        this.column_profile.applySorters(this.model.sorters)
+      }
+    } else {
+      if (this._updating_sort) {
+        return
+      }
+      this.tabulator.setSort(this.sorters)
     }
-    this.tabulator.setSort(this.sorters)
   }
 
   setStyles(): void {
@@ -1416,12 +1448,16 @@ export class DataTabulatorView extends HTMLBoxView {
   }
 
   setHidden(): void {
-    for (const column of this.tabulator.getColumns()) {
-      const col = column._column
-      if ((col.field == "_index") || this.model.hidden_columns.includes(col.field)) {
-        column.hide()
-      } else {
-        column.show()
+    if (this.column_profile) {
+      this.column_profile.applyHiddenColumns(this.model.hidden_columns)
+    } else {
+      for (const column of this.tabulator.getColumns()) {
+        const col = column._column
+        if ((col.field == "_index") || this.model.hidden_columns.includes(col.field)) {
+          column.hide()
+        } else {
+          column.show()
+        }
       }
     }
   }
@@ -1434,17 +1470,30 @@ export class DataTabulatorView extends HTMLBoxView {
   }
 
   setPage(): void {
-    this.tabulator.setPage(Math.min(this.model.max_page, this.model.page))
+    if (this.column_profile) {
+      if (!this.column_profile.isUpdatingPage()) {
+        this.column_profile.applyPage(Math.min(this.model.max_page, this.model.page))
+      }
+    } else {
+      this.tabulator.setPage(Math.min(this.model.max_page, this.model.page))
+    }
     if (this.model.pagination === "local") {
       this.setStyles()
     }
   }
 
   setPageSize(): void {
-    if (!this._updating_page_size) {
-      this._automatic_page_size = false
+    if (this.column_profile) {
+      if (!this.column_profile.isUpdatingPageSize()) {
+        this._automatic_page_size = false
+      }
+      this.column_profile.applyPageSize(this.model.page_size)
+    } else {
+      if (!this._updating_page_size) {
+        this._automatic_page_size = false
+      }
+      this.tabulator.setPageSize(this.model.page_size)
     }
-    this.tabulator.setPageSize(this.model.page_size)
     if (this.model.pagination === "local") {
       this.setStyles()
     }

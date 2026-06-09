@@ -37,6 +37,7 @@ from ..util import (
 from ..util.warnings import warn
 from .base import Widget
 from .button import Button
+from .column_profile import ColumnProfile, ColumnProfileState, SortState, FilterState
 from .input import TextInput
 
 if t.TYPE_CHECKING:
@@ -173,6 +174,7 @@ class BaseTable(ReactiveData, Widget):
         self._filters = []
         self._index_mapping = {}
         self._edited_indexes = []
+        self._column_profile = ColumnProfile()
         super().__init__(value=value, **params)
         self._internal_callbacks.extend([
             self.param.watch(self._setup_on_change, ['editors', 'formatters']),
@@ -189,6 +191,10 @@ class BaseTable(ReactiveData, Widget):
         self._renamed_cols = {
             ('_'.join(col) if isinstance(col, tuple) else str(col)) if str(col) != col else col: col for col in self._get_fields()
         }
+        self._column_profile.set_context(
+            renamed_cols=self._renamed_cols,
+            indexes=self.indexes,
+        )
 
     def _reset_selection(self, event):
         if 'selectable' in self.param and not self.selectable:
@@ -449,46 +455,7 @@ class BaseTable(ReactiveData, Widget):
                 self._update_columns(event, model)
 
     def _sort_df(self, df: pd.DataFrame) -> pd.DataFrame:
-        if not self.sorters:
-            return df
-        fields = [self._renamed_cols.get(s['field'], s['field']) for s in self.sorters]
-        ascending = [s['dir'] == 'asc' for s in self.sorters]
-
-        # Making a copy of the DataFrame because it could be a view of the original
-        # dataframe. There could be a better place to do this.
-        df = df.copy()
-        # Temporarily add _index_ column because Tabulator uses internal _index
-        # as additional sorter to break ties
-        df['_index_'] = np.arange(len(df)).astype(str)
-        fields.append('_index_')
-        ascending.append(True)
-
-        # Handle sort on index column if show_index=True
-        if self.show_index:
-            rename = 'index' in fields and df.index.name is None
-            if rename:
-                df.index.name = 'index'
-        else:
-            rename = False
-
-        def tabulator_sorter(col):
-            # Tabulator JS defines its own sorting algorithm:
-            # - strings's case isn't taken into account
-            if col.dtype.kind not in 'SUO':
-                return col
-            try:
-                return col.fillna("").str.lower()
-            except Exception:
-                return col
-
-        df_sorted = df.sort_values(fields, ascending=ascending, kind='mergesort',
-                                  key=tabulator_sorter)
-
-        # Revert temporary changes to DataFrames
-        if rename:
-            df_sorted.index.name = None
-        df_sorted.drop(columns=['_index_'], inplace=True)
-        return df_sorted
+        return self._column_profile.sort_dataframe(df, self.sorters)
 
     def _filter_dataframe(
         self,
@@ -509,125 +476,22 @@ class BaseTable(ReactiveData, Widget):
         DataFrame
             The filtered DataFrame
         """
-        filters = []
-        for col_name, filt in (self._filters if internal_filters else []):
-            if col_name is not None and col_name not in df.columns:
-                continue
-            if isinstance(filt, (FunctionType, MethodType, partial)):
-                res = filt(df)
-                if type(res) is type(df): #function returned filtered dataframe
-                    df = res
-                else: #assume boolean mask
-                    filters.append(res)
-                continue
-            if isinstance(filt, param.Parameter):
-                if filt.name is None:
-                    continue
-                val = getattr(filt.owner, filt.name)
-            else:
-                val = filt
-            column = df[col_name]
-            if val is None:
-                continue
-            elif np.isscalar(val):
-                mask = column == val
-            elif isinstance(val, (list, set)):
-                if not val:
-                    continue
-                mask = column.isin(val)
-            elif isinstance(val, tuple):
-                start, end = val
-                if start is None and end is None:
-                    continue
-                elif start is None:
-                    mask = column<=end
-                elif end is None:
-                    mask = column>=start
-                else:
-                    mask = (column>=start) & (column<=end)
-            else:
-                raise ValueError(f"'{col_name} filter value not "
-                                 "understood. Must be either a scalar, "
-                                 "tuple or list.")
-            filters.append(mask)
-
-        if header_filters:
-            filters.extend(self._get_header_filters(df))
-
-        if filters:
-            mask = filters[0]
-            for f in filters:
-                mask &= f
-            if self._edited_indexes:
-                edited_mask = (df.index.isin(self._edited_indexes))
-                mask = mask | edited_mask
-            df = df[mask]
-        return df
+        hf = self.filters if header_filters else []
+        int_filters = self._filters if internal_filters else []
+        return self._column_profile.filter_dataframe(
+            df,
+            header_filters=hf,
+            internal_filters=int_filters,
+            header_filters_config=getattr(self, 'header_filters', None),
+            edited_indexes=self._edited_indexes if self._edited_indexes else None,
+        )
 
     def _get_header_filters(self, df: pd.DataFrame) -> list[pd.Series | np.ndarray]:
-        filters = []
-        for filt in getattr(self, 'filters', []):
-            col_name = filt['field']
-            op = filt['type']
-            val = filt['value']
-            filt_def = getattr(self, 'header_filters', {}) or {}
-            if col_name in df.columns:
-                col = df[col_name]
-            elif col_name in self.indexes:
-                if len(self.indexes) == 1:
-                    col = df.index
-                else:
-                    col = df.index.get_level_values(self.indexes.index(col_name))
-            else:
-                continue
-
-            # Sometimes Tabulator will provide a zero/single element list
-            if isinstance(val, list):
-                if len(val) == 1:
-                    val = val[0]
-                elif not val:
-                    continue
-
-            if col.dtype.kind != 'O':
-                val = col.dtype.type(val)
-            if op == '=':
-                filters.append(col == val)
-            elif op == '!=':
-                filters.append(col != val)
-            elif op == '<':
-                filters.append(col < val)
-            elif op == '>':
-                filters.append(col > val)
-            elif op == '>=':
-                filters.append(col >= val)
-            elif op == '<=':
-                filters.append(col <= val)
-            elif op == 'in':
-                if not isinstance(val, (list, np.ndarray)): val = [val]
-                filters.append(col.isin(val))
-            elif op == 'like':
-                filters.append(col.str.contains(val, case=False, regex=False))
-            elif op == 'starts':
-                filters.append(col.str.startsWith(val))
-            elif op == 'ends':
-                filters.append(col.str.endsWith(val))
-            elif op == 'keywords':
-                match_all = filt_def.get(col_name, {}).get('matchAll', False)
-                sep = filt_def.get(col_name, {}).get('separator', ' ')
-                matches = val.split(sep)
-                if match_all:
-                    for match in matches:
-                        filters.append(col.str.contains(match, case=False, regex=False))
-                else:
-                    filt = col.str.contains(matches[0], case=False, regex=False)
-                    for match in matches[1:]:
-                        filt |= col.str.contains(match, case=False, regex=False)
-                    filters.append(filt)
-            elif op == 'regex':
-                raise ValueError("Regex filtering not supported.")
-            else:
-                raise ValueError(f"Filter type {op!r} not recognized.")
-        return filters
+        return self._column_profile.get_header_filters(
+            df,
+            self.filters,
+            getattr(self, 'header_filters', None),
+        )
 
     def add_filter(self, filter: t.Any, column: str | None = None):
         """
@@ -1463,6 +1327,11 @@ class Tabulator(BaseTable):
             p._cleanup(root)
         super()._cleanup(root)
 
+    def _get_page_bounds(self) -> tuple[int, int]:
+        return self._column_profile.get_page_bounds(
+            self.page, self.page_size, self.initial_page_size
+        )
+
     def _process_events(self, events: dict[str, t.Any]) -> None:
         if 'expanded' in events:
             self._update_expanded(events.pop('expanded'))
@@ -1478,8 +1347,8 @@ class Tabulator(BaseTable):
 
         event_col = self._renamed_cols.get(event.column, event.column)
         if self.pagination == 'remote':
-            nrows = self.page_size or self.initial_page_size
-            event.row = event.row+(self.page-1)*nrows
+            start, _ = self._get_page_bounds()
+            event.row = event.row + start
 
         idx = self._index_mapping.get(event.row, event.row)
         iloc = self.value.index.get_loc(idx)
@@ -1569,10 +1438,9 @@ class Tabulator(BaseTable):
         import pandas as pd
         df = self._filter_dataframe(self.value)
         df = self._sort_df(df)
-        nrows = self.page_size or self.initial_page_size
-        start = (self.page-1)*nrows
+        start, end = self._get_page_bounds()
 
-        page_df = df.iloc[start: start+nrows]
+        page_df = df.iloc[start:end]
         if isinstance(self.value.index, pd.MultiIndex):
             indexes = [
                 f'level_{i}' if n is None else n
@@ -1614,9 +1482,7 @@ class Tabulator(BaseTable):
         offset = 1 + int(len(self.indexes) == 1)  + int(self.selectable in ('checkbox', 'checkbox-single')) + int(bool(self.row_content))
 
         if self.pagination == 'remote':
-            page_size = self.page_size or self.initial_page_size
-            start = (self.page - 1) * page_size
-            end = start + page_size
+            start, end = self._get_page_bounds()
 
         # Map column indexes in the data to indexes after frozen_columns are applied
         column_mapper = {}
@@ -1663,9 +1529,8 @@ class Tabulator(BaseTable):
             return None
         df = self._processed
         if self.pagination == 'remote':
-            nrows = self.page_size or self.initial_page_size
-            start = (self.page-1)*nrows
-            df = df.iloc[start:(start+nrows)]
+            start, end = self._get_page_bounds()
+            df = df.iloc[start:end]
         return self.selectable_rows(df)
 
     def _update_style(self, recompute=True):
@@ -1699,9 +1564,8 @@ class Tabulator(BaseTable):
             return {}, [], []
         df = self._processed
         if self.pagination == 'remote':
-            nrows = self.page_size or self.initial_page_size
-            start = (self.page-1)*nrows
-            df = df.iloc[start:(start+nrows)]
+            start, end = self._get_page_bounds()
+            df = df.iloc[start:end]
         indexed_children, children = {}, {}
         if self.embed_content:
             indexes = list(range(len(df)))
@@ -1775,8 +1639,9 @@ class Tabulator(BaseTable):
     def _stream(self, stream, rollover=None, follow=True):
         if self.pagination == 'remote':
             length = self._length
-            nrows = self.page_size or self.initial_page_size
-            max_page = max(length//nrows + bool(length%nrows), 1)
+            max_page = self._column_profile.compute_max_page(
+                length, self.page_size, self.initial_page_size
+            )
             if self.page != max_page and not follow:
                 return
             self._processed, _ = self._get_data()
@@ -1794,8 +1659,10 @@ class Tabulator(BaseTable):
             self._update_max_page()
         if follow and self.pagination:
             length = self._length
-            nrows = self.page_size or self.initial_page_size
-            self.page = max(length//nrows + bool(length%nrows), 1)
+            max_page = self._column_profile.compute_max_page(
+                length, self.page_size, self.initial_page_size
+            )
+            self.page = max_page
 
     @updating
     def _patch(self, patch):
@@ -1804,9 +1671,7 @@ class Tabulator(BaseTable):
             self._update_cds()
             return
         if self.pagination == 'remote':
-            nrows = self.page_size or self.initial_page_size
-            start = (self.page - 1) * nrows
-            end = start+nrows
+            start, end = self._get_page_bounds()
             filtered = {}
             for c, values in patch.items():
                 values = [(ind, val) for (ind, val) in values
@@ -1851,8 +1716,9 @@ class Tabulator(BaseTable):
     @param.depends('page_size', watch=True)
     def _update_max_page(self):
         length = self._length
-        nrows = self.page_size or self.initial_page_size
-        max_page = max(length//nrows + bool(length%nrows), 1)
+        max_page = self._column_profile.compute_max_page(
+            length, self.page_size, self.initial_page_size
+        )
         self.param.page.bounds = (1, max_page)
         for ref, (model, _) in self._models.copy().items():
             self._apply_update([], {'max_page': max_page}, model, ref)
@@ -1876,9 +1742,7 @@ class Tabulator(BaseTable):
                 except KeyError:
                     continue
             if self.pagination == 'remote':
-                nrows = self.page_size or self.initial_page_size
-                start = (self.page - 1) * nrows
-                end = start+nrows
+                start, end = self._get_page_bounds()
                 p_range = self._processed.index[start:end]
                 indices = [iloc - start for ind, iloc in indices
                            if ind in p_range]
@@ -1898,9 +1762,7 @@ class Tabulator(BaseTable):
             with pd.option_context('mode.chained_assignment', None):
                 self._processed[column] = array
             return
-        nrows = self.page_size or self.initial_page_size
-        start = (self.page - 1) * nrows
-        end = start+nrows
+        start, end = self._get_page_bounds()
         index = self._processed.iloc[start:end].index.values
         with _stringdtype_error(self.value, column, array):
             self.value.loc[index, column] = array
@@ -1910,8 +1772,7 @@ class Tabulator(BaseTable):
 
     def _map_indexes(self, indexes: list[int], existing: list[int] = [], add: bool = True) -> list[int]:
         if self.pagination == 'remote':
-            nrows = self.page_size or self.initial_page_size
-            start = (self.page-1)*nrows
+            start, _ = self._get_page_bounds()
         else:
             start = 0
         ilocs = list(existing)
