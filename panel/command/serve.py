@@ -34,10 +34,10 @@ from tornado.web import StaticFileHandler
 
 from ..auth import BasicAuthProvider, OAuthProvider
 from ..config import config
+from ..io._resource_locator import ResourceNotFoundError, get_resource_paths
 from ..io.document import _cleanup_doc
 from ..io.liveness import LivenessHandler
 from ..io.reload import record_modules, watch
-from ..io.resources import DIST_DIR
 from ..io.rest import REST_PROVIDERS
 from ..io.server import INDEX_HTML, get_static_routes, set_curdoc
 from ..io.state import state
@@ -374,7 +374,17 @@ class Serve(_BkServe):
         if args.ico_path:
             settings.ico_path.set_value(args.ico_path)
         else:
-            kwargs["ico_path"] = DIST_DIR / "images" / "favicon.ico"
+            paths = get_resource_paths()
+            favicon = paths.dist_file("images", "favicon.ico")
+            if favicon is not None:
+                kwargs["ico_path"] = favicon
+            else:
+                log.warning(
+                    "Panel favicon not found at %s/images/favicon.ico. "
+                    "Using Bokeh default. %s",
+                    paths.dist_dir,
+                    "Run `panel build` to populate dist/." if paths.install_mode == 'editable' else "",
+                )
         static_dirs = parse_vars(args.static_dirs) if args.static_dirs else {}
         patterns += get_static_routes(static_dirs)
 
@@ -780,5 +790,28 @@ class Serve(_BkServe):
         # See https://github.com/holoviz/panel/issues/2302
         if "DASK_DISTRIBUTED__LOGGING__BOKEH" not in os.environ:
             os.environ["DASK_DISTRIBUTED__LOGGING__BOKEH"] = "info"
+
+        # Check dist/ availability and print a helpful diagnostic if it's empty
+        paths = get_resource_paths()
+        if not paths.dist_available():
+            hint = (
+                "If you are running from a source checkout, run `panel build` "
+                f"first (or the equivalent npm build step) in {paths.panel_root.parent}.\n"
+                "Otherwise, please reinstall Panel with "
+                "`pip install --force-reinstall panel`."
+            )
+            if config.autoreload:
+                log.warning(
+                    "Panel dist/ directory is empty at %s. Falling back to CDN "
+                    "where possible; some local-only resources may not load.\n%s",
+                    paths.dist_dir, hint,
+                )
+            else:
+                log.warning(
+                    "Panel dist/ directory is empty at %s. Some resources may "
+                    "fall back to CDN; consider rebuilding or reinstalling.\n%s",
+                    paths.dist_dir, hint,
+                )
+
         args.dev = None
         super().invoke(args)

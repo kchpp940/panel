@@ -518,6 +518,7 @@ def resolve_resource(
                 bundle_candidate = resource.replace(prefix, '')[1:]
                 break
     bundle_file = paths.bundled_file(bundle_candidate)
+    cdn_dist = _cdn_dist_url()
     if bundle_file is not None or (from_state_pyodide() and not isurl(resource)):
         prefixed = f'./{dist_base}' if (
             resource_type == 'js_modules'
@@ -532,6 +533,24 @@ def resolve_resource(
             source_path=bundle_file,
         )
 
+    # 3.5) Local bundled file missing — try CDN fallback if CDN mode is allowed
+    if use_cdn_for_resources() or cdn is True:
+        cdn_url = f'{cdn_dist}bundled/{bundle_candidate}'
+        if resource_type == 'css':
+            cdn_url = add_version_suffix(cdn_url)
+        logger.warning(
+            "Bundled resource %s not found locally at %s. Falling back to CDN URL %s. %s",
+            bundle_candidate,
+            paths.bundle_dir / bundle_candidate,
+            cdn_url,
+            "Run `panel build` to populate dist/." if paths.install_mode == 'editable' else "",
+        )
+        return ResolvedResource(
+            kind='cdn',
+            value=cdn_url,
+            source_path=None,
+        )
+
     # 4) Check whether it's a component-level resource
     if resolve_custom_path(component, resource):
         return ResolvedResource(
@@ -539,7 +558,7 @@ def resolve_resource(
             value=component_resource_url(component, f'_resources/{resource_type}', resource),
         )
 
-    # 5) Nothing worked
+    # 5) Nothing worked — give a clear, actionable error
     raise ResourceNotFoundError.component(component, f'_resources.{resource_type}', resource)
 
 

@@ -317,7 +317,8 @@ def bundled_files(model: Model, file_type: str = 'javascript') -> list[str]:
         cls_files = getattr(cls, f"__{file_type}_raw__", [])
         if raw_files is cls_files:
             name = cls.__name__.lower()
-    bdir = BUNDLE_DIR / name
+    paths = get_resource_paths()
+    bdir = paths.bundle_dir / name
     shared = list((JS_URLS if file_type == 'javascript' else CSS_URLS).values())
     files: list[str] = []
     npm_cdn_prefixes = (config.npm_cdn, 'https://cdn.jsdelivr.net/npm', 'https://unpkg.com')
@@ -334,13 +335,13 @@ def bundled_files(model: Model, file_type: str = 'javascript') -> list[str]:
         test_filepath = filepath.split('?')[0]
         if url in shared:
             prefixed = filepath
-            test_path = BUNDLE_DIR / test_filepath
+            test_path = paths.bundle_dir / test_filepath
         elif not test_filepath.replace('/', '').startswith(f'{name}/'):
             prefixed = f'{name}/{test_filepath}'
             test_path = bdir / test_filepath
         else:
             prefixed = test_filepath
-            test_path = BUNDLE_DIR / test_filepath
+            test_path = paths.bundle_dir / test_filepath
         try:
             test_ok = test_path.is_file()
         except OSError:
@@ -352,7 +353,22 @@ def bundled_files(model: Model, file_type: str = 'javascript') -> list[str]:
                 files.append(f'{CDN_DIST}bundled/{prefixed}')
             else:
                 files.append(url)
+        elif RESOURCE_MODE != 'server':
+            cdn_url = f'{CDN_DIST}bundled/{prefixed}'
+            logger.warning(
+                "Bundled %s file %s not found locally at %s. "
+                "Falling back to CDN URL %s. %s",
+                file_type, prefixed, test_path, cdn_url,
+                "Run `panel build` to populate dist/." if paths.install_mode == 'editable' else "",
+            )
+            files.append(cdn_url)
         else:
+            logger.warning(
+                "Bundled %s file %s not found locally at %s. "
+                "Using original URL %s. %s",
+                file_type, prefixed, test_path, url,
+                "Run `panel build` to populate dist/." if paths.install_mode == 'editable' else "",
+            )
             files.append(url)
     return files
 
