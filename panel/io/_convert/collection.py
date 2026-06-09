@@ -50,7 +50,7 @@ class DummyRequirement:
     specifier: str = ''
 
 
-def _resolve_panel_bokeh_reqs(
+def resolve_panel_bokeh_reqs(
     panel_version: t.Literal['auto', 'local'] | str,
     bokeh_version: str = BOKEH_VERSION,
 ) -> tuple[str, str]:
@@ -66,7 +66,7 @@ def _resolve_panel_bokeh_reqs(
     return panel_req, bokeh_req
 
 
-def _extract_source(
+def extract_source(
     code: str | os.PathLike | t.IO,
 ) -> tuple[str, pathlib.Path | None]:
     if hasattr(code, 'read'):
@@ -101,7 +101,7 @@ def collect_python_requirements(
         Whether to patch the HTTP request stack with the pyodide-http library
         to allow urllib3 and requests to work.
     """
-    panel_req, bokeh_req = _resolve_panel_bokeh_reqs(panel_version)
+    panel_req, bokeh_req = resolve_panel_bokeh_reqs(panel_version)
     collected_requirements = [bokeh_req, panel_req]
     if http_patch:
         collected_requirements.append('pyodide-http')
@@ -109,7 +109,7 @@ def collect_python_requirements(
     requirements_root = os.getcwd()
     resolved_reqs: list[str]
     if requirements == 'auto':
-        source, _ = _extract_source(code)
+        source, _ = extract_source(code)
         resolved_reqs = find_requirements(source)
     elif (
         isinstance(requirements, (str, os.PathLike))

@@ -31,6 +31,8 @@ from .collection import (
     WHL_PATH,
     ManifestCollector,
     collect_python_requirements,
+    extract_source,
+    resolve_panel_bokeh_reqs,
 )
 from .persistence import (
     CDN_DIST,
@@ -132,8 +134,10 @@ __all__ = [
     "WorkerType",
     "build_pwa_manifest",
     "collect_python_requirements",
+    "extract_source",
     "loading_resources",
     "make_index",
     "pack_files",
+    "resolve_panel_bokeh_reqs",
     "script_to_html",
 ]

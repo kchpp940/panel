@@ -65,12 +65,15 @@ from ._convert import (
     WorkerType,
     build_pwa_manifest,
     collect_python_requirements,
+    extract_source,
     loading_resources,
     make_index,
     pack_files,
+    resolve_panel_bokeh_reqs,
     script_to_html,
 )
 from ._convert.collection import DummyRequirement
+from .mime_render import find_requirements
 from .resources import set_resource_mode
 from .state import state
 
@@ -139,9 +142,12 @@ __all__ = [
     "collect_python_requirements",
     "convert_app",
     "convert_apps",
+    "extract_source",
+    "find_requirements",
     "loading_resources",
     "make_index",
     "pack_files",
+    "resolve_panel_bokeh_reqs",
     "script_to_html",
     "set_resource_mode",
     "state",

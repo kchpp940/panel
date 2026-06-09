@@ -293,12 +293,17 @@ self.addEventListener('fetch', e => {});
         'ManifestValidator', 'Provenance', 'RemoteURLRef', 'ReportRenderer',
         'ResourceAsset', 'ValidationResult', 'WheelAsset', 'WorkerAsset', 'WorkerType',
     ]
-    missing = [n for n in expected_all if not hasattr(conv, n)]
+    extra_expected = [
+        'extract_source', 'resolve_panel_bokeh_reqs', 'find_requirements',
+    ]
+    missing = [n for n in expected_all + extra_expected if not hasattr(conv, n)]
     if missing:
         print(f"  MISSING: {missing}")
     else:
-        print(f"  OK: all {len(expected_all)} new diagnostic symbols exported")
+        print(f"  OK: all {len(expected_all)} diagnostic symbols + {len(extra_expected)} pipeline helpers exported")
     print(f"  Total __all__ = {len(conv.__all__)}")
-    assert len(conv.__all__) >= 60
+    assert len(conv.__all__) >= 70
+    assert set(expected_all) <= set(conv.__all__)
+    assert set(extra_expected) <= set(conv.__all__)
 
 print("\n=== ALL TESTS PASSED ===")
