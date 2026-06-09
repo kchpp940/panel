@@ -365,40 +365,14 @@ class _state(param.Parameterized):
         self.param.trigger('session_info')
 
     def _destroy_session(self, session_context):
-        session_id = session_context.id
-        sessions = self.session_info['sessions']
-        if session_id in sessions and sessions[session_id]['ended'] is None:
-            session = sessions[session_id]
-            if session['rendered'] is not None:
-                self.session_info['live'] -= 1
-            session['ended'] = dt.datetime.now().timestamp()
-            self.param.trigger('session_info')
-        doc = session_context._document
-
-        # Cleanup periodic callbacks
-        if doc in self._periodic:
-            for cb in self._periodic[doc]:
-                try:
-                    cb._cleanup(session_context)
-                except Exception:
-                    pass
-            del self._periodic[doc]
-
-        # Cleanup Locations
-        if doc in self._locations:
-            loc = state._locations[doc]
-            loc._server_destroy(session_context)
-            del state._locations[doc]
-
-        # Cleanup Notifications
-        if doc in self._notifications:
-            notification = self._notifications[doc]
-            notification._server_destroy(session_context)
-            del state._notifications[doc]
-
-        # Clean up templates
-        if doc in self._templates:
-            del self._templates[doc]
+        from .cleanup import session_cleanup_registry
+        result = session_cleanup_registry.run_cleanup(session_context)
+        if not result.success:
+            for handler_name, exc in result.failures:
+                _state_logger.warning(
+                    "Session cleanup handler %r failed: %s: %s",
+                    handler_name, type(exc).__name__, exc,
+                )
 
     @property
     def _current_stack(self):
@@ -1337,3 +1311,42 @@ class _state(param.Parameterized):
         return decode_token(id_token)
 
 state = _state()
+
+
+def _cleanup_session_info(session_context) -> None:
+    session_id = session_context.id
+    sessions = state.session_info['sessions']
+    if session_id in sessions and sessions[session_id]['ended'] is None:
+        session = sessions[session_id]
+        if session['rendered'] is not None:
+            state.session_info['live'] -= 1
+        session['ended'] = dt.datetime.now().timestamp()
+        state.param.trigger('session_info')
+
+
+def _cleanup_document_state(session_context) -> None:
+    doc = session_context._document
+    state._connected.pop(doc, None)
+    state._loaded.pop(doc, None)
+    state._onload.pop(doc, None)
+    state._change_callbacks.pop(doc, None)
+    state._stylesheets.pop(doc, None)
+    state._extensions_.pop(doc, None)
+    state._rel_paths.pop(doc, None)
+    state._base_urls.pop(doc, None)
+    state._session_outputs.pop(doc, None)
+
+
+from .cleanup import session_cleanup_registry
+
+session_cleanup_registry.register(
+    name="session_info",
+    func=_cleanup_session_info,
+    priority=10,
+)
+
+session_cleanup_registry.register(
+    name="document_state",
+    func=_cleanup_document_state,
+    priority=70,
+)
