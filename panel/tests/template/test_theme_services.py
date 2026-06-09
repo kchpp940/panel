@@ -268,26 +268,66 @@ class TestComponentThemeUpdater:
 
 class TestSoftReloadService:
 
-    def test_should_reload_design_type_change(self):
+    def test_compute_resource_signature_stable_same_input(self):
+        d1 = Fast(theme=FastDefaultTheme)
+        d2 = Fast(theme=FastDefaultTheme)
+        sig1 = SoftReloadService.compute_resource_signature(d1)
+        sig2 = SoftReloadService.compute_resource_signature(d2)
+        assert sig1 == sig2
+        assert len(sig1) == 64
+
+    def test_compute_resource_signature_different_design_type(self):
+        fast = Fast(theme=FastDefaultTheme)
+        bootstrap = Bootstrap(theme=BootstrapDefaultTheme)
+        assert SoftReloadService.compute_resource_signature(fast) != \
+               SoftReloadService.compute_resource_signature(bootstrap)
+
+    def test_compute_resource_signature_different_theme_name(self):
+        light = Fast(theme=FastDefaultTheme)
+        dark = Fast(theme=FastDarkTheme)
+        assert SoftReloadService.compute_resource_signature(light) != \
+               SoftReloadService.compute_resource_signature(dark)
+
+    def test_compute_resource_signature_custom_design_with_different_resources(self):
+        class _CustomThemeA(DefaultTheme):
+            pass
+
+        class _CustomDesignA(Design):
+            _resources = {"css": {"custom_a": "a.css"}}
+            _themes = {"default": _CustomThemeA}
+
+        class _CustomThemeB(DefaultTheme):
+            pass
+
+        class _CustomDesignB(Design):
+            _resources = {"css": {"custom_b": "b.css"}}
+            _themes = {"default": _CustomThemeB}
+
+        a = _CustomDesignA(theme=_CustomThemeA)
+        b = _CustomDesignB(theme=_CustomThemeB)
+        assert SoftReloadService.compute_resource_signature(a) != \
+               SoftReloadService.compute_resource_signature(b)
+
+    def test_should_reload_design_type_change_triggers(self):
         old = Fast(theme=FastDefaultTheme)
         new = Bootstrap(theme=BootstrapDefaultTheme)
         assert SoftReloadService.should_reload(old, new) is True
 
-    def test_should_reload_theme_change(self):
+    def test_should_reload_theme_name_change_triggers(self):
         old = Fast(theme=FastDefaultTheme)
         new = Fast(theme=FastDarkTheme)
         assert SoftReloadService.should_reload(old, new) is True
 
-    def test_should_reload_none_old(self):
+    def test_should_reload_none_old_no_trigger(self):
         new = Fast(theme=FastDefaultTheme)
         assert SoftReloadService.should_reload(None, new) is False
 
-    def test_should_reload_same_design_same_theme_name_no_trigger(self):
+    def test_should_reload_same_signature_no_trigger(self):
         old = Fast(theme=FastDefaultTheme)
         new = Fast(theme=FastDefaultTheme)
         assert SoftReloadService.should_reload(old, new) is False
 
-    def test_should_reload_same_theme_name_different_instances_no_trigger(self):
+    def test_should_reload_bootstrap_same_signature_no_trigger(self):
         old = Bootstrap(theme=BootstrapDefaultTheme)
         new = Bootstrap(theme=BootstrapDefaultTheme)
         assert SoftReloadService.should_reload(old, new) is False

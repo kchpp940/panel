@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import typing as t
 
 from bokeh.document.document import Document
+from bokeh.themes import Theme as _BkTheme, built_in_themes
 
 from ..config import config
 from ..io.state import set_curdoc, state
@@ -261,10 +263,67 @@ class SoftReloadService:
     SoftReloadService 负责主题切换时的软重载机制。
 
     职责：
-    - 判断是否需要触发软重载
+    - 计算 Design 的资源签名（CSS/JS、Bokeh theme、theme name）
+    - 基于资源签名判断是否需要触发软重载
     - 更新 URL 中的 theme 查询参数
     - 通过 location.reload 触发页面刷新
     """
+
+    @staticmethod
+    def compute_resource_signature(design: Design) -> str:
+        """
+        计算 Design 的稳定资源签名。
+
+        签名包含四部分，任一部分变化都意味着需要整页刷新：
+        1. Design._resources：CSS/JS 资源声明（不同 Design 有不同资源文件）
+        2. Theme.base_css / Theme.css：主题级 CSS 文件路径
+        3. Theme.bokeh_theme：Bokeh 主题 JSON 内容（影响绘图渲染）
+        4. Theme._name：主题名称（用于 URL 查询参数和前端主题切换）
+
+        直接基于源数据（ClassVar / param 值）计算，不依赖 resolve_resources()
+        的本地构建文件查找，避免环境差异导致签名不稳定。
+
+        返回值：sha256 十六进制摘要字符串，稳定可比较。
+        """
+        hasher = hashlib.sha256()
+
+        design_cls = type(design)
+        for rtype in sorted(design_cls._resources.keys()):
+            rdata = design_cls._resources[rtype]
+            if isinstance(rdata, dict):
+                for key in sorted(rdata.keys()):
+                    hasher.update(f"{rtype}:{key}:{rdata[key]}".encode("utf-8"))
+            elif isinstance(rdata, list):
+                for item in rdata:
+                    hasher.update(f"{rtype}:{item}".encode("utf-8"))
+            else:
+                hasher.update(f"{rtype}:{rdata}".encode("utf-8"))
+
+        theme = design.theme
+        theme_name = getattr(theme, '_name', 'default') if theme else 'default'
+        hasher.update(f"theme_name:{theme_name}".encode("utf-8"))
+
+        if theme is not None:
+            base_css = getattr(theme, 'base_css', None)
+            if base_css:
+                hasher.update(f"theme_base_css:{base_css}".encode("utf-8"))
+            css = getattr(theme, 'css', None)
+            if css:
+                hasher.update(f"theme_css:{css}".encode("utf-8"))
+
+            bk_theme = theme.bokeh_theme
+            if isinstance(bk_theme, _BkTheme):
+                theme_json = bk_theme._json
+                hasher.update(f"bokeh_theme:{repr(sorted(theme_json.get('attrs', {}).items()))}".encode("utf-8"))
+            elif isinstance(bk_theme, str):
+                bk = built_in_themes.get(bk_theme)
+                if bk is not None:
+                    theme_json = bk._json
+                    hasher.update(f"bokeh_theme:{repr(sorted(theme_json.get('attrs', {}).items()))}".encode("utf-8"))
+                else:
+                    hasher.update(f"bokeh_theme_str:{bk_theme}".encode("utf-8"))
+
+        return hasher.hexdigest()
 
     @staticmethod
     def should_reload(
@@ -274,17 +333,15 @@ class SoftReloadService:
         """
         判断 Design 变更是否需要触发软重载。
 
-        只在以下两种情况触发软重载，避免普通参数更新导致误刷新：
-        1. Design 类型变化（不同 Design 有不同的资源文件，必须整页刷新）
-        2. Theme._name 变化（default ↔ dark，URL 查询参数需要更新，前端主题切换需要整页刷新）
+        基于资源签名比较：只有当 CSS/JS、Bokeh theme 或 theme name 发生变化时才触发。
+        普通 style 参数（如 accent_base_color、corner_radius）变化只走组件参数同步，
+        不触发整页刷新。
         """
         if old_design is None:
             return False
-        if type(old_design) is not type(new_design):
-            return True
-        if SoftReloadService.get_theme_name(old_design) != SoftReloadService.get_theme_name(new_design):
-            return True
-        return False
+        old_sig = SoftReloadService.compute_resource_signature(old_design)
+        new_sig = SoftReloadService.compute_resource_signature(new_design)
+        return old_sig != new_sig
 
     @staticmethod
     def get_theme_name(design: Design) -> str:
