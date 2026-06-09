@@ -98,6 +98,63 @@ class CellClickEvent(ModelEvent):
         )
 
 
+class ProfileSaveEvent(ModelEvent):
+
+    event_name = 'profile-save'
+
+    def __init__(self, model, name, state):
+        self.name = name
+        self.state = state
+        super().__init__(model=model)
+
+    def __repr__(self):
+        return (
+            f'{type(self).__name__}(name={self.name})'
+        )
+
+
+class ProfileLoadEvent(ModelEvent):
+
+    event_name = 'profile-load'
+
+    def __init__(self, model, name):
+        self.name = name
+        super().__init__(model=model)
+
+    def __repr__(self):
+        return (
+            f'{type(self).__name__}(name={self.name})'
+        )
+
+
+class ProfileDeleteEvent(ModelEvent):
+
+    event_name = 'profile-delete'
+
+    def __init__(self, model, name):
+        self.name = name
+        super().__init__(model=model)
+
+    def __repr__(self):
+        return (
+            f'{type(self).__name__}(name={self.name})'
+        )
+
+
+class ProfileSwitchEvent(ModelEvent):
+
+    event_name = 'profile-switch'
+
+    def __init__(self, model, name):
+        self.name = name
+        super().__init__(model=model)
+
+    def __repr__(self):
+        return (
+            f'{type(self).__name__}(name={self.name})'
+        )
+
+
 CSS_URLS = []
 for theme in TABULATOR_THEMES:
     if theme == 'default':

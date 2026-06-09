@@ -252,6 +252,7 @@ class ColumnProfile:
         ColumnProfile.set_groupby(model, state.groupby)
         ColumnProfile.set_page(model, state.pagination.page)
         ColumnProfile.set_page_size(model, state.pagination.page_size)
+        ColumnProfile.set_pagination_mode(model, state.pagination.pagination)
 
     # --- DataFrame Processing ---
 

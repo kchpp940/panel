@@ -191,10 +191,6 @@ class BaseTable(ReactiveData, Widget):
         self._renamed_cols = {
             ('_'.join(col) if isinstance(col, tuple) else str(col)) if str(col) != col else col: col for col in self._get_fields()
         }
-        self._column_profile.set_context(
-            renamed_cols=self._renamed_cols,
-            indexes=self.indexes,
-        )
 
     def _reset_selection(self, event):
         if 'selectable' in self.param and not self.selectable:
@@ -455,9 +451,7 @@ class BaseTable(ReactiveData, Widget):
                 self._update_columns(event, model)
 
     def _sort_df(self, df: pd.DataFrame) -> pd.DataFrame:
-        return self._column_profile.sort_dataframe(
-            df, self._column_profile.get_sorters(self)
-        )
+        return self._column_profile.sort_dataframe(df, self.sorters)
 
     def _filter_dataframe(
         self,
@@ -478,7 +472,7 @@ class BaseTable(ReactiveData, Widget):
         DataFrame
             The filtered DataFrame
         """
-        hf = self._column_profile.get_filters(self) if header_filters else []
+        hf = self.filters if header_filters else []
         int_filters = self._filters if internal_filters else []
         return self._column_profile.filter_dataframe(
             df,
@@ -491,7 +485,7 @@ class BaseTable(ReactiveData, Widget):
     def _get_header_filters(self, df: pd.DataFrame) -> list[pd.Series | np.ndarray]:
         return self._column_profile.get_header_filters(
             df,
-            self._column_profile.get_filters(self),
+            self.filters,
             getattr(self, 'header_filters', None),
         )
 
@@ -1292,6 +1286,17 @@ class Tabulator(BaseTable):
         if style is not None:
             self.style._todo = style._todo
         self.param.selection.callable = self._get_selectable
+        self._column_profile.set_context(
+            renamed_cols=self._renamed_cols,
+            indexes=self.indexes,
+        )
+
+    @param.depends('value', 'show_index', watch=True, on_init=False)
+    def _refresh_column_profile_context(self):
+        self._column_profile.set_context(
+            renamed_cols=self._renamed_cols,
+            indexes=self.indexes,
+        )
 
     @param.depends('value', watch=True, on_init=True)
     def _apply_max_size(self):
@@ -1426,7 +1431,54 @@ class Tabulator(BaseTable):
             events.pop('page_size')
         return super()._process_events(events)
 
+    def _handle_profile_save(self, event) -> None:
+        """
+        Handle a profile-save event from the frontend.
+
+        The frontend collects and serializes the current column state,
+        then we store it under ``event.name`` (or auto-generate a name
+        when ``event.name`` is ``None``).
+        """
+        name = event.name
+        state_data = event.state
+        if name is None:
+            existing = set(self._column_profile.list_profile_names(self))
+            i = 0
+            while f"profile_{i}" in existing:
+                i += 1
+            name = f"profile_{i}"
+        profiles = self._column_profile.get_profiles(self)
+        profiles[name] = state_data
+        self._column_profile.set_profiles(self, profiles)
+        self._column_profile.set_active_profile(self, name)
+
+    def _handle_profile_load(self, event) -> None:
+        """
+        Handle a profile-load event: deserialize the stored state and
+        apply it to the model. The Bokeh sync will push the changes
+        back to the frontend, which then applies them to Tabulator.
+        """
+        self._column_profile.load_profile(self, event.name)
+
+    def _handle_profile_delete(self, event) -> None:
+        self._column_profile.delete_profile(self, event.name)
+
+    def _handle_profile_switch(self, event) -> None:
+        self._column_profile.switch_profile(self, event.name)
+
     def _process_event(self, event) -> None:
+        if event.event_name == 'profile-save':
+            self._handle_profile_save(event)
+            return
+        if event.event_name == 'profile-load':
+            self._handle_profile_load(event)
+            return
+        if event.event_name == 'profile-delete':
+            self._handle_profile_delete(event)
+            return
+        if event.event_name == 'profile-switch':
+            self._handle_profile_switch(event)
+            return
         if event.event_name == 'selection-change':
             if self._column_profile.is_remote_pagination(self):
                 self._update_selection(event)

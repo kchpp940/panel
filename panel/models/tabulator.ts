@@ -18,7 +18,7 @@ import {comm_settings} from "./comm_manager"
 import {transform_cds_to_records} from "./data"
 import {HTMLBox, HTMLBoxView} from "./layout"
 import {schedule_when, transformJsPlaceholders} from "./util"
-import {ColumnProfile, type TabulatorModelLike} from "./column_profile"
+import {ColumnProfile, type TabulatorModelLike, type ProfileEventDispatcher} from "./column_profile"
 
 import tabulator_css from "styles/models/tabulator.css"
 
@@ -61,6 +61,62 @@ export class SelectionEvent extends ModelEvent {
 
   static {
     this.prototype.event_name = "selection-change"
+  }
+}
+
+export class ProfileSaveEvent extends ModelEvent {
+  constructor(readonly name: string, readonly state: {[key: string]: any}) {
+    super()
+  }
+
+  protected override get event_values(): Attrs {
+    return {model: this.origin, name: this.name, state: this.state}
+  }
+
+  static {
+    this.prototype.event_name = "profile-save"
+  }
+}
+
+export class ProfileLoadEvent extends ModelEvent {
+  constructor(readonly name: string) {
+    super()
+  }
+
+  protected override get event_values(): Attrs {
+    return {model: this.origin, name: this.name}
+  }
+
+  static {
+    this.prototype.event_name = "profile-load"
+  }
+}
+
+export class ProfileDeleteEvent extends ModelEvent {
+  constructor(readonly name: string) {
+    super()
+  }
+
+  protected override get event_values(): Attrs {
+    return {model: this.origin, name: this.name}
+  }
+
+  static {
+    this.prototype.event_name = "profile-delete"
+  }
+}
+
+export class ProfileSwitchEvent extends ModelEvent {
+  constructor(readonly name: string | null) {
+    super()
+  }
+
+  protected override get event_values(): Attrs {
+    return {model: this.origin, name: this.name}
+  }
+
+  static {
+    this.prototype.event_name = "profile-switch"
   }
 }
 
@@ -677,6 +733,21 @@ export class DataTabulatorView extends HTMLBoxView {
     const configuration = this.getConfiguration()
     this.tabulator = new Tabulator(el, configuration)
     this.column_profile = new ColumnProfile(this.tabulator, this.model as unknown as TabulatorModelLike)
+    const dispatcher: ProfileEventDispatcher = {
+      dispatchSave: (name, state) => {
+        this.model.trigger_event(new ProfileSaveEvent(name, state))
+      },
+      dispatchLoad: (name) => {
+        this.model.trigger_event(new ProfileLoadEvent(name))
+      },
+      dispatchDelete: (name) => {
+        this.model.trigger_event(new ProfileDeleteEvent(name))
+      },
+      dispatchSwitch: (name) => {
+        this.model.trigger_event(new ProfileSwitchEvent(name))
+      },
+    }
+    this.column_profile.setEventDispatcher(dispatcher)
     this.watch_stylesheets()
     this.init_callbacks()
   }

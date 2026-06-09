@@ -47,9 +47,17 @@ export interface TabulatorModelLike {
   active_profile: string | null
 }
 
+export interface ProfileEventDispatcher {
+  dispatchSave(name: string | null, state: {[key: string]: any}): void
+  dispatchLoad(name: string): void
+  dispatchDelete(name: string): void
+  dispatchSwitch(name: string | null): void
+}
+
 export class ColumnProfile {
   private tabulator: any
   private model: TabulatorModelLike
+  private dispatcher: ProfileEventDispatcher | null = null
   private _updating_sort: boolean = false
   private _updating_page: boolean = false
   private _updating_page_size: boolean = false
@@ -58,6 +66,10 @@ export class ColumnProfile {
   constructor(tabulator: any, model: TabulatorModelLike) {
     this.tabulator = tabulator
     this.model = model
+  }
+
+  setEventDispatcher(dispatcher: ProfileEventDispatcher | null): void {
+    this.dispatcher = dispatcher
   }
 
   updateTabulator(tabulator: any): void {
@@ -484,75 +496,35 @@ export class ColumnProfile {
     }
     this._updating_profile = true
     try {
-      if (name == null) {
-        const active = this.getActiveProfile()
-        if (active != null) {
-          name = active
-        } else {
-          const existing = new Set(this.listProfileNames())
-          let i = 0
-          while (existing.has(`profile_${i}`)) {
-            i += 1
-          }
-          name = `profile_${i}`
-        }
-      }
       const state = this.collectAll()
-      const profiles = this.getProfiles()
-      profiles[name] = this.serializeProfile(state)
-      this.setProfiles(profiles)
-      this.setActiveProfile(name)
-      return name
+      const serialized = this.serializeProfile(state)
+      this.dispatcher?.dispatchSave(name ?? null, serialized)
+      return name ?? ""
     } finally {
       this._updating_profile = false
     }
   }
 
   loadProfile(name: string): ColumnProfileState | null {
-    const state = this.getProfileState(name)
-    if (!state) {
-      return null
-    }
     if (this._updating_profile) {
-      return state
+      return null
     }
     this._updating_profile = true
     try {
-      this._updating_sort = true
-      this._updating_page = true
-      this._updating_page_size = true
-      try {
-        this.setHiddenColumns(state.hidden_columns)
-        this.setSorters(state.sorters)
-        this.setFilters(state.filters)
-        this.setGroupBy(state.groupby)
-        this.setPage(state.pagination.page)
-        this.setPageSize(state.pagination.page_size)
-        this.setActiveProfile(name)
-      } finally {
-        this._updating_sort = false
-        this._updating_page = false
-        this._updating_page_size = false
-      }
-      this.applyAll(state)
-      return state
+      this.dispatcher?.dispatchLoad(name)
+      return null
     } finally {
       this._updating_profile = false
     }
   }
 
   deleteProfile(name: string): boolean {
-    const profiles = this.getProfiles()
-    if (!(name in profiles)) {
+    if (this._updating_profile) {
       return false
     }
     this._updating_profile = true
     try {
-      delete profiles[name]
-      this.setProfiles(profiles)
-      if (this.getActiveProfile() === name) {
-        this.setActiveProfile(null)
-      }
+      this.dispatcher?.dispatchDelete(name)
       return true
     } finally {
       this._updating_profile = false
@@ -560,16 +532,16 @@ export class ColumnProfile {
   }
 
   switchProfile(name: string | null): ColumnProfileState | null {
-    if (name === null) {
-      this._updating_profile = true
-      try {
-        this.setActiveProfile(null)
-      } finally {
-        this._updating_profile = false
-      }
+    if (this._updating_profile) {
       return null
     }
-    return this.loadProfile(name)
+    this._updating_profile = true
+    try {
+      this.dispatcher?.dispatchSwitch(name)
+      return null
+    } finally {
+      this._updating_profile = false
+    }
   }
 
   serializeProfile(state: ColumnProfileState): any {
