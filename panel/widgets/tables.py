@@ -1991,7 +1991,7 @@ class Tabulator(BaseTable):
         self, doc: Document, root: Model | None = None,
         parent: Model | None = None, comm: Comm | None = None
     ) -> Model:
-        require_component("tabulator", check_python=False)
+        require_component("tabulator")
         Tabulator._widget_type = lazy_load(
             'panel.models.tabulator', 'DataTabulator', isinstance(comm, JupyterComm), root
         )

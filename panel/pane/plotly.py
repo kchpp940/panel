@@ -357,7 +357,7 @@ class Plotly(ModelPane):
         self, doc: Document, root: Model | None = None,
         parent: Model | None = None, comm: Comm | None = None
     ) -> Model:
-        require_component("plotly", check_python=False)
+        require_component("plotly")
         Plotly._bokeh_model = lazy_load(
             'panel.models.plotly', 'PlotlyPlot', isinstance(comm, JupyterComm), root
         )

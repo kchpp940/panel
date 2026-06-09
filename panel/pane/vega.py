@@ -443,7 +443,7 @@ class Vega(ModelPane):
         self, doc: Document, root: Model | None = None,
         parent: Model | None = None, comm: Comm | None = None
     ) -> Model:
-        require_component("vega", check_python=False)
+        require_component("vega")
         Vega._bokeh_model = lazy_load(
             'panel.models.vega', 'VegaPlot', isinstance(comm, JupyterComm), root
         )

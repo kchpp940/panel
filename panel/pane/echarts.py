@@ -143,7 +143,7 @@ class ECharts(ModelPane):
         self, doc: Document, root: Model | None = None,
         parent: Model | None = None, comm: Comm | None = None
     ) -> Model:
-        require_component("echarts", check_python=False)
+        require_component("echarts")
         if self.is_pyecharts(self.object):
             from pyecharts.commons.utils import JsCode  # type: ignore[import-untyped]
             try:

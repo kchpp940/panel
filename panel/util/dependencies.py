@@ -252,6 +252,7 @@ def check_frontend_resources(
     extension_name: str,
     component: str,
     bundled_subdir: str | None = None,
+    js_files: list[str] | None = None,
 ) -> None:
     """
     Check that the compiled front-end assets for a Panel extension are
@@ -260,7 +261,24 @@ def check_frontend_resources(
     This catches the case where the Python package is installed but the
     JS/CSS bundles have not been built (e.g. an editable install from
     source without running the build step).
+
+    Parameters
+    ----------
+    extension_name : str
+        The Panel extension name (matches keys in
+        ``panel.config.panel_extension._imports``).
+    component : str
+        Human-readable component name for error messages.
+    bundled_subdir : str, optional
+        Subdirectory under ``panel/dist/bundled/`` where the front-end
+        assets live.  Defaults to the lower-cased Bokeh model class name
+        (e.g. ``"plotlyplot"`` for ``PlotlyPlot``).
+    js_files : list[str], optional
+        List of glob patterns for the required JS files under the
+        bundled subdir.  If not provided, falls back to looking for any
+        ``*.js`` / ``*.mjs`` file (less precise).
     """
+    import fnmatch
     from ..io.resources import BUNDLE_DIR, use_cdn
 
     if use_cdn():
@@ -272,21 +290,44 @@ def check_frontend_resources(
         _panel_dist_dir() / "bundled" / bundled_subdir,
     ]
 
-    has_any = False
+    found_all = False
+    missing_patterns: list[str] = []
+
     for d in search_dirs:
         if not d.exists():
             continue
-        js_files = list(d.glob("*.js")) + list(d.glob("*.mjs"))
         if js_files:
-            has_any = True
-            break
+            all_files = {
+                p.relative_to(d).as_posix()
+                for p in d.rglob("*")
+                if p.is_file()
+            }
+            missing = [
+                pat for pat in js_files
+                if not any(fnmatch.fnmatch(f, pat) for f in all_files)
+            ]
+            if not missing:
+                found_all = True
+                break
+            missing_patterns = missing
+        else:
+            js_files_found = list(d.glob("*.js")) + list(d.glob("*.mjs"))
+            if js_files_found:
+                found_all = True
+                break
 
-    if has_any:
+    if found_all:
         return
+
+    if js_files and missing_patterns:
+        file_desc = "Required JS files not found: " + ", ".join(missing_patterns)
+    else:
+        file_desc = f"No JS bundle files found in '{bundled_subdir}/'"
 
     details = (
         f"The Python package appears to be installed, but the front-end "
         f"bundle for the '{extension_name}' extension could not be found. "
+        f"{file_desc}. "
         "This usually happens when using an editable/development install "
         "without first building the JavaScript resources."
         "\n\n"
@@ -298,7 +339,10 @@ def check_frontend_resources(
     )
     msg = _format_message(
         component=component,
-        problem=f"front-end JS resources for extension '{extension_name}' are missing",
+        problem=(
+            f"front-end JS resources for extension '{extension_name}' are "
+            f"missing ({file_desc})"
+        ),
         install_command="pip install build && python -m build --wheel",
         details=details,
     )
@@ -461,6 +505,9 @@ class _ComponentConfig(t.TypedDict, total=False):
     extras: str
     extension_name: str
     bundled_subdir: str
+    js_files: list[str]
+    check_js_resources: bool
+    check_python: bool
 
 
 OPTIONAL_DEPENDENCIES: t.Final[dict[str, _ComponentConfig]] = {
@@ -472,36 +519,55 @@ OPTIONAL_DEPENDENCIES: t.Final[dict[str, _ComponentConfig]] = {
         "conda_channel": "plotly",
         "extras": "recommended",
         "extension_name": "plotly",
-        "bundled_subdir": "plotly",
+        "bundled_subdir": "plotlyplot",
+        "js_files": ["plotly-*.min.js"],
+        "check_js_resources": True,
+        "check_python": False,
     },
     "altair": {
         "component": "Vega pane (Altair support)",
         "python_package": "altair",
+        "min_version": "4.0.0",
         "pip_package": "altair",
         "conda_package": "altair",
         "conda_channel": "conda-forge",
+        "check_js_resources": False,
+        "check_python": True,
     },
     "vega": {
         "component": "Vega pane",
         "extension_name": "vega",
-        "bundled_subdir": "vega",
+        "bundled_subdir": "vegaplot",
+        "js_files": ["vega@*", "vega-lite@*", "vega-embed@*"],
+        "check_js_resources": True,
+        "check_python": False,
     },
     "vl_convert": {
         "component": "Vega pane export",
         "python_package": "vl_convert",
         "pip_package": "vl-convert-python",
+        "conda_package": "vl-convert-python",
+        "conda_channel": "conda-forge",
+        "check_js_resources": False,
+        "check_python": True,
     },
     "pyecharts": {
         "component": "ECharts pane (pyecharts support)",
         "python_package": "pyecharts",
+        "min_version": "1.0.0",
         "pip_package": "pyecharts",
         "conda_package": "pyecharts",
         "conda_channel": "conda-forge",
+        "check_js_resources": False,
+        "check_python": True,
     },
     "echarts": {
         "component": "ECharts pane",
         "extension_name": "echarts",
         "bundled_subdir": "echarts",
+        "js_files": ["echarts@*/dist/echarts.min.js", "echarts-gl@*/dist/echarts-gl.min.js"],
+        "check_js_resources": True,
+        "check_python": False,
     },
     "holoviews": {
         "component": "HoloViews pane",
@@ -511,11 +577,16 @@ OPTIONAL_DEPENDENCIES: t.Final[dict[str, _ComponentConfig]] = {
         "conda_package": "holoviews",
         "conda_channel": "conda-forge",
         "extras": "recommended",
+        "check_js_resources": False,
+        "check_python": True,
     },
     "tabulator": {
         "component": "Tabulator widget",
         "extension_name": "tabulator",
         "bundled_subdir": "datatabulator",
+        "js_files": ["tabulator-tables@*/dist/js/tabulator.min.js", "luxon/build/global/luxon.min.js"],
+        "check_js_resources": True,
+        "check_python": False,
     },
 }
 
@@ -538,23 +609,31 @@ def _get_config(name: str) -> _ComponentConfig:
 def require_component(
     name: str,
     *,
-    check_js_resources: bool = True,
-    check_python: bool = True,
+    check_js_resources: bool | None = None,
+    check_python: bool | None = None,
 ) -> None:
     """
     Run diagnostics for a registered optional dependency.
+
+    All diagnostic parameters (minimum version, install commands, JS
+    bundle subdirectory, required JS files, which checks to run by
+    default) are sourced from the central
+    :data:`OPTIONAL_DEPENDENCIES` registry.  Components should **not**
+    duplicate these parameters at the call site.
 
     Parameters
     ----------
     name : str
         Key into :data:`OPTIONAL_DEPENDENCIES` (e.g. ``"plotly"``,
         ``"holoviews"``, ``"tabulator"``).
-    check_js_resources : bool, default True
-        Whether to verify front-end JS bundles exist on disk (skipped
-        automatically when CDN mode is active).
-    check_python : bool, default True
-        Whether to verify the Python package is installed and meets the
-        minimum version requirement.
+    check_js_resources : bool, optional
+        Override whether to verify front-end JS bundles exist on disk
+        (skipped automatically when CDN mode is active).  Defaults to
+        the value declared in the registry.
+    check_python : bool, optional
+        Override whether to verify the Python package is installed and
+        meets the minimum version requirement.  Defaults to the value
+        declared in the registry.
 
     Raises
     ------
@@ -568,7 +647,16 @@ def require_component(
     component = cfg.get("component", name)
     python_package = cfg.get("python_package")
 
-    if check_python and python_package is not None:
+    do_check_python = (
+        check_python if check_python is not None
+        else cfg.get("check_python", python_package is not None)
+    )
+    do_check_js = (
+        check_js_resources if check_js_resources is not None
+        else cfg.get("check_js_resources", cfg.get("extension_name") is not None)
+    )
+
+    if do_check_python and python_package is not None:
         check_python_package(
             module_name=python_package,
             component=component,
@@ -580,11 +668,12 @@ def require_component(
         )
 
     extension_name = cfg.get("extension_name")
-    if check_js_resources and extension_name is not None:
+    if do_check_js and extension_name is not None:
         check_frontend_resources(
             extension_name,
             component,
             bundled_subdir=cfg.get("bundled_subdir"),
+            js_files=cfg.get("js_files"),
         )
 
 
@@ -595,6 +684,9 @@ def import_component(
 ) -> t.Any:
     """
     Import a module for a registered optional dependency.
+
+    All diagnostic parameters (minimum version, install commands) are
+    sourced from the central :data:`OPTIONAL_DEPENDENCIES` registry.
 
     Parameters
     ----------
@@ -613,7 +705,8 @@ def import_component(
     Raises
     ------
     OptionalDependencyError
-        If the package is missing or too old, with full diagnostic info.
+        If the package is missing or too old, with full diagnostic info
+        (component name, install command, version info).
     ValueError
         If ``name`` is not registered or has no ``python_package``.
     """
