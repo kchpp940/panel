@@ -58,6 +58,8 @@ jobs:
           if-no-files-found: error
       - name: Verify size
         run: python scripts/verify_build_size.py conda
+      - name: Verify frontend artifacts
+        run: python scripts/verify_frontend_artifacts.py
 
   conda_publish:
     name: Publish Conda
@@ -104,6 +106,8 @@ jobs:
         run: |
           python scripts/verify_build_size.py sdist
           python scripts/verify_build_size.py whl
+      - name: Verify frontend artifacts
+        run: python scripts/verify_frontend_artifacts.py
 
   pip_install:
     name: Install PyPI
@@ -163,6 +167,8 @@ jobs:
           path: ${{ env.PACKAGE }}/${{ env.TARBALL }}
       - name: Verify size
         run: python scripts/verify_build_size.py npm
+      - name: Verify frontend artifacts
+        run: python scripts/verify_frontend_artifacts.py
 
   npm_publish:
     name: Publish NPM
@@ -206,6 +212,8 @@ jobs:
       - name: build CDN
         run: |
           pixi run build-pip
+      - name: Verify frontend artifacts
+        run: python scripts/verify_frontend_artifacts.py
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: always()
         with:

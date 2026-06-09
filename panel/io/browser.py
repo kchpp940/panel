@@ -85,25 +85,3 @@ class BrowserInfo(Syncable):
         super()._cleanup(root)
         if ref in state._views:
             del state._views[ref]
-
-
-def register_session_cleanup_handlers(registry) -> None:
-    """Register BrowserInfo session cleanup handlers with the given registry."""
-
-    def _cleanup_browser_info(session_context) -> None:
-        doc = session_context._document
-        if doc in state._browsers:
-            browser = state._browsers[doc]
-            for root_doc in list(browser._documents.keys()):
-                try:
-                    root = browser._documents.get(root_doc)
-                    browser._cleanup(root)
-                except Exception:
-                    pass
-            del state._browsers[doc]
-
-    registry.register(
-        name="browser_info",
-        func=_cleanup_browser_info,
-        priority=50,
-    )

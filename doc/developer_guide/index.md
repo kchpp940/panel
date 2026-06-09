@@ -265,6 +265,26 @@ pixi run build-pyodide
 pixi run build-npm
 ```
 
+### Frontend Artifact Verification
+
+After building, Panel automatically verifies that all frontend artifacts are consistent and complete. This verification can also be run standalone:
+
+```bash
+pixi run verify-frontend-artifacts
+```
+
+The verification checks that:
+
+- **TypeScript models in `panel/models/`** have corresponding built JS in `panel/dist/`
+- **CSS files** exist in `panel/dist/css/`
+- **Bundled resources** referenced by Python models and templates (via `__javascript_raw__`, `__css_raw__`, `__tarball__`, `_css`, `_js`) exist in `panel/dist/bundled/`
+- **Source maps** are not orphaned (every `.map` file has its corresponding source)
+- **`package.json`** `files` field and `main` entry are consistent with actual dist contents
+- **Python package data** configuration in `pyproject.toml` matches the actual dist directory
+- **Wheel contents** (if a wheel exists in `dist/`) include all files from `panel/dist/`
+
+The verification runs automatically during the build process (via `hatch_build.py`) and in the CI workflow. Missing JS/CSS, stale sourcemaps, unpackaged models, or references to non-existent frontend modules will cause the build to fail.
+
 ## Continuous Integration
 
 Every push to the `main` branch or any PR branch on GitHub automatically triggers a test build with [GitHub Actions](https://github.com/features/actions).

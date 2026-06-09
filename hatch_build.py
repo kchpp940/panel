@@ -44,6 +44,21 @@ def bundle_resources():
         print(f"{GREEN}[PANEL]{RESET} Failed bundling custom model resources", flush=True)
         raise e
 
+
+def verify_frontend_artifacts():
+    import subprocess
+
+    print(f"{GREEN}[PANEL]{RESET} Starting frontend artifact verification", flush=True)
+    verify_script = BASE_DIR / "scripts" / "verify_frontend_artifacts.py"
+    result = subprocess.run(
+        [sys.executable, str(verify_script)],
+        cwd=str(BASE_DIR),
+    )
+    if result.returncode != 0:
+        print(f"{RED}[PANEL]{RESET} Frontend artifact verification FAILED", flush=True)
+        sys.exit(1)
+    print(f"{GREEN}[PANEL]{RESET} Finished frontend artifact verification", flush=True)
+
 def clean_js_version(version):
     version = version.replace("-", "")
     for dev in ("a", "b", "rc"):
@@ -79,3 +94,4 @@ class BuildHook(BuildHookInterface):
         if "PANEL_LITE" not in os.environ:
             build_models()
             bundle_resources()
+            verify_frontend_artifacts()

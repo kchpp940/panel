@@ -17,7 +17,6 @@ from .state import state
 if t.TYPE_CHECKING:
     from bokeh.document import Document
     from bokeh.model import Model
-    from bokeh.server.contexts import BokehSessionContext
     from pyviz_comms import Comm
 
 
@@ -73,21 +72,6 @@ class NotificationAreaBase(param.Parameterized):
         Position of the notification area on the screen (e.g., 'top-right', 'bottom-left').""")  # type: ignore[assignment, ty:invalid-assignment]
 
     __abstract = True
-
-    def __init__(self, **params):
-        super().__init__(**params)
-        self._notification_watchers = {}
-
-    def _server_destroy(self, session_context: BokehSessionContext) -> None:
-        doc = session_context._document
-        for obj, watcher in list(self._notification_watchers.items()):
-            try:
-                obj.param.unwatch(watcher)
-            except Exception:
-                pass
-        self._notification_watchers.clear()
-        if doc in getattr(self, '_documents', {}):
-            del self._documents[doc]
 
     def clear(self):
         raise NotImplementedError
@@ -300,6 +284,7 @@ class NotificationArea(NotificationAreaBase, ReactiveHTML):
 
     def __init__(self, **params):
         super().__init__(**params)
+        self._notification_watchers = {}
 
     def _remove_notification(self, event):
         if event.obj in self.notifications:
@@ -414,20 +399,3 @@ class NotificationArea(NotificationAreaBase, ReactiveHTML):
 
 # Construct a DataModel for Notification
 _DATA_MODELS[Notification] = construct_data_model(Notification)
-
-
-def register_session_cleanup_handlers(registry) -> None:
-    """Register NotificationArea session cleanup handlers with the given registry."""
-
-    def _cleanup_notifications(session_context) -> None:
-        doc = session_context._document
-        if doc in state._notifications:
-            notification = state._notifications[doc]
-            notification._server_destroy(session_context)
-            del state._notifications[doc]
-
-    registry.register(
-        name="notifications",
-        func=_cleanup_notifications,
-        priority=40,
-    )
