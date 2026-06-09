@@ -7,16 +7,31 @@ import typing as t
 import uuid
 
 from ._convert import (
+    AppConversionManifest,
+    AppReport,
+    AssetDetail,
+    AssetIssue,
+    AssetStatus,
     BOKEH_CDN_WHL,
     BOKEH_LOCAL_WHL,
     BOKEH_VERSION,
     CDN_DIST,
     CDN_ROOT,
+    CachePolicy,
+    ConsistencyReport,
+    ConversionReport,
+    DiagnosticsSummary,
     DIST_DIR,
     ICON_DIR,
     INDEX_TEMPLATE,
     INIT_SERVICE_WORKER,
+    IssueSeverity,
     LOCAL_PREFIX,
+    LocalizationStats,
+    ManifestCollector,
+    ManifestPersistence,
+    ManifestValidator,
+    MINIMUM_VERSIONS,
     PANEL_CDN_WHL,
     PANEL_LOCAL_WHL,
     POST,
@@ -34,16 +49,20 @@ from ._convert import (
     PYSCRIPT_VERSION,
     PWA_IMAGES,
     PWA_MANIFEST_TEMPLATE,
+    Provenance,
     PY_VERSION,
+    RemoteURLRef,
     SERVICE_WORKER_TEMPLATE,
     WEB_WORKER_TEMPLATE,
     WHL_PATH,
     WORKER_HANDLER_TEMPLATE,
-    ManifestCollector,
-    ManifestPersistence,
-    ManifestValidator,
     ReportRenderer,
+    ResourceAsset,
     Runtimes,
+    ValidationResult,
+    WheelAsset,
+    WorkerAsset,
+    WorkerType,
     build_pwa_manifest,
     collect_python_requirements,
     loading_resources,
@@ -58,20 +77,33 @@ from .state import state
 if t.TYPE_CHECKING:
     from collections.abc import Sequence
 
-MINIMUM_VERSIONS: dict[str, str] = {}
-
 __all__ = [
+    "AppConversionManifest",
+    "AppReport",
+    "AssetDetail",
+    "AssetIssue",
+    "AssetStatus",
     "BOKEH_CDN_WHL",
     "BOKEH_LOCAL_WHL",
     "BOKEH_VERSION",
     "CDN_DIST",
     "CDN_ROOT",
+    "CachePolicy",
+    "ConsistencyReport",
+    "ConversionReport",
+    "DiagnosticsSummary",
     "DIST_DIR",
     "DummyRequirement",
     "ICON_DIR",
-    "INIT_SERVICE_WORKER",
     "INDEX_TEMPLATE",
+    "INIT_SERVICE_WORKER",
+    "IssueSeverity",
     "LOCAL_PREFIX",
+    "LocalizationStats",
+    "ManifestCollector",
+    "ManifestPersistence",
+    "ManifestValidator",
+    "MINIMUM_VERSIONS",
     "PANEL_CDN_WHL",
     "PANEL_LOCAL_WHL",
     "POST",
@@ -89,12 +121,20 @@ __all__ = [
     "PYSCRIPT_VERSION",
     "PWA_IMAGES",
     "PWA_MANIFEST_TEMPLATE",
+    "Provenance",
     "PY_VERSION",
+    "RemoteURLRef",
+    "ReportRenderer",
+    "ResourceAsset",
     "Runtimes",
     "SERVICE_WORKER_TEMPLATE",
+    "ValidationResult",
     "WEB_WORKER_TEMPLATE",
     "WHL_PATH",
     "WORKER_HANDLER_TEMPLATE",
+    "WheelAsset",
+    "WorkerAsset",
+    "WorkerType",
     "build_pwa_manifest",
     "collect_python_requirements",
     "convert_app",
@@ -103,6 +143,8 @@ __all__ = [
     "make_index",
     "pack_files",
     "script_to_html",
+    "set_resource_mode",
+    "state",
 ]
 
 
@@ -120,6 +162,7 @@ def convert_app(
     inline: bool = False,
     compiled: bool = False,
     verbose: bool = True,
+    generate_assets_report: bool = True,
 ):
     if dest_path is None:
         dest_path = pathlib.Path('./')
@@ -165,6 +208,21 @@ def convert_app(
     renderer = ReportRenderer(verbose=verbose)
     app_report = renderer.build_app_report(app_manifest)
     renderer.print_app_summary(app_report)
+
+    if generate_assets_report and app_manifest.dest_path.is_dir():
+        try:
+            conv_report = ConversionReport(
+                total_apps=1,
+                succeeded=1 if app_report.success else 0,
+                failed=0 if app_report.success else 1,
+                app_reports=[app_report],
+                pwa_enabled=build_pwa,
+            )
+            renderer.write_assets_report(
+                conv_report, app_manifest.dest_path, format='both'
+            )
+        except Exception:
+            pass
 
     if not app_report.success:
         return None
@@ -345,3 +403,25 @@ def convert_apps(
         f.write(worker)
     if verbose:
         print('Successfully wrote serviceWorker.js.')
+
+    if verbose and dest_path.is_dir():
+        try:
+            extra_outputs = []
+            if (dest_path / 'index.html').is_file():
+                extra_outputs.append(str(dest_path / 'index.html'))
+            if (dest_path / 'site.webmanifest').is_file():
+                extra_outputs.append(str(dest_path / 'site.webmanifest'))
+            if (dest_path / 'serviceWorker.js').is_file():
+                extra_outputs.append(str(dest_path / 'serviceWorker.js'))
+            renderer = ReportRenderer(verbose=False)
+            conv_report = ConversionReport(
+                total_apps=len(files),
+                succeeded=len(files),
+                failed=max(0, len(apps) - len(files)),
+                app_reports=[],
+                extra_outputs=extra_outputs,
+                pwa_enabled=build_pwa,
+            )
+            renderer.write_assets_report(conv_report, dest_path, format='both')
+        except Exception:
+            pass

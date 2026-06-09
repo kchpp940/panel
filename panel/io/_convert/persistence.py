@@ -40,7 +40,9 @@ from ..state import set_curdoc, state
 from .manifest import (
     AppConversionManifest,
     AssetStatus,
+    CachePolicy,
     IssueSeverity,
+    Provenance,
     Runtimes,
     WorkerType,
 )
@@ -375,6 +377,8 @@ class ManifestPersistence:
 
     def localize_requirement_urls(self) -> None:
         manifest = self._manifest
+        if not manifest.original_requirements:
+            manifest.original_requirements = list(manifest.requirements)
         localized: list[str] = []
         for req in manifest.requirements:
             try:
@@ -383,11 +387,39 @@ class ManifestPersistence:
                 localized.append(req)
                 continue
 
-            if req_as_url.scheme == 'file':
+            is_file_scheme = req_as_url.scheme == 'file'
+            is_rel_whl = (
+                req_as_url.scheme == ''
+                and os.path.basename(req_as_url.path).endswith('.whl')
+                and not req.endswith('.tar.gz')
+            )
+
+            if is_file_scheme or is_rel_whl:
+                wheel_name = os.path.basename(req_as_url.path if req_as_url.scheme else req)
+                if wheel_name in manifest.wheels and manifest.wheels[wheel_name].emfs_path:
+                    wheel = manifest.wheels[wheel_name]
+                    wheel.original_source = req
+                    wheel.status.original_url = req
+                    wheel.status.localized = True
+                    wheel.status.provenance = Provenance.LOCAL_WHEEL
+                    wheel.status.cache_policy = CachePolicy.PRE_CACHE
+                    localized.append(wheel.emfs_path)
+                else:
+                    localized.append(req)
+            elif req_as_url.scheme in ('http', 'https'):
                 wheel_name = os.path.basename(req_as_url.path)
                 if wheel_name in manifest.wheels and manifest.wheels[wheel_name].emfs_path:
-                    localized.append(manifest.wheels[wheel_name].emfs_path)
+                    wheel = manifest.wheels[wheel_name]
+                    wheel.original_source = req
+                    wheel.status.original_url = req
+                    wheel.status.localized = True
+                    wheel.status.provenance = Provenance.CDN_DEFAULT
+                    wheel.status.cache_policy = CachePolicy.PRE_CACHE
+                    localized.append(wheel.emfs_path)
                 else:
+                    if wheel_name in manifest.wheels:
+                        manifest.wheels[wheel_name].status.original_url = req
+                        manifest.wheels[wheel_name].status.provenance = Provenance.CDN_DEFAULT
                     localized.append(req)
             else:
                 localized.append(req)
@@ -460,6 +492,8 @@ class ManifestPersistence:
             with open(manifest.worker.output_path, 'w', encoding='utf-8') as out:
                 out.write(manifest.worker.content)
             manifest.worker.status.exists = True
+            manifest.worker.status.provenance = Provenance.GENERATED
+            manifest.worker.status.cache_policy = CachePolicy.RUNTIME_CACHE
 
     def write_pwa_assets(self) -> None:
         manifest = self._manifest
@@ -475,7 +509,13 @@ class ManifestPersistence:
                 f.write(img.read_bytes())
             img_rel.append(f'images/{img.name}')
             manifest.pwa_icons[str(img.name)] = AssetStatus(
-                exists=True, validated=True, errors=[], warnings=[],
+                exists=True,
+                validated=True,
+                errors=[],
+                warnings=[],
+                provenance=Provenance.PWA_TEMPLATE,
+                localized=True,
+                cache_policy=CachePolicy.PRE_CACHE,
             )
 
         title = self._title or 'Panel Applications'
@@ -493,6 +533,8 @@ class ManifestPersistence:
             manifest.service_worker.content = worker_content
             manifest.service_worker.output_path = sw_path
             manifest.service_worker.status.exists = True
+            manifest.service_worker.status.provenance = Provenance.GENERATED
+            manifest.service_worker.status.cache_policy = CachePolicy.RUNTIME_CACHE
 
         files_dict = {manifest.app_name.replace('_', ' '): f'{manifest.app_name}.html'}
         pwa_manifest_content = build_pwa_manifest(files_dict, title=title, **self._pwa_config)

@@ -21,7 +21,9 @@ from ... import __version__
 from .manifest import (
     AppConversionManifest,
     AssetStatus,
+    CachePolicy,
     IssueSeverity,
+    Provenance,
     ResourceAsset,
     Runtimes,
     WheelAsset,
@@ -234,6 +236,14 @@ class ManifestCollector:
             return
 
         manifest.requirements = collected
+        manifest.original_requirements = list(collected)
+
+        if self._requirements_input == 'auto':
+            self._requirements_provenance = Provenance.AUTO_DETECT
+        elif isinstance(self._requirements_input, list):
+            self._requirements_provenance = Provenance.REQUIREMENTS_ARG
+        else:
+            self._requirements_provenance = Provenance.REQUIREMENTS_FILE
 
     def _collect_wheels(self, manifest: AppConversionManifest) -> None:
         for req in manifest.requirements:
@@ -242,19 +252,45 @@ class ManifestCollector:
             except ValueError:
                 continue
 
-            if req_as_url.scheme != 'file':
+            is_file_scheme = req_as_url.scheme == 'file'
+            is_rel_whl = (
+                req_as_url.scheme == ''
+                and os.path.basename(req_as_url.path).endswith('.whl')
+                and not req.endswith('.tar.gz')
+            )
+            if not is_file_scheme and not is_rel_whl:
                 continue
 
-            wheel_name = os.path.basename(req_as_url.path)
+            wheel_path_or_url = req_as_url.path if req_as_url.scheme else req
+            wheel_name = os.path.basename(wheel_path_or_url)
+            if not wheel_name.endswith('.whl'):
+                continue
             emfs_wheel_path = 'packed_wheels' + '/' + wheel_name
-            wheel_source = req_as_url.path
+
+            if is_file_scheme:
+                wheel_source = req_as_url.path
+            else:
+                candidate = pathlib.Path(wheel_path_or_url)
+                if candidate.is_file():
+                    wheel_source = str(candidate.resolve())
+                elif (WHL_PATH / wheel_name).is_file():
+                    wheel_source = str(WHL_PATH / wheel_name)
+                else:
+                    wheel_source = wheel_path_or_url
+
+            wheel_source_path = pathlib.Path(wheel_source) if not wheel_source.startswith('http') else None
 
             wheel = WheelAsset(
                 source=wheel_source,
+                original_source=req,
                 emfs_path=f'emfs:{emfs_wheel_path}',
                 packed_path=emfs_wheel_path,
-                local_path=pathlib.Path(wheel_source),
-                status=AssetStatus(),
+                local_path=wheel_source_path,
+                status=AssetStatus(
+                    provenance=Provenance.LOCAL_WHEEL,
+                    cache_policy=CachePolicy.PRE_CACHE,
+                    original_url=req,
+                ),
             )
             wheel.status.exists = wheel.local_path.is_file() if wheel.local_path else False
             manifest.wheels[wheel_name] = wheel
@@ -288,7 +324,10 @@ class ManifestCollector:
             asset = ResourceAsset(
                 source=pathlib.Path(resourcepath),
                 archive_path=relpath,
-                status=AssetStatus(),
+                status=AssetStatus(
+                    provenance=Provenance.APP_RESOURCE,
+                    cache_policy=CachePolicy.PRE_CACHE,
+                ),
             )
             asset.status.exists = resourcepath.is_file()
             manifest.resources[str(resourcepath)] = asset
@@ -299,16 +338,25 @@ class ManifestCollector:
         if runtime == 'pyodide-worker':
             manifest.worker = WorkerAsset(
                 worker_type=WorkerType.PYODIDE,
-                status=AssetStatus(),
+                status=AssetStatus(
+                    provenance=Provenance.GENERATED,
+                    cache_policy=CachePolicy.RUNTIME_CACHE,
+                ),
             )
         elif runtime == 'pyscript-worker':
             manifest.worker = WorkerAsset(
                 worker_type=WorkerType.PYSCRIPT,
-                status=AssetStatus(),
+                status=AssetStatus(
+                    provenance=Provenance.GENERATED,
+                    cache_policy=CachePolicy.RUNTIME_CACHE,
+                ),
             )
 
         if manifest.build_pwa:
             manifest.service_worker = WorkerAsset(
                 worker_type=WorkerType.SERVICE,
-                status=AssetStatus(),
+                status=AssetStatus(
+                    provenance=Provenance.GENERATED,
+                    cache_policy=CachePolicy.RUNTIME_CACHE,
+                ),
             )

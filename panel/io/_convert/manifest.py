@@ -20,6 +20,24 @@ class WorkerType(str, enum.Enum):
     SERVICE = "service"
 
 
+class CachePolicy(str, enum.Enum):
+    PRE_CACHE = "pre-cache"
+    RUNTIME_CACHE = "runtime-cache"
+    NO_CACHE = "no-cache"
+    UNKNOWN = "unknown"
+
+
+class Provenance(str, enum.Enum):
+    AUTO_DETECT = "auto-detect"
+    REQUIREMENTS_FILE = "requirements-file"
+    REQUIREMENTS_ARG = "requirements-arg"
+    CDN_DEFAULT = "cdn-default"
+    LOCAL_WHEEL = "local-wheel"
+    APP_RESOURCE = "app-resource"
+    PWA_TEMPLATE = "pwa-template"
+    GENERATED = "generated"
+
+
 @dataclasses.dataclass
 class AssetIssue:
     severity: IssueSeverity
@@ -35,21 +53,51 @@ class AssetIssue:
 
 
 @dataclasses.dataclass
+class RemoteURLRef:
+    url: str
+    location: str
+    scheme: str
+    localized: bool = False
+    local_equivalent: str | None = None
+
+    def to_dict(self) -> dict[str, t.Any]:
+        return {
+            "url": self.url,
+            "location": self.location,
+            "scheme": self.scheme,
+            "localized": self.localized,
+            "local_equivalent": self.local_equivalent,
+        }
+
+
+@dataclasses.dataclass
 class AssetStatus:
     exists: bool = False
     validated: bool = False
     errors: list[str] = dataclasses.field(default_factory=list)
     warnings: list[str] = dataclasses.field(default_factory=list)
 
-    def add_error(self, msg: str) -> None:
+    provenance: Provenance = Provenance.AUTO_DETECT
+    localized: bool = False
+    cache_policy: CachePolicy = CachePolicy.UNKNOWN
+    failure_reason: str | None = None
+    original_url: str | None = None
+    remote_refs: list[RemoteURLRef] = dataclasses.field(default_factory=list)
+
+    def add_error(self, msg: str, reason: str | None = None) -> None:
         self.errors.append(msg)
+        if reason:
+            self.failure_reason = reason
 
     def add_warning(self, msg: str) -> None:
         self.warnings.append(msg)
 
+    def mark_failed(self, reason: str) -> None:
+        self.failure_reason = reason
+
     @property
     def is_ok(self) -> bool:
-        return self.validated and not self.errors
+        return self.validated and not self.errors and not self.failure_reason
 
 
 @dataclasses.dataclass
@@ -58,7 +106,10 @@ class WheelAsset:
     local_path: pathlib.Path | None = None
     packed_path: str | None = None
     emfs_path: str | None = None
+    original_source: str | None = None
     status: AssetStatus = dataclasses.field(default_factory=AssetStatus)
+    is_duplicate: bool = False
+    duplicate_of: str | None = None
 
 
 @dataclasses.dataclass
@@ -66,6 +117,8 @@ class ResourceAsset:
     source: pathlib.Path
     archive_path: str
     status: AssetStatus = dataclasses.field(default_factory=AssetStatus)
+    is_duplicate: bool = False
+    duplicate_of: str | None = None
 
 
 @dataclasses.dataclass
@@ -74,6 +127,52 @@ class WorkerAsset:
     content: str | None = None
     output_path: pathlib.Path | None = None
     status: AssetStatus = dataclasses.field(default_factory=AssetStatus)
+    remote_urls: list[RemoteURLRef] = dataclasses.field(default_factory=list)
+    referenced_assets: list[str] = dataclasses.field(default_factory=list)
+
+
+@dataclasses.dataclass
+class LocalizationStats:
+    total_remote_urls: int = 0
+    localized_count: int = 0
+    unlocalized_count: int = 0
+    wheels_localized: int = 0
+    wheels_total: int = 0
+
+    @property
+    def localization_rate(self) -> float:
+        if self.total_remote_urls == 0:
+            return 1.0
+        return self.localized_count / self.total_remote_urls
+
+
+@dataclasses.dataclass
+class ConsistencyReport:
+    consistent: bool = True
+    mismatches: list[str] = dataclasses.field(default_factory=list)
+    orphan_outputs: list[str] = dataclasses.field(default_factory=list)
+    missing_outputs: list[str] = dataclasses.field(default_factory=list)
+
+
+@dataclasses.dataclass
+class DiagnosticsSummary:
+    localization: LocalizationStats = dataclasses.field(default_factory=LocalizationStats)
+    consistency: ConsistencyReport = dataclasses.field(default_factory=ConsistencyReport)
+    unlocalized_urls: list[RemoteURLRef] = dataclasses.field(default_factory=list)
+    duplicate_assets: list[str] = dataclasses.field(default_factory=list)
+    missing_assets: list[str] = dataclasses.field(default_factory=list)
+
+    def to_dict(self) -> dict[str, t.Any]:
+        return {
+            "localization": {
+                **dataclasses.asdict(self.localization),
+                "localization_rate": self.localization.localization_rate,
+            },
+            "consistency": dataclasses.asdict(self.consistency),
+            "unlocalized_urls": [u.to_dict() for u in self.unlocalized_urls],
+            "duplicate_assets": list(self.duplicate_assets),
+            "missing_assets": list(self.missing_assets),
+        }
 
 
 @dataclasses.dataclass
@@ -84,6 +183,7 @@ class AppConversionManifest:
     runtime: Runtimes
 
     requirements: list[str] = dataclasses.field(default_factory=list)
+    original_requirements: list[str] = dataclasses.field(default_factory=list)
     wheels: dict[str, WheelAsset] = dataclasses.field(default_factory=dict)
     resources: dict[str, ResourceAsset] = dataclasses.field(default_factory=dict)
     resources_zip: pathlib.Path | None = None
@@ -97,6 +197,7 @@ class AppConversionManifest:
     pwa_icons: dict[str, AssetStatus] = dataclasses.field(default_factory=dict)
 
     issues: list[AssetIssue] = dataclasses.field(default_factory=list)
+    diagnostics: DiagnosticsSummary = dataclasses.field(default_factory=DiagnosticsSummary)
 
     prerender: bool = True
     inline: bool = False
@@ -131,13 +232,41 @@ class AppConversionManifest:
             "dest_path": str(self.dest_path),
             "runtime": self.runtime,
             "requirements": list(self.requirements),
-            "wheels": {k: dataclasses.asdict(v) for k, v in self.wheels.items()},
-            "resources": {k: dataclasses.asdict(v) for k, v in self.resources.items()},
+            "original_requirements": list(self.original_requirements),
+            "wheels": {
+                k: {
+                    **dataclasses.asdict(v),
+                    "status": {
+                        **dataclasses.asdict(v.status),
+                        "provenance": v.status.provenance.value,
+                        "cache_policy": v.status.cache_policy.value,
+                        "remote_refs": [r.to_dict() for r in v.status.remote_refs],
+                    },
+                }
+                for k, v in self.wheels.items()
+            },
+            "resources": {
+                k: {
+                    **dataclasses.asdict(v),
+                    "status": {
+                        **dataclasses.asdict(v.status),
+                        "provenance": v.status.provenance.value,
+                        "cache_policy": v.status.cache_policy.value,
+                        "remote_refs": [r.to_dict() for r in v.status.remote_refs],
+                    },
+                }
+                for k, v in self.resources.items()
+            },
             "resources_zip": str(self.resources_zip) if self.resources_zip else None,
             "html_output": str(self.html_output) if self.html_output else None,
             "worker": dataclasses.asdict(self.worker) if self.worker else None,
             "pwa_manifest_path": str(self.pwa_manifest_path) if self.pwa_manifest_path else None,
-            "service_worker": dataclasses.asdict(self.service_worker) if self.service_worker else None,
+            "service_worker": (
+                dataclasses.asdict(self.service_worker) if self.service_worker else None
+            ),
             "issues": [i.to_dict() for i in self.issues],
+            "diagnostics": {
+                **self.diagnostics.to_dict(),
+            },
             "has_errors": self.has_errors,
         }

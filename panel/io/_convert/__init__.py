@@ -1,10 +1,18 @@
 from __future__ import annotations
 
+MINIMUM_VERSIONS: dict[str, str] = {}
+
 from .manifest import (
     AppConversionManifest,
     AssetIssue,
     AssetStatus,
+    CachePolicy,
+    ConsistencyReport,
+    DiagnosticsSummary,
     IssueSeverity,
+    LocalizationStats,
+    Provenance,
+    RemoteURLRef,
     ResourceAsset,
     Runtimes,
     WheelAsset,
@@ -59,6 +67,7 @@ from .persistence import (
 from .validation import ManifestValidator, ValidationResult
 from .reporting import (
     AppReport,
+    AssetDetail,
     ConversionReport,
     ReportRenderer,
 )
@@ -66,6 +75,7 @@ from .reporting import (
 __all__ = [
     "AppConversionManifest",
     "AppReport",
+    "AssetDetail",
     "AssetIssue",
     "AssetStatus",
     "BOKEH_CDN_WHL",
@@ -73,7 +83,10 @@ __all__ = [
     "BOKEH_VERSION",
     "CDN_DIST",
     "CDN_ROOT",
+    "CachePolicy",
+    "ConsistencyReport",
     "ConversionReport",
+    "DiagnosticsSummary",
     "DIST_DIR",
     "DummyRequirement",
     "ICON_DIR",
@@ -81,9 +94,11 @@ __all__ = [
     "INIT_SERVICE_WORKER",
     "IssueSeverity",
     "LOCAL_PREFIX",
+    "LocalizationStats",
     "ManifestCollector",
     "ManifestPersistence",
     "ManifestValidator",
+    "MINIMUM_VERSIONS",
     "PANEL_CDN_WHL",
     "PANEL_LOCAL_WHL",
     "POST",
@@ -102,6 +117,8 @@ __all__ = [
     "PY_VERSION",
     "PWA_IMAGES",
     "PWA_MANIFEST_TEMPLATE",
+    "Provenance",
+    "RemoteURLRef",
     "ReportRenderer",
     "ResourceAsset",
     "Runtimes",
