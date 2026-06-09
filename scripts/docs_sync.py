@@ -92,7 +92,18 @@ class SyncChecker:
             object_name=object_name,
         ))
 
-    def run(self) -> None:
+    def run(self, runtime_available: bool) -> None:  # noqa: ARG002
+        """Execute the checker.
+
+        Parameters
+        ----------
+        runtime_available : bool
+            True when param + panel are importable.  Checkers that declare
+            ``requires_runtime = True`` can assume this is always True when
+            invoked from the default (non-``--static-only``) pipeline; the
+            flag is still passed so hybrid checkers can downgrade gracefully
+            in ``--static-only`` runs.
+        """
         raise NotImplementedError
 
 
@@ -195,7 +206,7 @@ class ReferencePathChecker(SyncChecker):
     requires_runtime = True
     description = "Matches reference notebook names to exported component symbols."
 
-    def run(self) -> None:
+    def run(self, runtime_available: bool) -> None:
         import importlib
 
         if not REF_DIR.is_dir():
@@ -263,152 +274,263 @@ class ReferencePathChecker(SyncChecker):
 # 2. Gallery / Reference parameter checker — AST-based static analysis
 # ---------------------------------------------------------------------------
 
-PN_COMPONENT_PREFIXES = (
-    "pn.widgets.",
-    "pn.pane.",
-    "pn.layout.",
-    "pn.chat.",
-    "pn.template.",
+# Public module roots that we know how to resolve components out of
+# once alias expansion is done.
+PN_COMPONENT_PREFIXES: tuple[str, ...] = (
+    "panel.",
     "pn.",
 )
 
-# Well-known attribute access chains that are NOT component instantiations
-_NON_COMPONENT_ATTRS = {
-    "pn.extension",
-    "pn.cache",
-    "pn.bind",
-    "pn.depends",
-    "pn.interact",
-    "pn.serve",
-    "pn.panel",
-    "pn.state",
-    "pn.config",
-    "pn.rx",
-    "pn.param",
-    "pn.pipeline",
-    "pn.reactive",
-    "pn.custom",
-    "pn.viewable",
-    "pn.chat.langchain",
-    "pn.io",
-    "pn.theme",
-    "pn.util",
-    "pn.command",
-    "pn.models",
-    "pn.tests",
-    "pn._param",
-    "pn.auth",
-    "pn.bokeh",
-    "pn.compiler",
-    "pn.config",
-    "pn.custom",
-    "pn.depends",
-    "pn.entry_points",
-    "pn.eslint",
-    "pn.index",
-    "pn.interact",
-    "pn.links",
-    "pn.package",
-    "pn.param",
-    "pn.pipeline",
-    "pn.py",
-    "pn.reactive",
-    "pn.tsconfig",
-    "pn.viewable",
-}
+# Root dotted names that, after alias expansion, are treated as "direct"
+# component class references.  Used so `Select(...)` imported via
+# `from panel.widgets import Select` is treated the same way as
+# `pn.widgets.Select(...)`.
+_PANEL_MODULE_ROOTS: tuple[str, ...] = (
+    "panel",
+    "panel.widgets",
+    "panel.pane",
+    "panel.layout",
+    "panel.template",
+    "panel.chat",
+    "panel.param",
+    "panel.viewable",
+)
+
+# Attributes commonly chained off panel / pn that are not component constructors.
+_NON_COMPONENT_ATTRS: frozenset[str] = frozenset({
+    "pn.extension", "panel.extension",
+    "pn.config", "panel.config",
+    "pn.state", "panel.state",
+    "pn.pipeline", "panel.pipeline",
+    "pn.io", "panel.io",
+    "pn.param", "panel.param",
+    "pn.panel", "panel.panel",
+    "pn.Row", "pn.Column", "pn.GridSpec", "pn.Tabs",
+    "pn.Spacer", "pn.HSpacer", "pn.VSpacer",
+})
 
 
 def _resolve_component_class(attr_chain: str) -> tuple[type | None, Exception | None]:
-    """Resolve a dotted name like 'pn.widgets.Select' to the actual class.
+    """Resolve a dotted name like 'panel.widgets.Select' to the actual class.
 
-    Returns ``(cls_or_None, exc_or_None)``. The second element is only populated
-    when a **core** (non-optional) import failed so the caller can surface it.
+    The input is expected to already have alias expansion performed by the
+    notebook visitor, so both ``panel.widgets.Select`` and the legacy
+    ``pn.widgets.Select`` forms are accepted, as well as a bare
+    ``Select`` when the name directly resolves to a component type.
+
+    Returns ``(cls_or_None, exc_or_None)``. The second element is only
+    populated when a **core** (non-optional) import failed so the caller
+    can surface it.
     """
     import importlib
 
     parts = attr_chain.split(".")
-    if parts[0] != "pn":
+    if not parts:
         return None, None
-    parts[0] = "panel"
-    module_name = ".".join(parts[:-1])
-    try:
-        module = importlib.import_module(module_name)
-    except Exception as exc:
-        if _is_optional_import_error(exc, module_name):
-            return None, None
-        return None, exc
-    full_name = ".".join(parts)
-    try:
-        obj = __import__(parts[0], fromlist=parts[1:])
-    except Exception as exc:
-        if _is_optional_import_error(exc, full_name):
-            return None, None
-        return None, exc
-    try:
-        for seg in parts[1:]:
-            obj = getattr(obj, seg)
+
+    # Normalize the legacy shorthand.
+    if parts[0] == "pn":
+        parts[0] = "panel"
+
+    # Single name (e.g. bare ``Select`` after a `from panel.widgets import Select`).
+    # Try a direct getattr on each known public root.
+    if len(parts) == 1:
+        name = parts[0]
+        for root in _PANEL_MODULE_ROOTS:
+            try:
+                module = importlib.import_module(root)
+            except Exception as exc:
+                if _is_optional_import_error(exc, root):
+                    continue
+                return None, exc
+            try:
+                obj = getattr(module, name)
+            except Exception as exc:
+                if _is_optional_import_error(exc, f"{root}.{name}"):
+                    continue
+                return None, exc
+            if isinstance(obj, type):
+                return obj, None
+        return None, None
+
+    # Multi-part dotted path.  Import the module, then getattr the final segments.
+    # Walk progressively longer module prefixes so that 'panel.widgets.Select' works
+    # whether 'panel.widgets' itself is the module or 'panel' is the module that
+    # re-exports 'widgets.Select' as an attribute.
+    last_exc: Exception | None = None
+    for split_idx in range(len(parts) - 1, 0, -1):
+        module_name = ".".join(parts[:split_idx])
+        attr_segments = parts[split_idx:]
+        try:
+            module = importlib.import_module(module_name)
+        except Exception as exc:
+            if _is_optional_import_error(exc, module_name):
+                continue
+            last_exc = exc
+            continue
+        obj: t.Any = module
+        ok = True
+        for seg in attr_segments:
+            try:
+                obj = getattr(obj, seg)
+            except Exception as exc:
+                full_so_far = ".".join(parts[:split_idx] + [seg])
+                if _is_optional_import_error(exc, full_so_far):
+                    ok = False
+                    break
+                last_exc = exc
+                ok = False
+                break
+        if not ok:
+            continue
         if isinstance(obj, type):
             return obj, None
-    except Exception as exc:
-        if _is_optional_import_error(exc, full_name):
-            return None, None
-        return None, exc
-    return None, None
+    return None, last_exc
 
+
+# ---------------------------------------------------------------------------
+# Alias-aware AST visitor for notebook code cells
+# ---------------------------------------------------------------------------
 
 class _ComponentInstantiationVisitor(ast.NodeVisitor):
+    """Walk a single notebook code cell.
+
+    * Records every ``import`` / ``from ... import`` so that local aliases
+      such as ``pn``, ``pnw``, ``pw`` or bare class names imported directly
+      can be resolved back to fully-qualified dotted names.
+    * Collects every ``Call`` node whose callee resolves to a panel
+      component together with the keyword argument names passed to it.
+    """
+
     def __init__(self) -> None:
-        # (attr_chain, keyword_names, line_no)
+        # (resolved_dotted_chain, keyword_names, line_no)
         self.calls: list[tuple[str, list[str], int]] = []
-        # name -> resolved dotted chain for aliased imports
+        # name -> fully qualified dotted prefix
+        #   'pn'  -> 'panel'
+        #   'pnw' -> 'panel.widgets'
+        #   'pw'  -> 'panel.widgets'
+        #   'Select' -> 'panel.widgets.Select'
         self._aliases: dict[str, str] = {}
 
-    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
-        pass
+    # ----- import tracking -----
 
-    def visit_Assign(self, node: ast.Assign) -> None:
+    def visit_Import(self, node: ast.Import) -> None:
+        # ``import panel [as pn]``, ``import panel.widgets [as pnw]``
+        for alias in node.names:
+            local_name = alias.asname if alias.asname else alias.name.split(".")[0]
+            self._aliases[local_name] = alias.name
         self.generic_visit(node)
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        # ``from panel.widgets import Select [as S]``
+        # ``from panel import widgets [as pw]``
+        if node.module is None:
+            self.generic_visit(node)
+            return
+        # Resolve relative imports (unlikely in notebooks, but harmless)
+        level = node.level or 0
+        if level > 0:
+            self.generic_visit(node)
+            return
+        module = node.module
+        for alias in node.names:
+            if alias.name == "*":
+                continue
+            local_name = alias.asname if alias.asname else alias.name
+            self._aliases[local_name] = f"{module}.{alias.name}"
+        self.generic_visit(node)
+
+    # ----- call collection -----
 
     def visit_Call(self, node: ast.Call) -> None:
         self.generic_visit(node)
         func = node.func
-        chain = _get_dotted_chain(func)
+        chain = self._resolve_call_to_chain(func)
         if chain is None:
             return
-        if any(chain.startswith(p) for p in PN_COMPONENT_PREFIXES):
-            if chain in _NON_COMPONENT_ATTRS:
+        # Ignore obvious non-component helpers.
+        if chain in _NON_COMPONENT_ATTRS:
+            return
+        # We only want panel components — accept 'panel.XXX' or names that
+        # resolve through the known import aliases that point to panel.*.
+        if not (
+            chain.startswith("panel.")
+            or chain.startswith("pn.")
+            or any(chain.startswith(root + ".") for root in _PANEL_MODULE_ROOTS)
+            or any(chain == self._aliases.get(k) for k in self._aliases)
+        ):
+            # Still allow any bare class name imported from panel.*
+            if "." not in chain:
+                for v in self._aliases.values():
+                    if v == chain and v.startswith("panel."):
+                        break
+                else:
+                    return
+            else:
                 return
-            kwargs = [kw.arg for kw in node.keywords if kw.arg is not None]
-            self.calls.append((chain, kwargs, node.lineno))
+        kwargs = [kw.arg for kw in node.keywords if kw.arg is not None]
+        self.calls.append((chain, kwargs, node.lineno))
 
+    # ----- helpers -----
 
-def _get_dotted_chain(node: ast.AST) -> str | None:
-    parts: list[str] = []
-    cur = node
-    while isinstance(cur, ast.Attribute):
-        parts.append(cur.attr)
-        cur = cur.value
-    if isinstance(cur, ast.Name):
-        parts.append(cur.id)
-        parts.reverse()
-        return ".".join(parts)
-    return None
+    def _resolve_call_to_chain(self, func: ast.AST) -> str | None:
+        """Return the fully-qualified dotted name for a callee AST node.
+
+        Examples with tracked aliases::
+
+            pn.widgets.Select     ->  panel.widgets.Select     (alias 'pn' -> 'panel')
+            pnw.Select            ->  panel.widgets.Select     (alias 'pnw' -> 'panel.widgets')
+            pw.Select             ->  panel.widgets.Select     (alias 'pw'  -> 'panel.widgets')
+            Select                ->  panel.widgets.Select     (alias 'Select' -> 'panel.widgets.Select')
+            panel.widgets.Select  ->  panel.widgets.Select     (no alias needed)
+        """
+        # Walk from the right-most attribute, collecting attribute names.
+        attr_parts: list[str] = []
+        cur = func
+        while isinstance(cur, ast.Attribute):
+            attr_parts.append(cur.attr)
+            cur = cur.value
+        attr_parts.reverse()
+        # The left-most node must be a simple Name we can look up.
+        if not isinstance(cur, ast.Name):
+            return None
+        root_name = cur.id
+        # Case 1: bare name call, e.g.  Select(...)
+        if not attr_parts:
+            if root_name in self._aliases:
+                return self._aliases[root_name]
+            return root_name
+        # Case 2: attribute chain, e.g.  pn.widgets.Select(...) or pnw.Select(...)
+        if root_name in self._aliases:
+            prefix = self._aliases[root_name]
+            return prefix + "." + ".".join(attr_parts)
+        # No alias — trust the name exactly as written (covers `panel.widgets.Select`).
+        return root_name + "." + ".".join(attr_parts)
 
 
 class GalleryParamChecker(SyncChecker):
-    """Check that gallery & reference notebooks do not reference deleted parameters."""
+    """Check that gallery & reference notebooks do not reference deleted parameters.
+
+    The visitor tracks **every** import form commonly used in Panel tutorials:
+
+    * ``import panel as pn``            → resolves ``pn.widgets.Select``
+    * ``import panel.widgets as pnw``   → resolves ``pnw.Select``
+    * ``from panel import widgets as pw``  → resolves ``pw.Select``
+    * ``from panel.widgets import Select`` → resolves bare ``Select(...)``
+    * ``import panel``                  → resolves ``panel.widgets.Select``
+    """
 
     requires_runtime = True
-    description = "Static-scans notebook code cells and validates keyword arg names against component signatures."
+    description = "Scans notebook code cells (alias-aware) and validates keyword arg names against component signatures."
 
-    def run(self) -> None:
+    def run(self, runtime_available: bool) -> None:
         targets: list[Path] = []
         if GALLERY_DIR.is_dir():
             targets.extend(iter_notebooks(GALLERY_DIR))
         if REF_DIR.is_dir():
             targets.extend(iter_notebooks(REF_DIR))
 
-        # Avoid reporting the same broken core import for every single notebook.
+        # Avoid reporting the same broken core import for every single notebook / cell.
         reported_core_failures: set[str] = set()
 
         for nb_path in targets:
@@ -426,8 +548,8 @@ class GalleryParamChecker(SyncChecker):
                     continue
                 try:
                     tree = ast.parse(source)
-                except SyntaxError as exc:
-                    # Notebooks often have partial code; skip gracefully
+                except SyntaxError:
+                    # Notebooks often contain partial code cells / magics; skip silently.
                     continue
                 visitor = _ComponentInstantiationVisitor()
                 visitor.visit(tree)
@@ -439,7 +561,8 @@ class GalleryParamChecker(SyncChecker):
                             file=nb_path,
                             kind="GalleryParam",
                             message=(
-                                f"Failed to resolve core component '{chain}': {core_exc}"
+                                f"Cell #{cell_idx + 1}: Failed to resolve core "
+                                f"component '{chain}': {core_exc}"
                             ),
                             line=lineno,
                             object_name=chain,
@@ -457,8 +580,8 @@ class GalleryParamChecker(SyncChecker):
                                 file=nb_path,
                                 kind="GalleryParam",
                                 message=(
-                                    f"Failed to introspect parameters of "
-                                    f"'{chain}': {exc}"
+                                    f"Cell #{cell_idx + 1}: Failed to introspect "
+                                    f"parameters of '{chain}': {exc}"
                                 ),
                                 line=lineno,
                                 object_name=chain,
@@ -472,8 +595,9 @@ class GalleryParamChecker(SyncChecker):
                                 file=nb_path,
                                 kind="GalleryParam",
                                 message=(
-                                    f"Parameter '{kw}' passed to '{chain}' does not exist "
-                                    f"on the component. Known params: {sorted(valid_params)[:10]}..."
+                                    f"Cell #{cell_idx + 1}: Parameter '{kw}' passed "
+                                    f"to '{chain}' does not exist on the component. "
+                                    f"Known params: {sorted(valid_params)[:10]}..."
                                 ),
                                 line=lineno,
                                 object_name=chain,
@@ -495,14 +619,20 @@ PUBLIC_MODULES: list[tuple[str, Path]] = [
 
 
 class PublicImportChecker(SyncChecker):
-    """Verify that every name declared in ``__all__`` has a corresponding
-    top-level binding (definition, import, or lazy ``__getattr__``) in the
-    module source. This checker is fully static and never imports the module,
-    so it cannot be defeated by optional-dependency import failures inside
-    the module body."""
+    """Verify that every name declared in ``__all__`` is actually exposed by
+    the public module.
+
+    In the default (runtime-available) mode each ``__all__`` entry is checked
+    via a real ``hasattr(module, name)`` call — the same path a docs build or
+    end-user import would take.  When running with ``--static-only`` the
+    checker falls back to a pure AST analysis that collects top-level
+    bindings (definitions, imports, assignments) and additionally recognises
+    lazy ``__getattr__`` exports for entries that appear in the explicit
+    optional-dependency whitelist.
+    """
 
     requires_runtime = False
-    description = "Static AST check that each __all__ entry is defined/imported at the module top level."
+    description = "Validates __all__ against real module attributes (runtime) or AST bindings (--static-only)."
 
     # Names implicitly available on every module; never flagged as missing.
     _IMPLICIT_NAMES: t.ClassVar[frozenset[str]] = frozenset({
@@ -511,43 +641,39 @@ class PublicImportChecker(SyncChecker):
         "__all__", "__version__",
     })
 
+    # ------------------------------------------------------------------
+    # AST helpers (used only in --static-only mode, and kept here for
+    # environments where the panel runtime cannot be imported at all).
+    # ------------------------------------------------------------------
     @classmethod
     def _collect_top_level_bindings(cls, tree: ast.Module) -> set[str]:
         """Return all names bound at the top level of an AST module."""
         bindings: set[str] = set()
         for node in tree.body:
-            # def / async def / class
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 bindings.add(node.name)
                 continue
-            # import X, Y as Z
             if isinstance(node, ast.Import):
                 for alias in node.names:
                     bindings.add(alias.asname if alias.asname else alias.name.split(".")[0])
                 continue
-            # from X import A, B as C
             if isinstance(node, ast.ImportFrom):
                 for alias in node.names:
                     if alias.name == "*":
-                        # Cannot statically enumerate; mark as wildcard import.
                         bindings.add("*")
                     else:
                         bindings.add(alias.asname if alias.asname else alias.name)
                 continue
-            # Name = ... / (a, b) = ... / Name.attr = ...
             if isinstance(node, ast.Assign):
                 for tgt in node.targets:
                     bindings.update(cls._extract_assigned_names(tgt))
                 continue
-            # Name := ...
             if isinstance(node, ast.NamedExpr):
                 bindings.update(cls._extract_assigned_names(node.target))
                 continue
-            # for / async for at top level (unusual but harmless)
             if isinstance(node, (ast.For, ast.AsyncFor)):
                 bindings.update(cls._extract_assigned_names(node.target))
                 continue
-            # with X as Y
             if isinstance(node, ast.With):
                 for item in node.items:
                     if item.optional_vars is not None:
@@ -567,33 +693,50 @@ class PublicImportChecker(SyncChecker):
                     _walk(elt)
             elif isinstance(t, ast.Starred):
                 _walk(t.value)
-            # ast.Attribute / ast.Subscript targets do not introduce new top-level names
         _walk(node)
         return names
 
     @classmethod
     def _has_lazy_getattr(cls, tree: ast.Module) -> bool:
-        """Return True if the module defines a top-level ``__getattr__``.
-
-        Panel uses this pattern to lazily expose optional-dependency symbols
-        without importing the heavy dependency at module load time (e.g.
-        ``panel.chat.langchain``).
-        """
         for node in tree.body:
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Assign)):
-                if isinstance(node, ast.Assign):
-                    for tgt in node.targets:
-                        if isinstance(tgt, ast.Name) and tgt.id == "__getattr__":
-                            return True
-                else:
-                    if node.name == "__getattr__":
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if node.name == "__getattr__":
+                    return True
+            if isinstance(node, ast.Assign):
+                for tgt in node.targets:
+                    if isinstance(tgt, ast.Name) and tgt.id == "__getattr__":
                         return True
         return False
 
-    def run(self) -> None:
+    @classmethod
+    def _extract_all_names(cls, tree: ast.Module) -> list[str]:
+        for node in tree.body:
+            if (
+                isinstance(node, ast.Assign)
+                and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and node.targets[0].id == "__all__"
+                and isinstance(node.value, (ast.Tuple, ast.List))
+            ):
+                return [
+                    elt.value
+                    for elt in node.value.elts
+                    if isinstance(elt, ast.Constant) and isinstance(elt.value, str)
+                ]
+        return []
+
+    # ------------------------------------------------------------------
+    # Main entry point
+    # ------------------------------------------------------------------
+    def run(self, runtime_available: bool) -> None:
+        import importlib
+
         for mod_name, mod_path in PUBLIC_MODULES:
             if not mod_path.is_file():
                 continue
+
+            # --- Always parse source: we need __all__ contents and, in
+            #     static-only mode, the binding set.
             try:
                 tree = ast.parse(mod_path.read_text(encoding="utf-8"))
             except SyntaxError as exc:
@@ -604,42 +747,65 @@ class PublicImportChecker(SyncChecker):
                 )
                 continue
 
-            # Extract __all__
-            all_names: list[str] = []
-            for node in tree.body:
-                if (
-                    isinstance(node, ast.Assign)
-                    and len(node.targets) == 1
-                    and isinstance(node.targets[0], ast.Name)
-                    and node.targets[0].id == "__all__"
-                    and isinstance(node.value, (ast.Tuple, ast.List))
-                ):
-                    for elt in node.value.elts:
-                        if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
-                            all_names.append(elt.value)
-                    break
+            all_names = self._extract_all_names(tree)
             if not all_names:
                 continue
 
+            # --- Runtime path: real hasattr() — the authoritative check. ---
+            if runtime_available:
+                try:
+                    module = importlib.import_module(mod_name)
+                except Exception as exc:
+                    if _is_optional_import_error(exc, mod_name):
+                        continue
+                    self.add_error(
+                        file=mod_path,
+                        kind="PublicImport",
+                        message=f"Failed to import core module '{mod_name}': {exc}",
+                    )
+                    continue
+
+                for name in all_names:
+                    full_dotted = f"{mod_name}.{name}"
+                    try:
+                        present = hasattr(module, name)
+                    except Exception as exc:
+                        if _is_optional_import_error(exc, full_dotted):
+                            continue
+                        self.add_error(
+                            file=mod_path,
+                            kind="PublicImport",
+                            message=(
+                                f"hasattr('{mod_name}', '{name}') raised: {exc}"
+                            ),
+                            object_name=name,
+                        )
+                        continue
+                    if not present:
+                        self.add_error(
+                            file=mod_path,
+                            kind="PublicImport",
+                            message=(
+                                f"'{mod_name}.{name}' is declared in __all__ "
+                                f"but hasattr returned False in the docs runtime."
+                            ),
+                            object_name=name,
+                        )
+                continue
+
+            # --- Static-only fallback: AST bindings + lazy whitelist. ---
             bindings = self._collect_top_level_bindings(tree)
             has_lazy = self._has_lazy_getattr(tree)
-
             for name in all_names:
                 if name in bindings or name in self._IMPLICIT_NAMES:
                     continue
                 if "*" in bindings:
-                    # Wildcard import present; cannot statically prove absence.
                     continue
                 full_dotted = f"{mod_name}.{name}"
-                # Explicit optional-dependency lazy exports are never flagged.
                 if any(root == full_dotted or full_dotted.startswith(root + ".")
                        for root in OPTIONAL_DEPENDENCY_ROOTS):
                     continue
                 if has_lazy:
-                    # Lazy __getattr__ is defined — the name may be resolved at
-                    # runtime but is NOT in the explicit optional list. Flag
-                    # as a soft mismatch so the author can either add a static
-                    # import or enroll it in the optional-dependency list.
                     self.add_error(
                         file=mod_path,
                         kind="PublicImport",
@@ -657,7 +823,7 @@ class PublicImportChecker(SyncChecker):
                     kind="PublicImport",
                     message=(
                         f"Name '{name}' is declared in __all__ but has no top-level "
-                        f"definition or import in '{mod_name}'."
+                        f"definition or import in '{mod_name}' (--static-only mode)."
                     ),
                     object_name=name,
                 )
@@ -683,7 +849,7 @@ class ComponentSignatureChecker(SyncChecker):
     requires_runtime = True
     description = "Ensures every exported Layoutable subclass carries the standard base param set."
 
-    def run(self) -> None:
+    def run(self, runtime_available: bool) -> None:
         import importlib
         import inspect
 
@@ -835,7 +1001,7 @@ class ResourceRefChecker(SyncChecker):
                     matches.append((nb_path, cell_idx + 1, m.group(1), m.group(2).strip()))
         return matches
 
-    def run(self) -> None:
+    def run(self, runtime_available: bool) -> None:
         panel_dist = self._collect_panel_dist_files()
         doc_static = self._collect_doc_static_files()
         refs = self._scan_refs()
@@ -1056,7 +1222,7 @@ def run_checks(
             mode = " (static)" if not cls.requires_runtime else ""
             print(f"{CYAN}Running{RESET} {name}{mode}...", flush=True)
         try:
-            checker.run()
+            checker.run(runtime_available=runtime_available)
         except Exception as exc:
             print(f"{YELLOW}WARNING{RESET} {name} raised an exception: {exc}", flush=True)
             continue
