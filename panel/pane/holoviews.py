@@ -24,7 +24,7 @@ from ..io import state, unlocked
 from ..layout import (
     Column, HSpacer, Row, WidgetBox,
 )
-from ..util import import_optional
+from ..util import import_component
 from ..viewable import Layoutable, Viewable
 from ..widgets import (
     DatetimeInput, DiscreteSlider, EditableFloatSlider, EditableIntSlider,
@@ -55,13 +55,7 @@ if t.TYPE_CHECKING:
 
 
 def check_holoviews(version):
-    hv = import_optional(
-        "holoviews", "HoloViews pane",
-        min_version=version,
-        pip_package="holoviews",
-        conda_package="holoviews",
-        conda_channel="conda-forge",
-    )
+    hv = import_component("holoviews")
     return Version(Version(hv.__version__).base_version) >= Version(version)
 
 

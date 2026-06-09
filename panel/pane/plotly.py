@@ -13,7 +13,7 @@ from bokeh.models import ColumnDataSource
 from pyviz_comms import JupyterComm
 
 from ..util import (
-    check_frontend_resources, import_optional, lazy_load,
+    import_component, lazy_load, require_component,
     try_datetime64_to_datetime,
 )
 from ..util.checks import datetime_types, isdatetime
@@ -132,11 +132,7 @@ class Plotly(ModelPane):
         if isinstance(data, (dict, list)) and isinstance(layout, dict):
             data = data if isinstance(data, list) else [data]
             return {'data': data, 'layout': layout}
-        go = import_optional(
-            "plotly.graph_objs", "Plotly pane",
-            pip_package="plotly", conda_package="plotly",
-            conda_channel="plotly",
-        )
+        go = import_component("plotly", submodule="graph_objs")
         if isinstance(obj, (go.Figure, go.FigureWidget)):
             return obj
         data = data if isinstance(data, list) else [data]
@@ -361,7 +357,7 @@ class Plotly(ModelPane):
         self, doc: Document, root: Model | None = None,
         parent: Model | None = None, comm: Comm | None = None
     ) -> Model:
-        check_frontend_resources("plotly", "Plotly pane")
+        require_component("plotly", check_python=False)
         Plotly._bokeh_model = lazy_load(
             'panel.models.plotly', 'PlotlyPlot', isinstance(comm, JupyterComm), root
         )

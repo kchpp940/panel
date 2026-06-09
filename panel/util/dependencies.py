@@ -30,11 +30,14 @@ if t.TYPE_CHECKING:
 __all__ = (
     "DependencyIssue",
     "OptionalDependencyError",
+    "OPTIONAL_DEPENDENCIES",
     "check_python_package",
     "check_frontend_resources",
     "check_extension_loaded",
     "require_optional",
+    "require_component",
     "import_optional",
+    "import_component",
 )
 
 
@@ -439,5 +442,200 @@ def import_optional(
         conda_package=conda_package,
         conda_channel=conda_channel,
         extras=extras,
+    )
+    return importlib.import_module(module_name)
+
+
+# ---------------------------------------------------------------------------
+# Central registry of known optional dependencies
+# ---------------------------------------------------------------------------
+
+
+class _ComponentConfig(t.TypedDict, total=False):
+    component: str
+    python_package: str
+    min_version: str
+    pip_package: str
+    conda_package: str | Sequence[str]
+    conda_channel: str
+    extras: str
+    extension_name: str
+    bundled_subdir: str
+
+
+OPTIONAL_DEPENDENCIES: t.Final[dict[str, _ComponentConfig]] = {
+    "plotly": {
+        "component": "Plotly pane",
+        "python_package": "plotly",
+        "pip_package": "plotly",
+        "conda_package": "plotly",
+        "conda_channel": "plotly",
+        "extras": "recommended",
+        "extension_name": "plotly",
+        "bundled_subdir": "plotly",
+    },
+    "altair": {
+        "component": "Vega pane (Altair support)",
+        "python_package": "altair",
+        "pip_package": "altair",
+        "conda_package": "altair",
+        "conda_channel": "conda-forge",
+    },
+    "vega": {
+        "component": "Vega pane",
+        "extension_name": "vega",
+        "bundled_subdir": "vega",
+    },
+    "vl_convert": {
+        "component": "Vega pane export",
+        "python_package": "vl_convert",
+        "pip_package": "vl-convert-python",
+    },
+    "pyecharts": {
+        "component": "ECharts pane (pyecharts support)",
+        "python_package": "pyecharts",
+        "pip_package": "pyecharts",
+        "conda_package": "pyecharts",
+        "conda_channel": "conda-forge",
+    },
+    "echarts": {
+        "component": "ECharts pane",
+        "extension_name": "echarts",
+        "bundled_subdir": "echarts",
+    },
+    "holoviews": {
+        "component": "HoloViews pane",
+        "python_package": "holoviews",
+        "min_version": "1.18.0",
+        "pip_package": "holoviews",
+        "conda_package": "holoviews",
+        "conda_channel": "conda-forge",
+        "extras": "recommended",
+    },
+    "tabulator": {
+        "component": "Tabulator widget",
+        "extension_name": "tabulator",
+        "bundled_subdir": "datatabulator",
+    },
+}
+
+
+# ---------------------------------------------------------------------------
+# Registry-backed helpers
+# ---------------------------------------------------------------------------
+
+
+def _get_config(name: str) -> _ComponentConfig:
+    if name not in OPTIONAL_DEPENDENCIES:
+        known = ", ".join(sorted(OPTIONAL_DEPENDENCIES))
+        raise ValueError(
+            f"Unknown optional dependency '{name}'. "
+            f"Known components: {known}"
+        )
+    return OPTIONAL_DEPENDENCIES[name]
+
+
+def require_component(
+    name: str,
+    *,
+    check_js_resources: bool = True,
+    check_python: bool = True,
+) -> None:
+    """
+    Run diagnostics for a registered optional dependency.
+
+    Parameters
+    ----------
+    name : str
+        Key into :data:`OPTIONAL_DEPENDENCIES` (e.g. ``"plotly"``,
+        ``"holoviews"``, ``"tabulator"``).
+    check_js_resources : bool, default True
+        Whether to verify front-end JS bundles exist on disk (skipped
+        automatically when CDN mode is active).
+    check_python : bool, default True
+        Whether to verify the Python package is installed and meets the
+        minimum version requirement.
+
+    Raises
+    ------
+    OptionalDependencyError
+        With component name, missing object, install command, and the
+        affected entry point in the message.
+    ValueError
+        If ``name`` is not a registered component.
+    """
+    cfg = _get_config(name)
+    component = cfg.get("component", name)
+    python_package = cfg.get("python_package")
+
+    if check_python and python_package is not None:
+        check_python_package(
+            module_name=python_package,
+            component=component,
+            min_version=cfg.get("min_version"),
+            pip_package=cfg.get("pip_package") or python_package,
+            conda_package=cfg.get("conda_package"),
+            conda_channel=cfg.get("conda_channel"),
+            extras=cfg.get("extras"),
+        )
+
+    extension_name = cfg.get("extension_name")
+    if check_js_resources and extension_name is not None:
+        check_frontend_resources(
+            extension_name,
+            component,
+            bundled_subdir=cfg.get("bundled_subdir"),
+        )
+
+
+def import_component(
+    name: str,
+    *,
+    submodule: str | None = None,
+) -> t.Any:
+    """
+    Import a module for a registered optional dependency.
+
+    Parameters
+    ----------
+    name : str
+        Key into :data:`OPTIONAL_DEPENDENCIES`.
+    submodule : str, optional
+        Dotted sub-path appended to the base ``python_package``, e.g.
+        ``"graph_objs"`` on top of ``"plotly"`` gives
+        ``plotly.graph_objs``.
+
+    Returns
+    -------
+    module
+        The imported module on success.
+
+    Raises
+    ------
+    OptionalDependencyError
+        If the package is missing or too old, with full diagnostic info.
+    ValueError
+        If ``name`` is not registered or has no ``python_package``.
+    """
+    cfg = _get_config(name)
+    component = cfg.get("component", name)
+    python_package = cfg.get("python_package")
+    if python_package is None:
+        raise ValueError(
+            f"Component '{name}' does not declare a python_package; "
+            "it has no Python module to import."
+        )
+
+    module_name = (
+        f"{python_package}.{submodule}" if submodule else python_package
+    )
+    check_python_package(
+        module_name=python_package,
+        component=component,
+        min_version=cfg.get("min_version"),
+        pip_package=cfg.get("pip_package") or python_package,
+        conda_package=cfg.get("conda_package"),
+        conda_channel=cfg.get("conda_channel"),
+        extras=cfg.get("extras"),
     )
     return importlib.import_module(module_name)

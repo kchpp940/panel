@@ -11,7 +11,7 @@ import param
 from bokeh.models import ColumnDataSource
 from pyviz_comms import JupyterComm
 
-from ..util import check_frontend_resources, import_optional, lazy_load
+from ..util import import_component, lazy_load, require_component
 from .base import ModelPane
 from .image import PDF, SVG, Image
 from .markup import HTML, JSON
@@ -319,10 +319,7 @@ class Vega(ModelPane):
         >>> png_bytes = vega_pane.export('png')
         >>> image_pane = vega_pane.export('png', as_pane=True)
         """
-        vlc = import_optional(
-            "vl_convert", "Vega pane export",
-            pip_package="vl-convert-python",
-        )
+        vlc = import_component("vl_convert")
 
         spec = self.object if isinstance(self.object, dict) else self.object.to_dict()
         spec = dict(spec)
@@ -446,7 +443,7 @@ class Vega(ModelPane):
         self, doc: Document, root: Model | None = None,
         parent: Model | None = None, comm: Comm | None = None
     ) -> Model:
-        check_frontend_resources("vega", "Vega pane")
+        require_component("vega", check_python=False)
         Vega._bokeh_model = lazy_load(
             'panel.models.vega', 'VegaPlot', isinstance(comm, JupyterComm), root
         )

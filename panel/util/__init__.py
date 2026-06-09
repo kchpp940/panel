@@ -40,9 +40,9 @@ from .checks import (  # noqa
     is_series, isdatetime, isfile, isIn, isurl,
 )
 from .dependencies import (  # noqa
-    DependencyIssue, OptionalDependencyError, check_extension_loaded,
-    check_frontend_resources, check_python_package, import_optional,
-    require_optional,
+    DependencyIssue, OPTIONAL_DEPENDENCIES, OptionalDependencyError,
+    check_extension_loaded, check_frontend_resources, check_python_package,
+    import_component, import_optional, require_component, require_optional,
 )
 from .parameters import (  # noqa
     edit_readonly, extract_dependencies, get_method_owner,

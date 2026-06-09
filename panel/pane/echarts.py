@@ -11,7 +11,7 @@ from bokeh.core.serialization import Serializer
 from bokeh.models import CustomJS
 from pyviz_comms import JupyterComm
 
-from ..util import check_frontend_resources, lazy_load
+from ..util import lazy_load, require_component
 from ..viewable import Viewable
 from .base import ModelPane
 
@@ -143,7 +143,7 @@ class ECharts(ModelPane):
         self, doc: Document, root: Model | None = None,
         parent: Model | None = None, comm: Comm | None = None
     ) -> Model:
-        check_frontend_resources("echarts", "ECharts pane")
+        require_component("echarts", check_python=False)
         if self.is_pyecharts(self.object):
             from pyecharts.commons.utils import JsCode  # type: ignore[import-untyped]
             try:
