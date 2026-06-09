@@ -160,6 +160,11 @@ class Plotly(ModelPane):
         *,
         kind: str | None = None,
     ) -> None:
+        """
+        Remove a callback previously registered with
+        :meth:`subscribe_interaction`.  ``kind`` must match the value
+        used at subscription time.
+        """
         self.interaction_store.unsubscribe(callback, kind=kind)
 
     def _to_figure(self, obj):

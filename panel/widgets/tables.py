@@ -1433,9 +1433,23 @@ class Tabulator(BaseTable):
         return self.interaction_adapter.store
 
     def subscribe_interaction(self, callback, *, kind: str | None = None) -> None:
+        """
+        Register a callback for standardized interaction events.
+
+        Parameters
+        ----------
+        callback : callable
+            Invoked with a ``StandardEvent`` instance.
+        kind : str, optional
+            If provided, only fire on events whose ``.kind`` matches.
+        """
         self.interaction_store.subscribe(callback, kind=kind)
 
     def unsubscribe_interaction(self, callback, *, kind: str | None = None) -> None:
+        """
+        Remove a callback previously registered with
+        :meth:`subscribe_interaction`.
+        """
         self.interaction_store.unsubscribe(callback, kind=kind)
 
     @param.depends('value', watch=True, on_init=True)
@@ -1495,11 +1509,10 @@ class Tabulator(BaseTable):
         return super()._process_events(events)
 
     def _process_event(self, event) -> None:
-        self.interaction_adapter.handle_event(event, event_name=event.event_name)
-
         if event.event_name == 'selection-change':
             if self.pagination == 'remote':
                 self._update_selection(event)
+            self.interaction_adapter.handle_event(event, event_name=event.event_name)
             return
 
         event_col = self._renamed_cols.get(event.column, event.column)
@@ -1517,7 +1530,7 @@ class Tabulator(BaseTable):
             else:
                 event.value = self.value.index[event.row]
 
-        # Set the old attribute on a table edit event
+        # Set the old attribute on a table edit event (before publish so adapter sees it)
         if event.event_name == 'table-edit':
             if event.pre:
                 import pandas as pd
@@ -1529,6 +1542,14 @@ class Tabulator(BaseTable):
             else:
                 if self._old_value is not None:
                     event.old = self._old_value[event_col].iloc[event.row]
+
+        # Publish the standardized event AFTER resolving row / column / value / old
+        # so the adapter sees the same resolved data as user callbacks.
+        self.interaction_adapter.handle_event(event, event_name=event.event_name)
+
+        # Fire user callbacks after publishing (preserves original timing)
+        if event.event_name == 'table-edit':
+            if not event.pre:
                 for cb in self._on_edit_callbacks:
                     state.execute(partial(cb, event), schedule=False)
                 self._update_style()

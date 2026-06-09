@@ -257,9 +257,23 @@ class Vega(ModelPane):
         return self.interaction_adapter.store
 
     def subscribe_interaction(self, callback, *, kind: str | None = None) -> None:
+        """
+        Register a callback for standardized interaction events.
+
+        Parameters
+        ----------
+        callback : callable
+            Invoked with a ``StandardEvent`` instance.
+        kind : str, optional
+            If provided, only fire on events whose ``.kind`` matches.
+        """
         self.interaction_store.subscribe(callback, kind=kind)
 
     def unsubscribe_interaction(self, callback, *, kind: str | None = None) -> None:
+        """
+        Remove a callback previously registered with
+        :meth:`subscribe_interaction`.
+        """
         self.interaction_store.unsubscribe(callback, kind=kind)
 
     @property
