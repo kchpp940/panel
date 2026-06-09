@@ -781,16 +781,11 @@ ALL_CHECKERS: list[type[SyncChecker]] = [
     ResourceRefChecker,
 ]
 
-# Checkers that perform purely static analysis and do not need panel's runtime
-# dependencies (param, bokeh, etc.) to work correctly.
-STATIC_ONLY_CHECKERS: frozenset[str] = frozenset({"ResourceRefChecker"})
-
 
 def _probe_core_dependencies() -> Exception | None:
     """Probe whether the panel runtime core dependencies are importable.
 
     Returns ``None`` on success or the first import exception on failure.
-    Failure is **not** silent for callers that need these imports.
     """
     try:
         import param  # noqa: F401
@@ -804,23 +799,26 @@ def _probe_core_dependencies() -> Exception | None:
 
 
 def run_checks(verbose: bool = True) -> int:
-    all_errors: list[SyncError] = []
+    # Core dependencies must be present for the docs build gate; anything
+    # less than a full runtime is a hard failure rather than a silent skip.
     core_exc = _probe_core_dependencies()
-    runtime_available = core_exc is None
+    if core_exc is not None:
+        if verbose:
+            print(
+                f"{RED}FATAL{RESET} Core runtime dependencies missing for doc/source sync checks.\n"
+                f"  First failure: {core_exc}\n"
+                f"  Run this script inside the panel 'docs' environment, e.g.:\n"
+                f"    pixi run -e docs python scripts/docs_sync.py\n"
+                f"    pixi run -e docs docs-build\n"
+                f"  Alternatively install the project with documentation extras:\n"
+                f"    pip install -e '.[doc]'",
+                flush=True,
+            )
+        return 1
 
-    if not runtime_available and verbose:
-        print(
-            f"{YELLOW}INFO{RESET} Core panel runtime dependencies unavailable "
-            f"(first failure: {core_exc}); only static-analysis checkers will run.",
-            flush=True,
-        )
-
+    all_errors: list[SyncError] = []
     for cls in ALL_CHECKERS:
         name = cls.__name__
-        if not runtime_available and name not in STATIC_ONLY_CHECKERS:
-            if verbose:
-                print(f"{CYAN}Skipping{RESET} {name} (needs runtime imports).", flush=True)
-            continue
         checker = cls()
         if verbose:
             print(f"{CYAN}Running{RESET} {name}...", flush=True)
