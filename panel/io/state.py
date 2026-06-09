@@ -1317,6 +1317,60 @@ class _state(param.Parameterized):
 state = _state()
 
 
-from .cleanup import register_default_handlers
+def register_session_cleanup_handlers(registry) -> None:
+    """Register core state-level session cleanup handlers with the given registry."""
+    import datetime as _dt
 
-register_default_handlers()
+    def _cleanup_session_info(session_context) -> None:
+        _session_id = session_context.id
+        _sessions = state.session_info['sessions']
+        if _session_id in _sessions and _sessions[_session_id]['ended'] is None:
+            _session = _sessions[_session_id]
+            if _session['rendered'] is not None:
+                state.session_info['live'] -= 1
+            _session['ended'] = _dt.datetime.now().timestamp()
+            state.param.trigger('session_info')
+
+    registry.register(
+        name="session_info",
+        func=_cleanup_session_info,
+        priority=10,
+    )
+
+    def _cleanup_views(session_context) -> None:
+        _doc = session_context._document
+        _refs_to_remove: list[str] = []
+        for _ref, (_obj, _model, _view_doc, _comm) in state._views.items():
+            if _view_doc is _doc:
+                try:
+                    if hasattr(_obj, '_cleanup'):
+                        _obj._cleanup(_model)
+                except Exception:
+                    pass
+                _refs_to_remove.append(_ref)
+        for _ref in _refs_to_remove:
+            state._views.pop(_ref, None)
+
+    registry.register(
+        name="views",
+        func=_cleanup_views,
+        priority=70,
+    )
+
+    def _cleanup_document_state(session_context) -> None:
+        _doc = session_context._document
+        state._connected.pop(_doc, None)
+        state._loaded.pop(_doc, None)
+        state._onload.pop(_doc, None)
+        state._change_callbacks.pop(_doc, None)
+        state._stylesheets.pop(_doc, None)
+        state._extensions_.pop(_doc, None)
+        state._rel_paths.pop(_doc, None)
+        state._base_urls.pop(_doc, None)
+        state._session_outputs.pop(_doc, None)
+
+    registry.register(
+        name="document_state",
+        func=_cleanup_document_state,
+        priority=80,
+    )

@@ -179,9 +179,9 @@ class SessionCleanupRegistry:
         """
         result = CleanupResult()
         for handler in self.handlers:
+            result.executed.append(handler.name)
             try:
                 handler(session_context)
-                result.executed.append(handler.name)
             except Exception as exc:  # noqa: BLE001
                 logger.exception(
                     "Session cleanup handler %r failed", handler.name
@@ -205,187 +205,49 @@ _DEFAULT_HANDLERS_REGISTERED = False
 
 
 def register_default_handlers() -> None:
-    """Register all core session cleanup handlers.
+    """Register all built-in session cleanup handlers.
 
-    This function is called once from :mod:`panel.io.state` to ensure
-    that every built-in cleanup handler is registered regardless of
-    import order and regardless of whether the corresponding resource
-    module has been lazily imported.
+    This function explicitly imports every resource module that owns
+    session-scoped state and delegates handler registration to each
+    module via its :func:`register_session_cleanup_handlers` hook.
 
-    Handlers are idempotent — calling this function more than once is
-    safe (subsequent calls are no-ops).
+    This approach ensures that:
+
+    * Handlers are always registered regardless of whether the resource
+      module was lazily imported elsewhere (no import-order dependency).
+    * Every resource owns and declares its own cleanup logic — this
+      function contains **no** resource-specific cleanup details.
+    * Calling this function more than once is a no-op.
     """
+    import sys as _sys
+    import importlib as _importlib
+
     global _DEFAULT_HANDLERS_REGISTERED
     if _DEFAULT_HANDLERS_REGISTERED:
         return
     _DEFAULT_HANDLERS_REGISTERED = True
 
-    # ------------------------------------------------------------------
-    # priority=10 – session_info statistics
-    # ------------------------------------------------------------------
-    def _cleanup_session_info(session_context) -> None:
-        import datetime as _dt
+    # --- Fully-qualified module names of every resource module that ---
+    # --- owns session-scoped state. Order here does not matter because
+    # --- handlers are sorted by priority at execution time.
+    _MODULE_PATHS: t.List[str] = [
+        "panel.io.state",
+        "panel.io.callbacks",
+        "panel.io.location",
+        "panel.io.notifications",
+        "panel.io.browser",
+        "panel.template.base",
+    ]
 
-        from .state import state as _state
-
-        _session_id = session_context.id
-        _sessions = _state.session_info['sessions']
-        if _session_id in _sessions and _sessions[_session_id]['ended'] is None:
-            _session = _sessions[_session_id]
-            if _session['rendered'] is not None:
-                _state.session_info['live'] -= 1
-            _session['ended'] = _dt.datetime.now().timestamp()
-            _state.param.trigger('session_info')
-
-    session_cleanup_registry.register(
-        name="session_info",
-        func=_cleanup_session_info,
-        priority=10,
-    )
-
-    # ------------------------------------------------------------------
-    # priority=20 – PeriodicCallback instances tracked by state._periodic
-    # ------------------------------------------------------------------
-    def _cleanup_periodic_callbacks(session_context) -> None:
-        from .state import state as _state
-
-        _doc = session_context._document
-        if _doc in _state._periodic:
-            for _cb in _state._periodic[_doc]:
-                try:
-                    _cb._cleanup(session_context)
-                except Exception:
-                    pass
-            del _state._periodic[_doc]
-
-    session_cleanup_registry.register(
-        name="periodic_callbacks",
-        func=_cleanup_periodic_callbacks,
-        priority=20,
-    )
-
-    # ------------------------------------------------------------------
-    # priority=30 – Location tracked by state._locations
-    # ------------------------------------------------------------------
-    def _cleanup_locations(session_context) -> None:
-        from .state import state as _state
-
-        _doc = session_context._document
-        if _doc in _state._locations:
-            _loc = _state._locations[_doc]
-            _loc._server_destroy(session_context)
-            del _state._locations[_doc]
-
-    session_cleanup_registry.register(
-        name="locations",
-        func=_cleanup_locations,
-        priority=30,
-    )
-
-    # ------------------------------------------------------------------
-    # priority=40 – NotificationArea tracked by state._notifications
-    # ------------------------------------------------------------------
-    def _cleanup_notifications(session_context) -> None:
-        from .state import state as _state
-
-        _doc = session_context._document
-        if _doc in _state._notifications:
-            _notification = _state._notifications[_doc]
-            _notification._server_destroy(session_context)
-            del _state._notifications[_doc]
-
-    session_cleanup_registry.register(
-        name="notifications",
-        func=_cleanup_notifications,
-        priority=40,
-    )
-
-    # ------------------------------------------------------------------
-    # priority=50 – BrowserInfo tracked by state._browsers
-    # ------------------------------------------------------------------
-    def _cleanup_browser_info(session_context) -> None:
-        from .state import state as _state
-
-        _doc = session_context._document
-        if _doc in _state._browsers:
-            _browser = _state._browsers[_doc]
-            for _root_doc in list(_browser._documents.keys()):
-                try:
-                    _root = _browser._documents.get(_root_doc)
-                    _browser._cleanup(_root)
-                except Exception:
-                    pass
-            del _state._browsers[_doc]
-
-    session_cleanup_registry.register(
-        name="browser_info",
-        func=_cleanup_browser_info,
-        priority=50,
-    )
-
-    # ------------------------------------------------------------------
-    # priority=60 – Template tracked by state._templates
-    # ------------------------------------------------------------------
-    def _cleanup_templates(session_context) -> None:
-        from .state import state as _state
-
-        _doc = session_context._document
-        if _doc in _state._templates:
-            del _state._templates[_doc]
-
-    session_cleanup_registry.register(
-        name="templates",
-        func=_cleanup_templates,
-        priority=60,
-    )
-
-    # ------------------------------------------------------------------
-    # priority=70 – Renderable views tracked by state._views for the doc
-    # ------------------------------------------------------------------
-    def _cleanup_views(session_context) -> None:
-        from .state import state as _state
-
-        _doc = session_context._document
-        _refs_to_remove: list[str] = []
-        for _ref, (_obj, _model, _view_doc, _comm) in _state._views.items():
-            if _view_doc is _doc:
-                try:
-                    if hasattr(_obj, '_cleanup'):
-                        _obj._cleanup(_model)
-                except Exception:
-                    pass
-                _refs_to_remove.append(_ref)
-        for _ref in _refs_to_remove:
-            _state._views.pop(_ref, None)
-
-    session_cleanup_registry.register(
-        name="views",
-        func=_cleanup_views,
-        priority=70,
-    )
-
-    # ------------------------------------------------------------------
-    # priority=80 – document-scoped state dictionaries
-    # ------------------------------------------------------------------
-    def _cleanup_document_state(session_context) -> None:
-        from .state import state as _state
-
-        _doc = session_context._document
-        _state._connected.pop(_doc, None)
-        _state._loaded.pop(_doc, None)
-        _state._onload.pop(_doc, None)
-        _state._change_callbacks.pop(_doc, None)
-        _state._stylesheets.pop(_doc, None)
-        _state._extensions_.pop(_doc, None)
-        _state._rel_paths.pop(_doc, None)
-        _state._base_urls.pop(_doc, None)
-        _state._session_outputs.pop(_doc, None)
-
-    session_cleanup_registry.register(
-        name="document_state",
-        func=_cleanup_document_state,
-        priority=80,
-    )
+    # NOTE: we must import modules cleanly via ``importlib.import_module``
+    # and then look them up in sys.modules, because ``panel.io.__init__``
+    # re-exports the *singleton instances* ``state`` and ``cache`` under
+    # the package namespace — doing ``from . import state`` would give us
+    # the _state() *object* instead of the panel.io.state *module*.
+    for _path in _MODULE_PATHS:
+        _importlib.import_module(_path)
+        _module = _sys.modules[_path]
+        _module.register_session_cleanup_handlers(session_cleanup_registry)
 
 
 __all__ = [

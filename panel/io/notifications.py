@@ -414,3 +414,20 @@ class NotificationArea(NotificationAreaBase, ReactiveHTML):
 
 # Construct a DataModel for Notification
 _DATA_MODELS[Notification] = construct_data_model(Notification)
+
+
+def register_session_cleanup_handlers(registry) -> None:
+    """Register NotificationArea session cleanup handlers with the given registry."""
+
+    def _cleanup_notifications(session_context) -> None:
+        doc = session_context._document
+        if doc in state._notifications:
+            notification = state._notifications[doc]
+            notification._server_destroy(session_context)
+            del state._notifications[doc]
+
+    registry.register(
+        name="notifications",
+        func=_cleanup_notifications,
+        priority=40,
+    )
