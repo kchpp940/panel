@@ -282,10 +282,15 @@ class TestSoftReloadService:
         new = Fast(theme=FastDefaultTheme)
         assert SoftReloadService.should_reload(None, new) is False
 
-    def test_should_reload_same(self):
+    def test_should_reload_same_design_same_theme_name_no_trigger(self):
         old = Fast(theme=FastDefaultTheme)
-        same = Fast(theme=FastDefaultTheme)
-        assert SoftReloadService.should_reload(old, same) is False
+        new = Fast(theme=FastDefaultTheme)
+        assert SoftReloadService.should_reload(old, new) is False
+
+    def test_should_reload_same_theme_name_different_instances_no_trigger(self):
+        old = Bootstrap(theme=BootstrapDefaultTheme)
+        new = Bootstrap(theme=BootstrapDefaultTheme)
+        assert SoftReloadService.should_reload(old, new) is False
 
     def test_get_theme_name(self):
         light = Fast(theme=FastDefaultTheme)
@@ -326,6 +331,24 @@ class TestSnapshotStateMigrator:
         migrator.restore_viewable_state(w, "ref1")
         for k in original_models:
             assert k in w._models
+
+    def test_snapshot_does_not_save_or_restore_hooks(self):
+        w = Button(label="test")
+        fake_hook = lambda *a, **kw: None
+        w._hooks.append(fake_hook)
+
+        migrator = SnapshotStateMigrator()
+        migrator.snapshot_viewable_state(w, "ref1")
+
+        w._hooks.clear()
+        new_hook = lambda *a, **kw: None
+        w._hooks.append(new_hook)
+
+        migrator.restore_viewable_state(w, "ref1")
+
+        assert fake_hook not in w._hooks
+        assert new_hook in w._hooks
+        assert w._hooks == [new_hook]
 
     def test_snapshot_restore_document(self, fresh_document):
         migrator = SnapshotStateMigrator()

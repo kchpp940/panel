@@ -274,13 +274,15 @@ class SoftReloadService:
         """
         判断 Design 变更是否需要触发软重载。
 
-        当 Design 类型变化或 Theme 变化时，需要软重载以重新加载资源。
+        只在以下两种情况触发软重载，避免普通参数更新导致误刷新：
+        1. Design 类型变化（不同 Design 有不同的资源文件，必须整页刷新）
+        2. Theme._name 变化（default ↔ dark，URL 查询参数需要更新，前端主题切换需要整页刷新）
         """
         if old_design is None:
             return False
         if type(old_design) is not type(new_design):
             return True
-        if type(old_design.theme) is not type(new_design.theme):
+        if SoftReloadService.get_theme_name(old_design) != SoftReloadService.get_theme_name(new_design):
             return True
         return False
 
@@ -343,15 +345,13 @@ class SnapshotStateMigrator:
         """
         保存单个 Viewable 的状态快照。
 
-        保存内容：
+        保存内容（不含 _hooks——hooks 由 migrate_design 单独做差异迁移）：
         - _models: 模型引用映射
-        - _hooks: 已注册的 hooks 列表
         - _plots (HoloViews): 绘图引用映射
         """
         key = f"{id(viewable)}_{mref}"
         snapshot: dict[str, t.Any] = {
             'models': dict(viewable._models),
-            'hooks': list(viewable._hooks),
         }
         if hasattr(viewable, '_plots'):
             snapshot['plots'] = dict(viewable._plots)
@@ -365,7 +365,8 @@ class SnapshotStateMigrator:
         """
         恢复单个 Viewable 的状态快照。
 
-        恢复已保存的 _models、_hooks、_plots。
+        恢复已保存的 _models、_plots。
+        注意：_hooks 不在这里恢复，由 migrate_design 负责旧 Design → 新 Design 的差异迁移。
         """
         key = f"{id(viewable)}_{mref}"
         snapshot = self._snapshots.pop(key, None)
@@ -375,10 +376,6 @@ class SnapshotStateMigrator:
         for ref, model_data in snapshot.get('models', {}).items():
             if ref not in viewable._models:
                 viewable._models[ref] = model_data
-
-        for hook in snapshot.get('hooks', []):
-            if hook not in viewable._hooks:
-                viewable._hooks.append(hook)
 
         if 'plots' in snapshot and hasattr(viewable, '_plots'):
             for ref, plot in snapshot['plots'].items():
