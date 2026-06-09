@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import importlib
 import json
 import os
@@ -45,7 +46,7 @@ def _ts_stem(path: Path) -> str:
 
 
 def check_models_ts_vs_built_js(errors: list[str]) -> None:
-    print("\n[1/7] Checking TypeScript models vs built JS...")
+    print("\n[1/6] Checking TypeScript models vs built JS...")
 
     top_level_ts = {
         _ts_stem(f) for f in MODELS_DIR.glob("*.ts")
@@ -110,7 +111,7 @@ def check_models_ts_vs_built_js(errors: list[str]) -> None:
 
 
 def check_css_files(errors: list[str]) -> None:
-    print("\n[2/7] Checking CSS files in panel/dist/css/...")
+    print("\n[2/6] Checking CSS files in panel/dist/css/...")
     css_dir = DIST_DIR / "css"
     if not css_dir.exists():
         _print_error("panel/dist/css/ directory does not exist")
@@ -119,17 +120,19 @@ def check_css_files(errors: list[str]) -> None:
 
     css_files = list(css_dir.glob("*.css"))
     if not css_files:
-        _print_warn("No CSS files found in panel/dist/css/")
+        _print_error("No CSS files found in panel/dist/css/")
+        errors.append("No CSS files found in panel/dist/css/")
         return
 
     _print_ok(f"Found {len(css_files)} CSS files")
 
 
 def check_bundled_resources(errors: list[str]) -> None:
-    print("\n[3/7] Checking bundled resources referenced by Python code...")
+    print("\n[3/6] Checking bundled resources referenced by Python code...")
 
     if not BUNDLE_DIR.exists():
-        _print_warn("panel/dist/bundled/ does not exist (bundled resources may not have been built yet)")
+        _print_error("panel/dist/bundled/ does not exist (bundled resources have not been built)")
+        errors.append("panel/dist/bundled/ does not exist")
         return
 
     sys.path.insert(0, str(ROOT))
@@ -225,9 +228,11 @@ def _check_bundled_url(url: str, attr: str, model_name: str, npm_cdn: str, missi
 
 
 def check_sourcemaps(errors: list[str]) -> None:
-    print("\n[4/7] Checking for orphaned/outdated source maps...")
+    print("\n[4/6] Checking for orphaned/outdated source maps...")
 
     if not DIST_DIR.exists():
+        _print_error("panel/dist/ does not exist")
+        errors.append("panel/dist/ does not exist")
         return
 
     map_files = list(DIST_DIR.rglob("*.js.map")) + list(DIST_DIR.rglob("*.css.map"))
@@ -244,36 +249,34 @@ def check_sourcemaps(errors: list[str]) -> None:
 
     if orphans:
         for m in orphans:
-            _print_error(f"Orphaned source map: {m.relative_to(ROOT)}")
+            _print_error(f"Orphaned source map (stale): {m.relative_to(ROOT)}")
             errors.append(f"Orphaned source map: {m.relative_to(ROOT)}")
     else:
         _print_ok(f"All {len(map_files)} source maps have corresponding sources")
 
 
-def check_package_json_consistency(errors: list[str]) -> None:
-    print("\n[5/7] Checking package.json files field vs actual dist contents...")
+def check_package_json_and_python_package_data(errors: list[str]) -> None:
+    print("\n[5/6] Checking package.json and Python package data configuration...")
 
     if not PACKAGE_JSON.exists():
         _print_error(f"package.json not found at {PACKAGE_JSON}")
         errors.append("package.json not found")
-        return
-
-    pkg = json.loads(PACKAGE_JSON.read_text())
-    files_patterns = pkg.get("files", [])
-
-    main_field = pkg.get("main", "")
-    if main_field:
-        main_path = PANEL_DIR / main_field
-        if not main_path.exists():
-            _print_warn(f"package.json main entry '{main_field}' does not exist at {main_path.relative_to(ROOT)}")
+    else:
+        pkg = json.loads(PACKAGE_JSON.read_text())
+        files_patterns = pkg.get("files", [])
+        if not files_patterns:
+            _print_warn("package.json files field is empty")
         else:
-            _print_ok(f"package.json main entry '{main_field}' exists")
+            _print_ok(f"package.json files field patterns: {files_patterns}")
 
-    _print_ok(f"package.json files field patterns: {files_patterns}")
-
-
-def check_python_package_data(errors: list[str]) -> None:
-    print("\n[6/7] Checking Python package data configuration...")
+        main_field = pkg.get("main", "")
+        if main_field:
+            main_path = PANEL_DIR / main_field
+            if not main_path.exists():
+                _print_error(f"package.json main entry '{main_field}' does not exist at {main_path.relative_to(ROOT)}")
+                errors.append(f"package.json main entry '{main_field}' missing")
+            else:
+                _print_ok(f"package.json main entry '{main_field}' exists")
 
     if not PYPROJECT.exists():
         _print_error(f"pyproject.toml not found at {PYPROJECT}")
@@ -281,69 +284,108 @@ def check_python_package_data(errors: list[str]) -> None:
     else:
         _print_ok("pyproject.toml exists")
 
-    dist_path = PANEL_DIR / "dist"
-    if dist_path.exists():
-        dist_count = sum(1 for _ in dist_path.rglob("*"))
-        _print_ok(f"panel/dist/ contains {dist_count} files/directories")
+    if not DIST_DIR.exists():
+        _print_error("panel/dist/ does not exist")
+        errors.append("panel/dist/ does not exist")
     else:
-        _print_warn("panel/dist/ does not exist")
-
-    _print_ok("Python package data configuration valid")
-
-
-def check_wheel_contents(errors: list[str]) -> None:
-    print("\n[7/7] Checking wheel contents (if wheel exists)...")
-
-    dist_root = ROOT / "dist"
-    if not dist_root.exists():
-        _print_warn("Top-level dist/ directory not found, skipping wheel check")
-        return
-
-    wheels = list(dist_root.glob("*.whl"))
-    if not wheels:
-        _print_warn("No .whl files found in dist/, skipping wheel check")
-        return
-
-    for wheel in sorted(wheels, key=lambda p: p.stat().st_mtime, reverse=True):
-        _print_ok(f"Checking wheel: {wheel.name}")
-
-        with zipfile.ZipFile(wheel) as zf:
-            wheel_files = set(zf.namelist())
-
-        panel_dist_files: set[str] = set()
-        dist_path = PANEL_DIR / "dist"
-        if dist_path.exists():
-            for f in dist_path.rglob("*"):
-                if f.is_file():
-                    rel = f.relative_to(PANEL_DIR)
-                    panel_dist_files.add(str(rel).replace(os.sep, "/"))
-
-        missing_in_wheel = panel_dist_files - wheel_files
-
-        if missing_in_wheel:
-            for mf in sorted(missing_in_wheel)[:20]:
-                _print_error(f"  Missing from wheel: {mf}")
-            if len(missing_in_wheel) > 20:
-                _print_error(f"  ... and {len(missing_in_wheel) - 20} more")
-            errors.append(f"{len(missing_in_wheel)} files missing from wheel {wheel.name}")
+        dist_files = [f for f in DIST_DIR.rglob("*") if f.is_file()]
+        if not dist_files:
+            _print_error("panel/dist/ contains no files")
+            errors.append("panel/dist/ contains no files")
         else:
-            _print_ok(f"  All panel/dist/ files present in wheel")
+            _print_ok(f"panel/dist/ contains {len(dist_files)} files")
 
 
-def main() -> int:
-    print("=" * 70)
-    print("Panel Frontend Artifact Verification")
-    print("=" * 70)
+def check_wheel_contents(errors: list[str], wheel_path: Path) -> None:
+    print("\n[6/6] Checking wheel contents...")
 
+    if not wheel_path.exists():
+        _print_error(f"Wheel not found at {wheel_path}")
+        errors.append(f"Wheel not found: {wheel_path}")
+        return
+
+    _print_ok(f"Checking wheel: {wheel_path.name}")
+
+    with zipfile.ZipFile(wheel_path) as zf:
+        wheel_files = set(zf.namelist())
+
+    panel_dist_files: set[str] = set()
+    if DIST_DIR.exists():
+        for f in DIST_DIR.rglob("*"):
+            if f.is_file():
+                rel = f.relative_to(PANEL_DIR)
+                panel_dist_files.add(str(rel).replace(os.sep, "/"))
+
+    if not panel_dist_files:
+        _print_error("panel/dist/ has no files to compare against wheel")
+        errors.append("panel/dist/ is empty, cannot verify wheel contents")
+        return
+
+    missing_in_wheel = sorted(panel_dist_files - wheel_files)
+
+    if missing_in_wheel:
+        for mf in missing_in_wheel[:20]:
+            _print_error(f"  Missing from wheel: {mf}")
+        if len(missing_in_wheel) > 20:
+            _print_error(f"  ... and {len(missing_in_wheel) - 20} more")
+        errors.append(f"{len(missing_in_wheel)} files from panel/dist/ are missing from wheel {wheel_path.name}")
+    else:
+        _print_ok(f"  All {len(panel_dist_files)} panel/dist/ files present in wheel")
+
+    extra_in_wheel = sorted({
+        wf for wf in wheel_files
+        if wf.startswith("panel/dist/") and wf not in panel_dist_files and not wf.endswith("/")
+    })
+    if extra_in_wheel:
+        for ef in extra_in_wheel[:10]:
+            _print_warn(f"  Extra in wheel (stale?): {ef}")
+        if len(extra_in_wheel) > 10:
+            _print_warn(f"  ... and {len(extra_in_wheel) - 10} more")
+
+
+def run_source_and_dist_checks() -> list[str]:
+    """Run all source/dist checks (Phase 1). Always strict."""
     errors: list[str] = []
-
     check_models_ts_vs_built_js(errors)
     check_css_files(errors)
     check_bundled_resources(errors)
     check_sourcemaps(errors)
-    check_package_json_consistency(errors)
-    check_python_package_data(errors)
-    check_wheel_contents(errors)
+    check_package_json_and_python_package_data(errors)
+    return errors
+
+
+def run_wheel_check(wheel_path: Path) -> list[str]:
+    """Run wheel contents check (Phase 2). Strict when called."""
+    errors: list[str] = []
+    check_wheel_contents(errors, wheel_path)
+    return errors
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Verify Panel frontend build artifacts are consistent."
+    )
+    parser.add_argument(
+        "--wheel",
+        type=Path,
+        default=None,
+        help="Path to the built .whl file. If provided, also verifies wheel contents (release mode).",
+    )
+    args = parser.parse_args()
+
+    print("=" * 70)
+    if args.wheel:
+        print(f"Panel Frontend Artifact Verification (RELEASE MODE)")
+        print(f"Wheel: {args.wheel}")
+    else:
+        print("Panel Frontend Artifact Verification (SOURCE/DIST ONLY)")
+    print("=" * 70)
+
+    errors = run_source_and_dist_checks()
+
+    if args.wheel:
+        wheel_errors = run_wheel_check(args.wheel)
+        errors.extend(wheel_errors)
 
     print("\n" + "=" * 70)
     if errors:
@@ -352,7 +394,10 @@ def main() -> int:
             print(f"  - {e}")
         return 1
     else:
-        _print_ok("All checks passed!")
+        if args.wheel:
+            _print_ok("All source/dist and wheel checks passed!")
+        else:
+            _print_ok("All source/dist checks passed! (wheel not checked)")
         return 0
 
 

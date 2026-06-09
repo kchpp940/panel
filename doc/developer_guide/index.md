@@ -267,23 +267,32 @@ pixi run build-npm
 
 ### Frontend Artifact Verification
 
-After building, Panel automatically verifies that all frontend artifacts are consistent and complete. This verification can also be run standalone:
+Panel verifies frontend build artifacts in two phases. Both run automatically in CI and must pass before release.
+
+**Phase 1 — Source / Dist checks** (always run):
 
 ```bash
 pixi run verify-frontend-artifacts
 ```
 
-The verification checks that:
+Checks:
 
-- **TypeScript models in `panel/models/`** have corresponding built JS in `panel/dist/`
+- **TypeScript models** in `panel/models/` have corresponding built JS in `panel/dist/`
 - **CSS files** exist in `panel/dist/css/`
-- **Bundled resources** referenced by Python models and templates (via `__javascript_raw__`, `__css_raw__`, `__tarball__`, `_css`, `_js`) exist in `panel/dist/bundled/`
-- **Source maps** are not orphaned (every `.map` file has its corresponding source)
-- **`package.json`** `files` field and `main` entry are consistent with actual dist contents
-- **Python package data** configuration in `pyproject.toml` matches the actual dist directory
-- **Wheel contents** (if a wheel exists in `dist/`) include all files from `panel/dist/`
+- **Bundled resources** referenced by Python models/templates (via `__javascript_raw__`, `__css_raw__`, `__tarball__`, `_css`, `_js`, `_resources`) exist in `panel/dist/bundled/`
+- **Source maps** are not orphaned (stale `.map` files without corresponding sources fail)
+- **`package.json`** `main` entry exists and `files` patterns cover dist contents
+- **Python package data** in `pyproject.toml` is present and `panel/dist/` is non-empty
 
-The verification runs automatically during the build process (via `hatch_build.py`) and in the CI workflow. Missing JS/CSS, stale sourcemaps, unpackaged models, or references to non-existent frontend modules will cause the build to fail.
+**Phase 2 — Wheel contents check** (release mode, requires built wheel):
+
+```bash
+python scripts/verify_frontend_artifacts.py --wheel dist/panel-X.Y.Z-py3-none-any.whl
+```
+
+Checks that every file under `panel/dist/` is present inside the `.whl` (missing resources fail, stale extras warn). Missing wheel path or non-existent wheel file causes immediate failure.
+
+Missing JS/CSS, stale sourcemaps, unpackaged models, references to non-existent frontend modules, or wheel/dist mismatches all cause verification to fail with exit code 1. The CI `pip_build` and `cdn_build` jobs run both phases; `conda_build` and `npm_build` run Phase 1 only.
 
 ## Continuous Integration
 
