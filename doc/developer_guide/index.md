@@ -265,11 +265,32 @@ pixi run build-pyodide
 pixi run build-npm
 ```
 
-`pixi run build-pip` is the release-quality Pip build pipeline. It runs three steps in order — none can be skipped:
+`pixi run build-pip` is the release-quality Pip build pipeline. It runs five steps in order — none can be skipped:
 
 1. **Clean** — deletes the top-level `dist/` directory so stale wheels/sdists from earlier builds cannot interfere
 2. **Build** — runs `python -m build .` to produce a fresh sdist and wheel
-3. **Verify** — runs `python scripts/verify_frontend_artifacts.py --release` (see below)
+3. **Locate** — validates that `dist/` contains exactly one `.whl` and exactly one `.tar.gz`; fails immediately if 0 or 2+ of either are found
+4. **Manifest** — writes `dist/build-manifest.json` with the exact paths of the generated artifacts. In CI, also emits them as `$GITHUB_OUTPUT` variables (`wheel`, `wheel_name`, `sdist`, `sdist_name`) for downstream steps. Downstream CI steps and manual release commands should read this manifest instead of globs like `dist/*.whl`.
+5. **Verify** — runs `python scripts/verify_frontend_artifacts.py --release` (see below)
+
+Example manifest:
+
+```json
+{
+  "wheel": "dist/panel-1.5.0-py3-none-any.whl",
+  "wheel_name": "panel-1.5.0-py3-none-any.whl",
+  "sdist": "dist/panel-1.5.0.tar.gz",
+  "sdist_name": "panel-1.5.0.tar.gz"
+}
+```
+
+Reading artifact paths from the manifest:
+
+```bash
+# Install the exact wheel produced by build-pip
+WHEEL=$(python -c "import json; print(json.load(open('dist/build-manifest.json'))['wheel'])")
+python -m pip install "$WHEEL"
+```
 
 ### Frontend Artifact Verification
 
