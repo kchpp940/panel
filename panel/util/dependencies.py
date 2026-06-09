@@ -14,10 +14,23 @@ This guarantees that error messages always include:
   * A clear description of the problem (missing package, version too old,
     front-end extension not built, JS resources missing even though the
     Python package is installed)
+
+All version bounds and front-end resource paths are resolved from a single
+source of truth:
+
+  * Python package minima come from ``pyproject.toml``
+    (``[project.optional-dependencies]``) plus the minimum versions that
+    Panel actually tests against in its own test suite.
+  * Front-end JS paths are derived directly from each Bokeh model's
+    ``__javascript_raw__`` URLs using the same resolution that
+    ``bundled_files()`` and the compiler use, so the check looks for the
+    exact file on disk (not a loose glob).
 """
 from __future__ import annotations
 
+import functools
 import importlib.util
+import re
 import typing as t
 
 from pathlib import Path
@@ -39,6 +52,9 @@ __all__ = (
     "import_optional",
     "import_component",
 )
+
+_PANEL_ROOT = Path(__file__).resolve().parent.parent.parent
+_PYPROJECT_TOML = _PANEL_ROOT / "pyproject.toml"
 
 
 # ---------------------------------------------------------------------------
@@ -152,6 +168,214 @@ def _format_message(
 
 
 # ---------------------------------------------------------------------------
+# Single source of truth: resolve versions & JS paths from the real codebase
+# ---------------------------------------------------------------------------
+
+
+@functools.cache
+def _parse_pyproject_versions() -> dict[str, str]:
+    """
+    Return ``{pip_package_name: min_version}`` parsed from
+    ``pyproject.toml``'s ``[project.dependencies]`` and
+    ``[project.optional-dependencies]`` sections.
+
+    Only the lower bound (``>=``) is captured; upper bounds and exact
+    pins are ignored (Panel only cares about the minimum it was built
+    against).
+    """
+    result: dict[str, str] = {}
+    if not _PYPROJECT_TOML.is_file():
+        return result
+
+    try:
+        import tomllib
+    except ImportError:
+        try:
+            import tomli as tomllib  # type: ignore[import-not-found,no-redef]
+        except ImportError:
+            tomllib = None  # type: ignore[assignment]
+
+    if tomllib is None:
+        text = _PYPROJECT_TOML.read_text(encoding="utf-8")
+        dep_re = re.compile(
+            r"""^\s*['"]?                          # optional leading quote
+                (?P<name>[A-Za-z0-9_.\-]+)         # package name
+                \s*(?P<constraint>[^'"\],#]*)      # version constraint etc.
+            """,
+            re.VERBOSE,
+        )
+        ver_re = re.compile(r'>=\s*([0-9][0-9A-Za-z.\-+]*)')
+        in_deps = False
+        bracket_depth = 0
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            if line == '[project.dependencies]':
+                in_deps = True
+                bracket_depth = 0
+                continue
+            if line.startswith('[project.optional-dependencies'):
+                in_deps = True
+                bracket_depth = 0
+                continue
+            if in_deps and line.startswith('[') and 'dependencies' not in line:
+                in_deps = False
+                continue
+            if not in_deps:
+                continue
+            bracket_depth += line.count('[') - line.count(']')
+            if line.startswith('#') or not line:
+                continue
+            if line.endswith(('=', '= ')):
+                continue
+            m = dep_re.match(line)
+            if not m:
+                continue
+            name = m.group('name').lower().replace('_', '-')
+            constraint = m.group('constraint')
+            vm = ver_re.search(constraint)
+            if vm:
+                result[name] = vm.group(1)
+        return result
+
+    with open(_PYPROJECT_TOML, "rb") as f:
+        data = tomllib.load(f)
+
+    ver_re = re.compile(r'>=\s*([0-9][0-9A-Za-z.\-+]*)')
+
+    project = data.get("project", {})
+    all_deps: list[str] = list(project.get("dependencies", []))
+    for extra_deps in project.get("optional-dependencies", {}).values():
+        all_deps.extend(extra_deps)
+
+    for dep in all_deps:
+        dep = dep.strip()
+        if not dep:
+            continue
+        m = re.match(r'^([A-Za-z0-9_.\-]+)', dep)
+        if not m:
+            continue
+        name = m.group(1).lower().replace('_', '-')
+        vm = ver_re.search(dep)
+        if vm:
+            result[name] = vm.group(1)
+
+    return result
+
+
+# Additional minimum versions that Panel actually relies on but which are
+# not (yet) declared in pyproject.toml optional-dependencies.  These come
+# from the test suite's own branch logic (e.g. altair 4.x vs 5.x config
+# shape differences) and from the public API of the wrapped library.
+_TEST_SUITE_VERSION_FLOORS: dict[str, str] = {
+    "altair": "4.0.0",
+    "pyecharts": "1.0.0",
+}
+
+
+@functools.cache
+def _resolve_python_min_version(pip_package: str) -> str | None:
+    """
+    Return the minimum acceptable version for ``pip_package``, combining
+    ``pyproject.toml`` declarations with the internal test-suite floors.
+
+    Returns ``None`` if no minimum is known for the package.
+    """
+    key = pip_package.lower().replace('_', '-')
+    pyproject_ver = _parse_pyproject_versions().get(key)
+    test_ver = _TEST_SUITE_VERSION_FLOORS.get(key)
+    if pyproject_ver is None:
+        return test_ver
+    if test_ver is None:
+        return pyproject_ver
+    return pyproject_ver if Version(pyproject_ver) >= Version(test_ver) else test_ver
+
+
+@functools.cache
+def _resolve_js_asset_paths(extension_name: str) -> tuple[str, list[Path]]:
+    """
+    Derive the exact on-disk paths of every JS asset required by the
+    Bokeh model registered under ``extension_name``.
+
+    The resolution logic mirrors :func:`panel.io.resources.bundled_files`
+    and :func:`panel.compiler.write_bundled_files`, so the returned
+    ``Path`` objects point at exactly the files that a successful build
+    would have produced.
+
+    Returns
+    -------
+    bundled_subdir : str
+        The subdirectory under ``panel/dist/bundled/`` that contains the
+        assets (matches the Bokeh model class name, lower-cased).
+    expected_files : list[Path]
+        Absolute paths to every JS file that must exist for the extension
+        to work in non-CDN mode.  These are concrete, versioned filenames
+        (e.g. ``.../plotlyplot/plotly-3.1.0.min.js``), never globs.
+    """
+    from ..config import config, panel_extension
+    from ..io.resources import BUNDLE_DIR
+
+    module_path = panel_extension._imports.get(extension_name)
+    if module_path is None:
+        raise ValueError(f"No panel extension registered under name '{extension_name}'")
+
+    module = importlib.import_module(module_path)
+
+    model_cls = None
+    for attr in dir(module):
+        obj = getattr(module, attr, None)
+        try:
+            from bokeh.model import Model
+        except Exception:
+            Model = None  # type: ignore[assignment,misc]
+        if Model is not None and isinstance(obj, type) and issubclass(obj, Model):
+            js_raw = getattr(obj, '__javascript_raw__', None)
+            if js_raw:
+                model_cls = obj
+                break
+
+    if model_cls is None:
+        raise ValueError(
+            f"Could not find a Bokeh Model with __javascript_raw__ in "
+            f"module '{module_path}' (extension '{extension_name}')"
+        )
+
+    bundled_subdir = model_cls.__name__.lower()
+    for cls in model_cls.__mro__[1:]:
+        cls_files = getattr(cls, '__javascript_raw__', None)
+        if cls_files is model_cls.__javascript_raw__:
+            bundled_subdir = cls.__name__.lower()
+            break
+
+    raw_files = list(model_cls.__javascript_raw__)
+    npm_cdn_prefixes = (
+        config.npm_cdn,
+        'https://cdn.jsdelivr.net/npm',
+        'https://unpkg.com',
+    )
+
+    expected: list[Path] = []
+    for url in raw_files:
+        url = url.split('?')[0]
+
+        if url.startswith('https://cdn.plot.ly/'):
+            rel_path = url.replace('https://cdn.plot.ly/', '')
+        else:
+            matched_prefix = False
+            for prefix in npm_cdn_prefixes:
+                if url.startswith(prefix):
+                    rel_path = url[len(prefix):].lstrip('/')
+                    matched_prefix = True
+                    break
+            if not matched_prefix:
+                parts = url.split('//', 1)[-1].split('/', 1)
+                rel_path = parts[1] if len(parts) > 1 else url
+
+        expected.append(BUNDLE_DIR / bundled_subdir / rel_path)
+
+    return bundled_subdir, expected
+
+
+# ---------------------------------------------------------------------------
 # Python package checks
 # ---------------------------------------------------------------------------
 
@@ -244,19 +468,20 @@ def check_python_package(
 # ---------------------------------------------------------------------------
 
 
-def _panel_dist_dir() -> Path:
-    return Path(__file__).resolve().parent.parent / "dist"
-
-
 def check_frontend_resources(
     extension_name: str,
     component: str,
-    bundled_subdir: str | None = None,
-    js_files: list[str] | None = None,
 ) -> None:
     """
     Check that the compiled front-end assets for a Panel extension are
     present on disk.
+
+    Asset paths are not guessed from glob strings.  They are derived
+    directly from the registered Bokeh model's ``__javascript_raw__``
+    URLs using the same URL→path translation as
+    :func:`panel.io.resources.bundled_files` and the compiler, so this
+    function checks for the exact versioned files that ``panel build``
+    would have produced (e.g. ``plotlyplot/plotly-3.1.0.min.js``).
 
     This catches the case where the Python package is installed but the
     JS/CSS bundles have not been built (e.g. an editable install from
@@ -269,65 +494,32 @@ def check_frontend_resources(
         ``panel.config.panel_extension._imports``).
     component : str
         Human-readable component name for error messages.
-    bundled_subdir : str, optional
-        Subdirectory under ``panel/dist/bundled/`` where the front-end
-        assets live.  Defaults to the lower-cased Bokeh model class name
-        (e.g. ``"plotlyplot"`` for ``PlotlyPlot``).
-    js_files : list[str], optional
-        List of glob patterns for the required JS files under the
-        bundled subdir.  If not provided, falls back to looking for any
-        ``*.js`` / ``*.mjs`` file (less precise).
     """
-    import fnmatch
-    from ..io.resources import BUNDLE_DIR, use_cdn
+    from ..io.resources import use_cdn
 
     if use_cdn():
         return
 
-    bundled_subdir = bundled_subdir or extension_name
-    search_dirs = [
-        BUNDLE_DIR / bundled_subdir,
-        _panel_dist_dir() / "bundled" / bundled_subdir,
-    ]
+    bundled_subdir, expected_files = _resolve_js_asset_paths(extension_name)
 
-    found_all = False
-    missing_patterns: list[str] = []
-
-    for d in search_dirs:
-        if not d.exists():
-            continue
-        if js_files:
-            all_files = {
-                p.relative_to(d).as_posix()
-                for p in d.rglob("*")
-                if p.is_file()
-            }
-            missing = [
-                pat for pat in js_files
-                if not any(fnmatch.fnmatch(f, pat) for f in all_files)
-            ]
-            if not missing:
-                found_all = True
-                break
-            missing_patterns = missing
-        else:
-            js_files_found = list(d.glob("*.js")) + list(d.glob("*.mjs"))
-            if js_files_found:
-                found_all = True
-                break
-
-    if found_all:
+    missing: list[Path] = [p for p in expected_files if not p.is_file()]
+    if not missing:
         return
 
-    if js_files and missing_patterns:
-        file_desc = "Required JS files not found: " + ", ".join(missing_patterns)
-    else:
-        file_desc = f"No JS bundle files found in '{bundled_subdir}/'"
+    from ..io.resources import BUNDLE_DIR
+    rel_missing = [
+        str(p.relative_to(BUNDLE_DIR)) if p.is_relative_to(BUNDLE_DIR)
+        else str(p)
+        for p in missing
+    ]
+    file_desc = (
+        "Required JS files not found:\n  " + "\n  ".join(rel_missing)
+    )
 
     details = (
         f"The Python package appears to be installed, but the front-end "
         f"bundle for the '{extension_name}' extension could not be found. "
-        f"{file_desc}. "
+        f"{file_desc}\n\n"
         "This usually happens when using an editable/development install "
         "without first building the JavaScript resources."
         "\n\n"
@@ -341,7 +533,7 @@ def check_frontend_resources(
         component=component,
         problem=(
             f"front-end JS resources for extension '{extension_name}' are "
-            f"missing ({file_desc})"
+            f"missing"
         ),
         install_command="pip install build && python -m build --wheel",
         details=details,
@@ -414,7 +606,6 @@ def require_optional(
     conda_channel: str | None = None,
     extras: str | None = None,
     extension_name: str | None = None,
-    bundled_subdir: str | None = None,
     check_js_resources: bool = True,
 ) -> None:
     """
@@ -434,12 +625,10 @@ def require_optional(
     extension_name : str, optional
         If supplied with ``check_js_resources=True``, verify that the
         compiled front-end bundle for this extension exists on disk.
-        This does **not** assert that ``pn.extension(name)`` has been
-        called (that is handled automatically by Panel's lazy-load
-        mechanism).
-    bundled_subdir : str, optional
-        Subdirectory under ``panel/dist/bundled/`` where the front-end
-        assets live.  Defaults to ``extension_name``.
+        Asset paths are resolved from the extension's Bokeh model
+        directly (no globs).  This does **not** assert that
+        ``pn.extension(name)`` has been called (that is handled
+        automatically by Panel's lazy-load mechanism).
     check_js_resources : bool, default True
         Whether to verify that the front-end bundle files exist on disk
         (only meaningful when using local/server resources, not CDN).
@@ -456,10 +645,7 @@ def require_optional(
         )
 
     if extension_name is not None and check_js_resources:
-        check_frontend_resources(
-            extension_name, component,
-            bundled_subdir=bundled_subdir,
-        )
+        check_frontend_resources(extension_name, component)
 
 
 def import_optional(
@@ -498,14 +684,11 @@ def import_optional(
 class _ComponentConfig(t.TypedDict, total=False):
     component: str
     python_package: str
-    min_version: str
     pip_package: str
     conda_package: str | Sequence[str]
     conda_channel: str
     extras: str
     extension_name: str
-    bundled_subdir: str
-    js_files: list[str]
     check_js_resources: bool
     check_python: bool
 
@@ -519,15 +702,12 @@ OPTIONAL_DEPENDENCIES: t.Final[dict[str, _ComponentConfig]] = {
         "conda_channel": "plotly",
         "extras": "recommended",
         "extension_name": "plotly",
-        "bundled_subdir": "plotlyplot",
-        "js_files": ["plotly-*.min.js"],
         "check_js_resources": True,
         "check_python": False,
     },
     "altair": {
         "component": "Vega pane (Altair support)",
         "python_package": "altair",
-        "min_version": "4.0.0",
         "pip_package": "altair",
         "conda_package": "altair",
         "conda_channel": "conda-forge",
@@ -537,8 +717,6 @@ OPTIONAL_DEPENDENCIES: t.Final[dict[str, _ComponentConfig]] = {
     "vega": {
         "component": "Vega pane",
         "extension_name": "vega",
-        "bundled_subdir": "vegaplot",
-        "js_files": ["vega@*", "vega-lite@*", "vega-embed@*"],
         "check_js_resources": True,
         "check_python": False,
     },
@@ -554,7 +732,6 @@ OPTIONAL_DEPENDENCIES: t.Final[dict[str, _ComponentConfig]] = {
     "pyecharts": {
         "component": "ECharts pane (pyecharts support)",
         "python_package": "pyecharts",
-        "min_version": "1.0.0",
         "pip_package": "pyecharts",
         "conda_package": "pyecharts",
         "conda_channel": "conda-forge",
@@ -564,15 +741,12 @@ OPTIONAL_DEPENDENCIES: t.Final[dict[str, _ComponentConfig]] = {
     "echarts": {
         "component": "ECharts pane",
         "extension_name": "echarts",
-        "bundled_subdir": "echarts",
-        "js_files": ["echarts@*/dist/echarts.min.js", "echarts-gl@*/dist/echarts-gl.min.js"],
         "check_js_resources": True,
         "check_python": False,
     },
     "holoviews": {
         "component": "HoloViews pane",
         "python_package": "holoviews",
-        "min_version": "1.18.0",
         "pip_package": "holoviews",
         "conda_package": "holoviews",
         "conda_channel": "conda-forge",
@@ -583,8 +757,6 @@ OPTIONAL_DEPENDENCIES: t.Final[dict[str, _ComponentConfig]] = {
     "tabulator": {
         "component": "Tabulator widget",
         "extension_name": "tabulator",
-        "bundled_subdir": "datatabulator",
-        "js_files": ["tabulator-tables@*/dist/js/tabulator.min.js", "luxon/build/global/luxon.min.js"],
         "check_js_resources": True,
         "check_python": False,
     },
@@ -615,11 +787,19 @@ def require_component(
     """
     Run diagnostics for a registered optional dependency.
 
-    All diagnostic parameters (minimum version, install commands, JS
-    bundle subdirectory, required JS files, which checks to run by
-    default) are sourced from the central
-    :data:`OPTIONAL_DEPENDENCIES` registry.  Components should **not**
-    duplicate these parameters at the call site.
+    All diagnostic parameters are resolved from single sources of truth:
+
+    * **Python minimum version** — parsed from ``pyproject.toml``
+      (``[project.dependencies]`` and ``[project.optional-dependencies]``)
+      plus the minimum versions Panel's own test suite branches on
+      (see :func:`_resolve_python_min_version`).
+    * **Front-end JS asset paths** — derived directly from the Bokeh
+      model registered under the extension name, using the same URL
+      resolution as :func:`panel.io.resources.bundled_files` and the
+      compiler.  No glob strings are used.
+
+    Components should **not** duplicate these parameters at the call
+    site; the registry plus the real codebase is the single source.
 
     Parameters
     ----------
@@ -646,6 +826,7 @@ def require_component(
     cfg = _get_config(name)
     component = cfg.get("component", name)
     python_package = cfg.get("python_package")
+    pip_package = cfg.get("pip_package") or python_package
 
     do_check_python = (
         check_python if check_python is not None
@@ -657,11 +838,12 @@ def require_component(
     )
 
     if do_check_python and python_package is not None:
+        min_version = _resolve_python_min_version(pip_package or python_package)
         check_python_package(
             module_name=python_package,
             component=component,
-            min_version=cfg.get("min_version"),
-            pip_package=cfg.get("pip_package") or python_package,
+            min_version=min_version,
+            pip_package=pip_package,
             conda_package=cfg.get("conda_package"),
             conda_channel=cfg.get("conda_channel"),
             extras=cfg.get("extras"),
@@ -669,12 +851,7 @@ def require_component(
 
     extension_name = cfg.get("extension_name")
     if do_check_js and extension_name is not None:
-        check_frontend_resources(
-            extension_name,
-            component,
-            bundled_subdir=cfg.get("bundled_subdir"),
-            js_files=cfg.get("js_files"),
-        )
+        check_frontend_resources(extension_name, component)
 
 
 def import_component(
@@ -685,8 +862,10 @@ def import_component(
     """
     Import a module for a registered optional dependency.
 
-    All diagnostic parameters (minimum version, install commands) are
-    sourced from the central :data:`OPTIONAL_DEPENDENCIES` registry.
+    The minimum version requirement is resolved from ``pyproject.toml``
+    and Panel's internal test-suite floors — see
+    :func:`_resolve_python_min_version`.  No hand-written
+    ``min_version`` field is needed in the registry.
 
     Parameters
     ----------
@@ -719,14 +898,16 @@ def import_component(
             "it has no Python module to import."
         )
 
+    pip_package = cfg.get("pip_package") or python_package
     module_name = (
         f"{python_package}.{submodule}" if submodule else python_package
     )
+    min_version = _resolve_python_min_version(pip_package)
     check_python_package(
         module_name=python_package,
         component=component,
-        min_version=cfg.get("min_version"),
-        pip_package=cfg.get("pip_package") or python_package,
+        min_version=min_version,
+        pip_package=pip_package,
         conda_package=cfg.get("conda_package"),
         conda_channel=cfg.get("conda_channel"),
         extras=cfg.get("extras"),
