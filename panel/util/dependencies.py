@@ -385,8 +385,11 @@ def require_optional(
     pip_package, conda_package, conda_channel, extras
         Used to construct the install command shown to the user.
     extension_name : str, optional
-        If supplied, also assert that ``pn.extension(extension_name)``
-        has been called.
+        If supplied with ``check_js_resources=True``, verify that the
+        compiled front-end bundle for this extension exists on disk.
+        This does **not** assert that ``pn.extension(name)`` has been
+        called (that is handled automatically by Panel's lazy-load
+        mechanism).
     bundled_subdir : str, optional
         Subdirectory under ``panel/dist/bundled/`` where the front-end
         assets live.  Defaults to ``extension_name``.
@@ -405,13 +408,11 @@ def require_optional(
             extras=extras,
         )
 
-    if extension_name is not None:
-        check_extension_loaded(extension_name, component)
-        if check_js_resources:
-            check_frontend_resources(
-                extension_name, component,
-                bundled_subdir=bundled_subdir,
-            )
+    if extension_name is not None and check_js_resources:
+        check_frontend_resources(
+            extension_name, component,
+            bundled_subdir=bundled_subdir,
+        )
 
 
 def import_optional(

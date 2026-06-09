@@ -31,9 +31,8 @@ from ..io.resources import CDN_DIST, CSS_URLS
 from ..io.state import state
 from ..reactive import Reactive, ReactiveData
 from ..util import (
-    check_python_package, clone_model, datetime_as_utctimestamp,
-    isdatetime, lazy_load, require_optional, styler_update,
-    updating,
+    check_frontend_resources, clone_model, datetime_as_utctimestamp,
+    isdatetime, lazy_load, styler_update, updating,
 )
 from ..util.warnings import warn
 from .base import Widget
@@ -1991,15 +1990,7 @@ class Tabulator(BaseTable):
         self, doc: Document, root: Model | None = None,
         parent: Model | None = None, comm: Comm | None = None
     ) -> Model:
-        require_optional(
-            "Tabulator widget",
-            extension_name="tabulator",
-            bundled_subdir="datatabulator",
-        )
-        check_python_package(
-            "pandas", "Tabulator widget",
-            pip_package="pandas", conda_package="pandas",
-        )
+        check_frontend_resources("tabulator", "Tabulator widget", bundled_subdir="datatabulator")
         Tabulator._widget_type = lazy_load(
             'panel.models.tabulator', 'DataTabulator', isinstance(comm, JupyterComm), root
         )

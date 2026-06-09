@@ -24,7 +24,7 @@ from ..io import state, unlocked
 from ..layout import (
     Column, HSpacer, Row, WidgetBox,
 )
-from ..util import check_python_package, import_optional
+from ..util import import_optional
 from ..viewable import Layoutable, Viewable
 from ..widgets import (
     DatetimeInput, DiscreteSlider, EditableFloatSlider, EditableIntSlider,
@@ -614,13 +614,11 @@ class HoloViews(Pane):
     def applies(cls, object: t.Any) -> float | bool | None:
         if 'holoviews' not in sys.modules:
             return False
-        check_python_package(
-            "holoviews", "HoloViews pane",
-            pip_package="holoviews", conda_package="holoviews",
-            conda_channel="conda-forge",
-        )
-        from holoviews.core.dimension import Dimensioned
-        from holoviews.plotting.plot import Plot
+        try:
+            from holoviews.core.dimension import Dimensioned
+            from holoviews.plotting.plot import Plot
+        except ImportError:
+            return False
         return isinstance(object, (Dimensioned, Plot))
 
     def jslink(self, target, code=None, args=None, bidirectional=False, **links):

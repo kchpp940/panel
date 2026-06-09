@@ -11,7 +11,7 @@ import param
 from bokeh.models import ColumnDataSource
 from pyviz_comms import JupyterComm
 
-from ..util import import_optional, lazy_load, require_optional
+from ..util import check_frontend_resources, import_optional, lazy_load
 from .base import ModelPane
 from .image import PDF, SVG, Image
 from .markup import HTML, JSON
@@ -269,11 +269,10 @@ class Vega(ModelPane):
     def is_altair(cls, obj):
         if 'altair' not in sys.modules:
             return False
-        alt = import_optional(
-            "altair", "Vega pane (Altair support)",
-            pip_package="altair", conda_package="altair",
-            conda_channel="conda-forge",
-        )
+        try:
+            import altair as alt  # type: ignore[import-untyped]
+        except ImportError:
+            return False
         return isinstance(obj, alt.api.TopLevelMixin)
 
     @classmethod
@@ -447,10 +446,7 @@ class Vega(ModelPane):
         self, doc: Document, root: Model | None = None,
         parent: Model | None = None, comm: Comm | None = None
     ) -> Model:
-        require_optional(
-            "Vega pane",
-            extension_name="vega",
-        )
+        check_frontend_resources("vega", "Vega pane")
         Vega._bokeh_model = lazy_load(
             'panel.models.vega', 'VegaPlot', isinstance(comm, JupyterComm), root
         )

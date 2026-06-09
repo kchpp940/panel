@@ -11,7 +11,7 @@ from bokeh.core.serialization import Serializer
 from bokeh.models import CustomJS
 from pyviz_comms import JupyterComm
 
-from ..util import import_optional, lazy_load, require_optional
+from ..util import check_frontend_resources, lazy_load
 from ..viewable import Viewable
 from .base import ModelPane
 
@@ -77,11 +77,10 @@ class ECharts(ModelPane):
     def is_pyecharts(cls, obj):
         if 'pyecharts' not in sys.modules:
             return False
-        pyecharts = import_optional(
-            "pyecharts", "ECharts pane (pyecharts support)",
-            pip_package="pyecharts", conda_package="pyecharts",
-            conda_channel="conda-forge",
-        )
+        try:
+            import pyecharts  # type: ignore[import-untyped]
+        except ImportError:
+            return False
         return isinstance(obj, pyecharts.charts.chart.Chart)
 
     def _process_event(self, event):
@@ -144,17 +143,9 @@ class ECharts(ModelPane):
         self, doc: Document, root: Model | None = None,
         parent: Model | None = None, comm: Comm | None = None
     ) -> Model:
-        require_optional(
-            "ECharts pane",
-            extension_name="echarts",
-        )
+        check_frontend_resources("echarts", "ECharts pane")
         if self.is_pyecharts(self.object):
-            pyecharts_utils = import_optional(
-                "pyecharts.commons.utils", "ECharts pane (pyecharts support)",
-                pip_package="pyecharts", conda_package="pyecharts",
-                conda_channel="conda-forge",
-            )
-            JsCode = pyecharts_utils.JsCode
+            from pyecharts.commons.utils import JsCode  # type: ignore[import-untyped]
             try:
                 Serializer.register(JsCode, lambda obj, __: obj.js_code)  # type: ignore
             except AssertionError:
