@@ -11,7 +11,7 @@ import param
 from bokeh.models import ColumnDataSource
 from pyviz_comms import JupyterComm
 
-from ..util import import_component, lazy_load, require_component
+from ..util import lazy_load
 from .base import ModelPane
 from .image import PDF, SVG, Image
 from .markup import HTML, JSON
@@ -267,13 +267,10 @@ class Vega(ModelPane):
 
     @classmethod
     def is_altair(cls, obj):
-        if 'altair' not in sys.modules:
-            return False
-        try:
-            import altair as alt  # type: ignore[import-untyped]
-        except ImportError:
-            return False
-        return isinstance(obj, alt.api.TopLevelMixin)
+        if 'altair' in sys.modules:
+            import altair as alt
+            return isinstance(obj, alt.api.TopLevelMixin)
+        return False
 
     @classmethod
     def applies(cls, object: t.Any) -> float | bool | None:
@@ -319,7 +316,13 @@ class Vega(ModelPane):
         >>> png_bytes = vega_pane.export('png')
         >>> image_pane = vega_pane.export('png', as_pane=True)
         """
-        vlc = import_component("vl_convert")
+        try:
+            import vl_convert as vlc  # type: ignore[import-untyped]
+        except ImportError:
+            raise ImportError(
+                'vl-convert-python is required to export Vega specs. '
+                'Please install it via `pip install vl-convert-python`.'
+            ) from None
 
         spec = self.object if isinstance(self.object, dict) else self.object.to_dict()
         spec = dict(spec)
@@ -443,7 +446,6 @@ class Vega(ModelPane):
         self, doc: Document, root: Model | None = None,
         parent: Model | None = None, comm: Comm | None = None
     ) -> Model:
-        require_component("vega")
         Vega._bokeh_model = lazy_load(
             'panel.models.vega', 'VegaPlot', isinstance(comm, JupyterComm), root
         )

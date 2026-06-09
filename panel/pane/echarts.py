@@ -11,7 +11,7 @@ from bokeh.core.serialization import Serializer
 from bokeh.models import CustomJS
 from pyviz_comms import JupyterComm
 
-from ..util import lazy_load, require_component
+from ..util import lazy_load
 from ..viewable import Viewable
 from .base import ModelPane
 
@@ -75,13 +75,10 @@ class ECharts(ModelPane):
 
     @classmethod
     def is_pyecharts(cls, obj):
-        if 'pyecharts' not in sys.modules:
-            return False
-        try:
-            import pyecharts  # type: ignore[import-untyped]
-        except ImportError:
-            return False
-        return isinstance(obj, pyecharts.charts.chart.Chart)
+        if 'pyecharts' in sys.modules:
+            import pyecharts
+            return isinstance(obj, pyecharts.charts.chart.Chart)
+        return False
 
     def _process_event(self, event):
         callbacks = self._py_callbacks.get(event.type, {})
@@ -143,9 +140,8 @@ class ECharts(ModelPane):
         self, doc: Document, root: Model | None = None,
         parent: Model | None = None, comm: Comm | None = None
     ) -> Model:
-        require_component("echarts")
         if self.is_pyecharts(self.object):
-            from pyecharts.commons.utils import JsCode  # type: ignore[import-untyped]
+            from pyecharts.commons.utils import JsCode
             try:
                 Serializer.register(JsCode, lambda obj, __: obj.js_code)  # type: ignore
             except AssertionError:

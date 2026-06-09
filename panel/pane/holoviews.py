@@ -24,7 +24,6 @@ from ..io import state, unlocked
 from ..layout import (
     Column, HSpacer, Row, WidgetBox,
 )
-from ..util import import_component
 from ..viewable import Layoutable, Viewable
 from ..widgets import (
     DatetimeInput, DiscreteSlider, EditableFloatSlider, EditableIntSlider,
@@ -55,7 +54,8 @@ if t.TYPE_CHECKING:
 
 
 def check_holoviews(version):
-    hv = import_component("holoviews")
+    import holoviews as hv
+
     return Version(Version(hv.__version__).base_version) >= Version(version)
 
 
@@ -608,11 +608,8 @@ class HoloViews(Pane):
     def applies(cls, object: t.Any) -> float | bool | None:
         if 'holoviews' not in sys.modules:
             return False
-        try:
-            from holoviews.core.dimension import Dimensioned
-            from holoviews.plotting.plot import Plot
-        except ImportError:
-            return False
+        from holoviews.core.dimension import Dimensioned
+        from holoviews.plotting.plot import Plot
         return isinstance(object, (Dimensioned, Plot))
 
     def jslink(self, target, code=None, args=None, bidirectional=False, **links):

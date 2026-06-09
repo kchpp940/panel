@@ -12,10 +12,7 @@ import param
 from bokeh.models import ColumnDataSource
 from pyviz_comms import JupyterComm
 
-from ..util import (
-    import_component, lazy_load, require_component,
-    try_datetime64_to_datetime,
-)
+from ..util import lazy_load, try_datetime64_to_datetime
 from ..util.checks import datetime_types, isdatetime
 from ..viewable import Layoutable
 from .base import ModelPane
@@ -123,18 +120,15 @@ class Plotly(ModelPane):
         self._relayout_data = None
 
     def _to_figure(self, obj):
-        if isinstance(obj, dict):
+        import plotly.graph_objs as go
+        if isinstance(obj, (go.Figure, go.FigureWidget)):
+            return obj
+        elif isinstance(obj, dict):
             data, layout = obj['data'], obj['layout']
         elif isinstance(obj, tuple):
             data, layout = obj
         else:
             data, layout = obj, {}
-        if isinstance(data, (dict, list)) and isinstance(layout, dict):
-            data = data if isinstance(data, list) else [data]
-            return {'data': data, 'layout': layout}
-        go = import_component("plotly", submodule="graph_objs")
-        if isinstance(obj, (go.Figure, go.FigureWidget)):
-            return obj
         data = data if isinstance(data, list) else [data]
         return go.Figure(data=data, layout=layout)
 
@@ -156,8 +150,10 @@ class Plotly(ModelPane):
                 array = json.pop(key)
                 data[full_path] = [array]
             elif isinstance(value, dict):
+                # Recurse into dictionaries:
                 Plotly._get_sources_for_trace(value, data=data, parent_path=full_path)
             elif isinstance(value, list) and value and isinstance(value[0], dict):
+                # recurse into object arrays:
                 for i, element in enumerate(value):
                     element_path = full_path + '.' + str(i)
                     Plotly._get_sources_for_trace(
@@ -300,12 +296,8 @@ class Plotly(ModelPane):
 
         For #382: Map datetime elements to strings.
         """
-        if isinstance(fig, dict):
-            layout = dict(fig.get('layout', {}))
-            data = [cls._convert_trace(trace) for trace in fig.get('data', [])]
-        else:
-            layout = dict(fig._layout)
-            data = [cls._convert_trace(trace) for trace in fig._data]
+        layout = dict(fig._layout)
+        data = [cls._convert_trace(trace) for trace in fig._data]
         if 'shapes' in layout:
             layout['shapes'] = [
                 cls._convert_trace(shape) for shape in layout['shapes']
@@ -357,7 +349,6 @@ class Plotly(ModelPane):
         self, doc: Document, root: Model | None = None,
         parent: Model | None = None, comm: Comm | None = None
     ) -> Model:
-        require_component("plotly")
         Plotly._bokeh_model = lazy_load(
             'panel.models.plotly', 'PlotlyPlot', isinstance(comm, JupyterComm), root
         )
