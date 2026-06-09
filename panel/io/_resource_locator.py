@@ -277,6 +277,31 @@ def add_version_suffix(url: str, force: bool = False) -> str:
     return url + version_suffix()
 
 
+def file_version_suffix(file_path: str | os.PathLike) -> str:
+    """
+    Return a cache-busting query string suffix derived from a file's
+    mtime (and size).  Used for user-land ESM components where each
+    file changes independently of Panel's own release cycle.
+
+    Falls back to the global :func:`version_suffix` if the file cannot
+    be stat'd.
+    """
+    import hashlib
+    try:
+        st = os.stat(file_path)
+        sig = f"{st.st_mtime_ns}:{st.st_size}"
+        return f"?v={hashlib.sha256(sig.encode('utf-8')).hexdigest()[:16]}"
+    except OSError:
+        return version_suffix()
+
+
+def add_file_version_suffix(url: str, file_path: str | os.PathLike, force: bool = False) -> str:
+    """Append a file-specific version suffix to ``url`` if it does not already have one."""
+    if '?' in url and not force:
+        return url
+    return url + file_version_suffix(file_path)
+
+
 # ---------------------------------------------------------------------------
 # Custom exceptions
 # ---------------------------------------------------------------------------
@@ -623,9 +648,11 @@ __all__ = [
     'ResourcePaths',
     'ResolvedKind',
     'ResolvedResource',
+    'add_file_version_suffix',
     'add_version_suffix',
     'apply_dist_url_to_stylesheet',
     'component_resource_url',
+    'file_version_suffix',
     'from_state_pyodide',
     'get_dist_base_url',
     'get_resource_paths',

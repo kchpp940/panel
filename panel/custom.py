@@ -19,6 +19,11 @@ import param
 from param.parameterized import ParameterizedMetaclass
 
 from .config import config
+from .io._resource_locator import (
+    add_file_version_suffix,
+    resolve_custom_path,
+    resolve_module_path,
+)
 from .io.datamodel import construct_data_model
 from .io.document import freeze_doc, hold
 from .io.model import apply_changes_without_dispatch
@@ -267,33 +272,39 @@ class ReactiveESM(ReactiveCustomBase, metaclass=ReactiveESMMetaclass):
 
     @classproperty
     def _module_path(cls):
+        mod_path = resolve_module_path(cls)
+        if mod_path is not None:
+            return mod_path
         if hasattr(cls, '__path__'):
             return pathlib.Path(cls.__path__)
-        try:
-            return pathlib.Path(inspect.getfile(cls)).parent
-        except (OSError, TypeError, ValueError):
-            if not isinstance(cls._bundle, pathlib.PurePath):
-                return
+        if isinstance(cls._bundle, pathlib.PurePath):
+            return pathlib.Path(cls._bundle).parent
+        return None
 
     @classproperty
     def _bundle_path(cls) -> os.PathLike | None:
         if config.autoreload and cls._esm:
             return None
-        mod_path = cls._module_path
-        if mod_path is None:
-            return None
+
+        # Explicit _bundle declaration on the class
         if cls._bundle:
             for scls in cls.__mro__:
                 if issubclass(scls, ReactiveESM) and cls._bundle == scls._bundle:
                     cls = scls
-            mod_path = cls._module_path
+                    break
             bundle = cls._bundle
             if isinstance(bundle, os.PathLike):
-                return bundle
-            elif bundle and bundle.endswith('.js'):
-                bundle_path = mod_path / bundle
-                if bundle_path.is_file():
-                    return bundle_path
+                bundle_path = pathlib.Path(bundle)
+                return bundle_path if bundle_path.is_file() else None
+            resolved = resolve_custom_path(cls, bundle)
+            if resolved is not None:
+                return resolved
+            if bundle and bundle.endswith('.js'):
+                mod_path = cls._module_path
+                if mod_path is not None:
+                    bundle_path = mod_path / bundle
+                    if bundle_path.is_file():
+                        return bundle_path
             raise ValueError(
                 f'Could not resolve {cls.__name__}._bundle: {cls._bundle}. Ensure '
                 'you provide either a string with a relative or absolute '
@@ -301,32 +312,31 @@ class ReactiveESM(ReactiveCustomBase, metaclass=ReactiveESMMetaclass):
             )
 
         # Attempt resolving bundle for this component specifically
-        path = mod_path / f'{cls.__name__}.bundle.js'
-        if path.is_file():
-            return path
+        mod_path = cls._module_path
+        if mod_path is None:
+            return None
+        resolved = resolve_custom_path(cls, f'{cls.__name__}.bundle.js')
+        if resolved is not None:
+            return resolved
 
         # Attempt to resolve bundle in current module and parent modules
         module = cls.__module__
         modules = module.split('.')
         for i in reversed(range(len(modules))):
             submodule = '.'.join(modules[:i+1])
-            try:
-                mod = importlib.import_module(submodule)
-            except (ModuleNotFoundError, ImportError):
+            submod_path = resolve_module_path(submodule)
+            if submod_path is None:
                 continue
-            mod_file = getattr(mod, '__file__', None)
-            if not mod_file:
-                continue
-            submodule_path = pathlib.Path(mod_file).parent
-            path = submodule_path / f'{submodule}.bundle.js'
-            if path.is_file():
-                return path
+            bundle_name = f'{submodule}.bundle.js'
+            test_path = submod_path / bundle_name
+            if test_path.is_file():
+                return test_path
 
         if module in sys.modules:
-            # Get module name from the module
             module_obj = sys.modules[module]
-            path = mod_path / f'{module_obj.__name__}.bundle.js'
-            return path if path.is_file() else None
+            bundle_name = f'{module_obj.__name__}.bundle.js'
+            test_path = mod_path / bundle_name
+            return test_path if test_path.is_file() else None
         return None
 
     @classproperty
@@ -335,7 +345,9 @@ class ReactiveESM(ReactiveCustomBase, metaclass=ReactiveESMMetaclass):
             esm_path = cls._esm_path(compiled=True)
         except ValueError:
             return []
-        css_path = esm_path.with_suffix('.css')
+        if esm_path is None:
+            return []
+        css_path = pathlib.Path(esm_path).with_suffix('.css')
         if css_path.is_file():
             return [css_path]
         return []
@@ -349,19 +361,16 @@ class ReactiveESM(ReactiveCustomBase, metaclass=ReactiveESMMetaclass):
         esm = cls._esm
         if isinstance(esm, os.PathLike):
             return esm
-        elif not esm or not esm.endswith(('.js', '.jsx', '.ts', '.tsx')):
+        if not esm or not esm.endswith(('.js', '.jsx', '.ts', '.tsx')):
             return None
-        try:
-            if hasattr(cls, '__path__'):
-                mod_path = cls.__path__
-            else:
-                mod_path = pathlib.Path(inspect.getfile(cls)).parent
-            esm_path = mod_path / esm
-            if esm_path.is_file():
-                return esm_path
-        except (OSError, TypeError, ValueError):
-            pass
-        return None
+        resolved = resolve_custom_path(cls, esm)
+        if resolved is not None:
+            return resolved
+        mod_path = cls._module_path
+        if mod_path is None:
+            return None
+        esm_path = mod_path / esm
+        return esm_path if esm_path.is_file() else None
 
     @classmethod
     def _component_resource_path(cls, esm_path, compiled):
@@ -381,8 +390,7 @@ class ReactiveESM(ReactiveCustomBase, metaclass=ReactiveESMMetaclass):
                 # Generate relative path to handle apps served on subpaths
                 esm = ('' if state.rel_path else './') + cls._component_resource_path(esm_path, compiled)
                 if config.autoreload:
-                    modified = hashlib.sha256(str(esm_path.stat().st_mtime).encode('utf-8')).hexdigest()
-                    esm += f'?{modified}'
+                    esm = add_file_version_suffix(esm, esm_path)
             else:
                 esm = esm_path.read_text(encoding='utf-8')
         else:

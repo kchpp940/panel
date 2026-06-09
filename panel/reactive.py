@@ -37,8 +37,9 @@ from param.parameterized import (
 
 from .io.document import hold, unlocked
 from .io.notebook import push
+from .io._resource_locator import get_dist_base_url
 from .io.resources import (
-    CDN_DIST, get_dist_path, loading_css, patch_stylesheet, process_raw_css,
+    get_dist_path, loading_css, patch_stylesheet, process_raw_css,
     resolve_stylesheet,
 )
 from .io.state import set_curdoc, state
@@ -714,7 +715,7 @@ class Reactive(Syncable, Viewable):
         if doc and 'dist_url' in doc._template_variables:
             dist_url = doc._template_variables['dist_url']
         else:
-            dist_url = CDN_DIST
+            dist_url = get_dist_base_url(cdn=True)
         stylesheets = []
         for stylesheet in properties['stylesheets']:
             if isinstance(stylesheet, ImportedStyleSheet):
@@ -753,7 +754,7 @@ class Reactive(Syncable, Viewable):
             if doc and 'dist_url' in doc._template_variables:
                 dist_url = doc._template_variables['dist_url']
             else:
-                dist_url = CDN_DIST
+                dist_url = get_dist_base_url(cdn=True)
             for stylesheet in msg['stylesheets']:
                 if isinstance(stylesheet, ImportedStyleSheet):
                     patch_stylesheet(stylesheet, dist_url)

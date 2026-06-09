@@ -353,7 +353,16 @@ def bundled_files(model: Model, file_type: str = 'javascript') -> list[str]:
                 files.append(f'{CDN_DIST}bundled/{prefixed}')
             else:
                 files.append(url)
-        elif RESOURCE_MODE != 'server':
+        elif RESOURCE_MODE == 'server':
+            local_url = f'static/extensions/panel/bundled/{prefixed}'
+            logger.warning(
+                "Bundled %s file %s not found locally at %s. "
+                "Using local server URL %s anyway (file may be populated at runtime). %s",
+                file_type, prefixed, test_path, local_url,
+                "Run `panel build` to populate dist/." if paths.install_mode == 'editable' else "",
+            )
+            files.append(local_url)
+        else:
             cdn_url = f'{CDN_DIST}bundled/{prefixed}'
             logger.warning(
                 "Bundled %s file %s not found locally at %s. "
@@ -362,14 +371,6 @@ def bundled_files(model: Model, file_type: str = 'javascript') -> list[str]:
                 "Run `panel build` to populate dist/." if paths.install_mode == 'editable' else "",
             )
             files.append(cdn_url)
-        else:
-            logger.warning(
-                "Bundled %s file %s not found locally at %s. "
-                "Using original URL %s. %s",
-                file_type, prefixed, test_path, url,
-                "Run `panel build` to populate dist/." if paths.install_mode == 'editable' else "",
-            )
-            files.append(url)
     return files
 
 def _panel_use_mathjax(roots) -> bool:

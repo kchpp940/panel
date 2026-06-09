@@ -12,7 +12,7 @@ import param
 
 from panel.pane import HTML, Image
 
-from ..io.resources import CDN_DIST
+from ..io._resource_locator import get_dist_base_url
 from ..pane.image import ImageBase
 from ..viewable import Viewable
 
@@ -52,7 +52,7 @@ def avatar_lookup(
     if isinstance(avatar, FunctionType):
         avatar = avatar()
     if isinstance(avatar, str):
-        avatar = avatar.format(dist_path=CDN_DIST)
+        avatar = avatar.format(dist_path=get_dist_base_url())
     return avatar
 
 

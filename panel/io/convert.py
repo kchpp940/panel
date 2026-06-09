@@ -27,12 +27,13 @@ from packaging.requirements import Requirement
 
 from .. import __version__, config
 from ..util import base_version
+from ._resource_locator import get_dist_base_url, get_resource_paths
 from .application import Application, build_single_handler_application
 from .document import MockSessionContext
 from .loading import LOADING_INDICATOR_CSS_CLASS
 from .mime_render import find_requirements
 from .resources import (
-    BASE_TEMPLATE, CDN_DIST, CDN_ROOT, DIST_DIR, INDEX_TEMPLATE, Resources,
+    BASE_TEMPLATE, CDN_ROOT, INDEX_TEMPLATE, Resources,
     _env as _pn_env, bundle_resources, loading_css, set_resource_mode,
 )
 from .state import set_curdoc, state
@@ -50,15 +51,28 @@ BOKEH_VERSION = base_version(bokeh.__version__)
 PY_VERSION = base_version(__version__)
 PYODIDE_VERSION = 'v0.29.3'
 PYSCRIPT_VERSION = '2026.2.1'
-WHL_PATH = DIST_DIR / 'wheels'
-PANEL_LOCAL_WHL = WHL_PATH / f'panel-{__version__.replace("-dirty", "")}-py3-none-any.whl'
-BOKEH_LOCAL_WHL = WHL_PATH / f'bokeh-{BOKEH_VERSION}-py3-none-any.whl'
-PANEL_CDN_WHL = f'{CDN_DIST}wheels/panel-{PY_VERSION}-py3-none-any.whl'
-BOKEH_CDN_WHL = f'{CDN_ROOT}wheels/bokeh-{BOKEH_VERSION}-py3-none-any.whl'
+
+def _panel_whl_path(local: bool = True) -> pathlib.Path | str:
+    paths = get_resource_paths()
+    if local:
+        return paths.dist_dir / 'wheels' / f'panel-{__version__.replace("-dirty", "")}-py3-none-any.whl'
+    cdn = get_dist_base_url(cdn=True)
+    return f'{cdn}wheels/panel-{PY_VERSION}-py3-none-any.whl'
+
+def _bokeh_whl_path(local: bool = True) -> pathlib.Path | str:
+    paths = get_resource_paths()
+    if local:
+        return paths.dist_dir / 'wheels' / f'bokeh-{BOKEH_VERSION}-py3-none-any.whl'
+    return f'{CDN_ROOT}wheels/bokeh-{BOKEH_VERSION}-py3-none-any.whl'
+
 PYODIDE_URL = f'https://cdn.jsdelivr.net/pyodide/{PYODIDE_VERSION}/full/pyodide.js'
 PYODIDE_PYC_URL = f'https://cdn.jsdelivr.net/pyodide/{PYODIDE_VERSION}/pyc/pyodide.js'
 PYSCRIPT_CSS = f'<link rel="stylesheet" href="https://pyscript.net/releases/{PYSCRIPT_VERSION}/core.css" />'
-PYSCRIPT_CSS_OVERRIDES = f'<link rel="stylesheet" href="{CDN_DIST}css/pyscript.css" />'
+
+def _pyscript_css_overrides() -> str:
+    cdn = get_dist_base_url(cdn=True)
+    return f'<link rel="stylesheet" href="{cdn}css/pyscript.css" />'
+
 PYSCRIPT_JS = f'<script type="module" src="https://pyscript.net/releases/{PYSCRIPT_VERSION}/core.js" defer></script>'
 PYODIDE_JS = f'<script src="{PYODIDE_URL}" defer></script>'
 PYODIDE_PYC_JS = f'<script src="{PYODIDE_PYC_URL}" defer></script>'
@@ -66,16 +80,20 @@ LOCAL_PREFIX = './'
 
 MINIMUM_VERSIONS: dict[str, str] = {}
 
-ICON_DIR = DIST_DIR / 'images'
-PWA_IMAGES = [
-    ICON_DIR / 'favicon.ico',
-    ICON_DIR / 'icon-vector.svg',
-    ICON_DIR / 'icon-32x32.png',
-    ICON_DIR / 'icon-192x192.png',
-    ICON_DIR / 'icon-512x512.png',
-    ICON_DIR / 'apple-touch-icon.png',
-    ICON_DIR / 'index_background.png'
-]
+def _icon_dir() -> pathlib.Path:
+    return get_resource_paths().dist_dir / 'images'
+
+def _pwa_images() -> list[pathlib.Path]:
+    icon_dir = _icon_dir()
+    return [
+        icon_dir / 'favicon.ico',
+        icon_dir / 'icon-vector.svg',
+        icon_dir / 'icon-32x32.png',
+        icon_dir / 'icon-192x192.png',
+        icon_dir / 'icon-512x512.png',
+        icon_dir / 'apple-touch-icon.png',
+        icon_dir / 'index_background.png'
+    ]
 
 Runtimes = t.Literal['pyodide', 'pyscript', 'pyodide-worker', 'pyscript-worker']
 
@@ -157,7 +175,7 @@ def make_index(files, title=None, manifest=True):
     items = {label: './'+os.path.basename(f) for label, f in sorted(files.items())}
     return INDEX_TEMPLATE.render(
         items=items, manifest=manifest, apple_icon=apple_icon,
-        favicon=favicon, title=title, PANEL_CDN=CDN_DIST
+        favicon=favicon, title=title, PANEL_CDN=get_dist_base_url(cdn=True)
     )
 
 def build_pwa_manifest(files, title=None, **kwargs) -> str:
@@ -197,11 +215,13 @@ def collect_python_requirements(
     """
     # Environment
     if panel_version == 'local':
-        panel_req = './' + str(PANEL_LOCAL_WHL.as_posix()).split('/')[-1]
-        bokeh_req = './' + str(BOKEH_LOCAL_WHL.as_posix()).split('/')[-1]
+        panel_local_whl = _panel_whl_path(local=True)
+        bokeh_local_whl = _bokeh_whl_path(local=True)
+        panel_req = './' + str(panel_local_whl.as_posix()).split('/')[-1]
+        bokeh_req = './' + str(bokeh_local_whl.as_posix()).split('/')[-1]
     elif panel_version == 'auto':
-        panel_req = PANEL_CDN_WHL
-        bokeh_req = BOKEH_CDN_WHL
+        panel_req = _panel_whl_path(local=False)
+        bokeh_req = _bokeh_whl_path(local=False)
     else:
         panel_req = f'panel=={panel_version}'
         bokeh_req = f'bokeh=={BOKEH_VERSION}'
@@ -287,18 +307,19 @@ def pack_files(filemap: dict, destination: str | os.PathLike | t.IO):
 def loading_resources(template, inline) -> list[str]:
     css_resources = []
     if template in (BASE_TEMPLATE, FILE):
-        # Add loading.css if not served from Panel template
+        paths = get_resource_paths()
         if inline:
             svg_name = f'{config.loading_spinner}_spinner.svg'
-            svg_b64 = base64.b64encode((DIST_DIR / 'assets' / svg_name).read_bytes()).decode('utf-8')
-            loading_base = (
-                DIST_DIR / "css" / "loading.css"
-            ).read_text(encoding='utf-8').replace(
+            svg_path = paths.require_dist_file('assets', svg_name)
+            svg_b64 = base64.b64encode(svg_path.read_bytes()).decode('utf-8')
+            loading_css_path = paths.require_dist_file('css', 'loading.css')
+            loading_base = loading_css_path.read_text(encoding='utf-8').replace(
                 f'../assets/{svg_name}', f'data:image/svg+xml;base64,{svg_b64}'
             )
             loading_style = f'<style type="text/css">\n{loading_base}\n</style>'
         else:
-            loading_style = f'<link rel="stylesheet" href="{CDN_DIST}css/loading.css" type="text/css" />'
+            cdn = get_dist_base_url(cdn=True)
+            loading_style = f'<link rel="stylesheet" href="{cdn}css/loading.css" type="text/css" />'
         css_resources.append(loading_style)
     spinner_css = loading_css(
         config.loading_spinner, config.loading_color, config.loading_max_height
@@ -386,7 +407,7 @@ def script_to_html(
         if js_resources == 'auto':
             js_resources = [PYSCRIPT_JS]
         if css_resources == 'auto':
-            css_resources = [PYSCRIPT_CSS, PYSCRIPT_CSS_OVERRIDES]
+            css_resources = [PYSCRIPT_CSS, _pyscript_css_overrides()]
         elif not css_resources:
             css_resources = []
         pyconfig = json.dumps({
@@ -475,7 +496,7 @@ def script_to_html(
         doc=render_item,
         roots=render_item.roots,
         manifest=manifest,
-        dist_url=CDN_DIST
+        dist_url=get_dist_base_url(cdn=True)
     ))
 
     # Render
@@ -753,7 +774,7 @@ def convert_apps(
     imgs_path = (dest_path / 'images')
     imgs_path.mkdir(exist_ok=True)
     img_rel = []
-    for img in PWA_IMAGES:
+    for img in _pwa_images():
         with open(imgs_path / img.name, 'wb') as f:
             f.write(img.read_bytes())
         img_rel.append(f'images/{img.name}')
