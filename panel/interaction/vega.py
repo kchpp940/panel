@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import typing as t
 
-from .base import AdapterEvent, InteractionAdapter, StandardEvent
+from .base import AdapterEvent, InteractionAdapter
 
 if t.TYPE_CHECKING:
     from ..pane.vega import Vega
@@ -12,9 +12,15 @@ class VegaAdapter(InteractionAdapter):
     """
     Interaction adapter for Vega/Vega-Lite panes.
 
-    **Owns the entire vega_event handling flow:**
-      * Normalizes interval vs point selections
-      * Updates the component's ``selection`` Parameterized object
+    **Responsibility (narrow):**
+      * Detect whether the named selection is a point or interval
+        selection and report the normalized ``kind``.
+      * Extract a normalized ``selection`` dict from the raw vega
+        signal value (point indexes from ``_vgsid_`` or interval
+        min/max bounds).
+
+    Does **not** touch the component's ``selection`` Parameterized
+    object — that is the component's own concern.
     """
 
     _event_names: tuple[str, ...] = ('vega_event',)
@@ -30,17 +36,16 @@ class VegaAdapter(InteractionAdapter):
 
     def get_kind(self, event: AdapterEvent) -> str:
         raw = event.raw
-        if hasattr(raw, 'data'):
-            name = raw.data.get('type', event.event_name)
-        else:
-            name = event.event_name
+        name = (
+            raw.data.get('type', event.event_name)
+            if hasattr(raw, 'data')
+            else event.event_name
+        )
         selection_types = getattr(self._component, '_selections', {})
         stype = selection_types.get(name, 'point')
         return 'interval_selection' if stype == 'interval' else 'point_selection'
 
-    def _extract_selection(
-        self, name: str, value: t.Any
-    ) -> dict[str, t.Any] | None:
+    def _extract_selection(self, name: str, value: t.Any) -> dict[str, t.Any] | None:
         if value is None:
             return None
         selection_types = getattr(self._component, '_selections', {})
@@ -48,14 +53,15 @@ class VegaAdapter(InteractionAdapter):
 
         if stype == 'interval':
             if isinstance(value, dict):
-                selection: dict[str, t.Any] = {'type': 'interval'}
                 for field, bounds in value.items():
                     if isinstance(bounds, (list, tuple)) and len(bounds) == 2:
-                        selection['field'] = field
-                        selection['min'] = bounds[0]
-                        selection['max'] = bounds[1]
-                        selection['values'] = list(bounds)
-                return selection
+                        return {
+                            'type': 'interval',
+                            'field': field,
+                            'min': bounds[0],
+                            'max': bounds[1],
+                            'values': list(bounds),
+                        }
             return {'type': 'interval', 'value': value}
 
         if isinstance(value, list):
@@ -91,22 +97,3 @@ class VegaAdapter(InteractionAdapter):
         if selection:
             result['selection'] = selection
         return result
-
-    def on_standardized_event(self, event: StandardEvent, raw: AdapterEvent) -> None:
-        comp = self._component
-        name = event.payload.get('selection_name', '')
-        value = event.payload.get('raw_value')
-        if not name:
-            return
-        if not hasattr(comp.selection.param, name):
-            return
-        stype = getattr(comp, '_selections', {}).get(name)
-        if stype != 'interval' and isinstance(value, (list, tuple)):
-            value = list(value)
-        try:
-            comp.selection.param.update(**{name: value})
-        except Exception:
-            pass
-
-    def register_events(self, model, doc, comm=None) -> None:
-        self._component._register_events('vega_event', model=model, doc=doc, comm=comm)

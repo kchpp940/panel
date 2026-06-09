@@ -1481,6 +1481,47 @@ class Tabulator(BaseTable):
     def _process_event(self, event) -> None:
         self.interaction_adapter.handle_event(event, event_name=event.event_name)
 
+        if event.event_name == 'selection-change':
+            if self.pagination == 'remote':
+                self._update_selection(event)
+            return
+
+        event_col = self._renamed_cols.get(event.column, event.column)
+        if self.pagination == 'remote':
+            nrows = self.page_size or self.initial_page_size
+            event.row = event.row+(self.page-1)*nrows
+
+        idx = self._index_mapping.get(event.row, event.row)
+        iloc = self.value.index.get_loc(idx)
+        self._validate_iloc(idx, iloc)
+        event.row = iloc
+        if event_col not in self.buttons:
+            if event_col in self.value.columns:
+                event.value = self.value[event_col].iloc[event.row]
+            else:
+                event.value = self.value.index[event.row]
+
+        # Set the old attribute on a table edit event
+        if event.event_name == 'table-edit':
+            if event.pre:
+                import pandas as pd
+                filter_df = pd.DataFrame({event.column: [event.value]})
+                filters = self._get_header_filters(filter_df)
+                # Check if edited cell was filtered
+                if filters and filters[0].any():
+                    self._edited_indexes.append(idx)
+            else:
+                if self._old_value is not None:
+                    event.old = self._old_value[event_col].iloc[event.row]
+                for cb in self._on_edit_callbacks:
+                    state.execute(partial(cb, event), schedule=False)
+                self._update_style()
+        else:
+            for cb in self._on_click_callbacks.get(None, []):
+                state.execute(partial(cb, event), schedule=False)
+            for cb in self._on_click_callbacks.get(event_col, []):
+                state.execute(partial(cb, event), schedule=False)
+
     def _get_theme(self, theme, resources=None):
         from ..models.tabulator import _TABULATOR_THEMES_MAPPING, THEME_PATH
         theme_ = _TABULATOR_THEMES_MAPPING.get(theme, theme)

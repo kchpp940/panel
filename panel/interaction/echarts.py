@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import typing as t
 
-from .base import AdapterEvent, InteractionAdapter, StandardEvent
+from .base import AdapterEvent, InteractionAdapter
 
 if t.TYPE_CHECKING:
     from ..pane.echarts import ECharts
@@ -12,9 +12,13 @@ class EChartsAdapter(InteractionAdapter):
     """
     Interaction adapter for ECharts panes.
 
-    **Owns the entire echarts_event handling flow:**
-      * Normalizes click / selectchanged / datazoom / legend events
-      * Dispatches registered Python callbacks
+    **Responsibility (narrow):**
+      * Map raw echarts event names to normalized ``kind`` strings.
+      * Extract ``selection`` (click / selectchanged / legend) and
+        ``viewport`` (datazoom ranges) from the raw event data.
+
+    Does **not** execute any Python callbacks — those live in the
+    ECharts pane itself.
     """
 
     _event_names: tuple[str, ...] = ('echarts_event',)
@@ -50,8 +54,7 @@ class EChartsAdapter(InteractionAdapter):
         super().__init__(component, source_id, dataset_id, store)
 
     def get_kind(self, event: AdapterEvent) -> str:
-        raw = event.raw
-        etype = getattr(raw, 'type', event.event_name)
+        etype = getattr(event.raw, 'type', event.event_name)
         return self._KIND_MAP.get(etype, etype)
 
     def _extract_selection(self, etype: str, data: dict[str, t.Any]) -> dict[str, t.Any] | None:
@@ -63,31 +66,24 @@ class EChartsAdapter(InteractionAdapter):
         if etype in ('click', 'dblclick', 'mousedown', 'mouseup', 'mouseover'):
             if 'dataIndex' in data:
                 selection['indexes'] = [data['dataIndex']]
-            if 'seriesIndex' in data:
-                selection['series_index'] = data['seriesIndex']
-            if 'seriesName' in data:
-                selection['series_name'] = data['seriesName']
-            if 'name' in data:
-                selection['name'] = data['name']
-            if 'value' in data:
-                selection['value'] = data['value']
-            if 'data' in data:
-                selection['data'] = data['data']
+            for key in ('seriesIndex', 'seriesName', 'name', 'value', 'data'):
+                if key in data:
+                    snake = 'series_index' if key == 'seriesIndex' else key
+                    selection[snake] = data[key]
 
         elif etype == 'selectchanged':
             selected = data.get('selected', [])
-            if selected:
-                indexes: list[int] = []
-                for item in selected:
-                    if isinstance(item, dict) and 'dataIndex' in item:
-                        if isinstance(item['dataIndex'], list):
-                            indexes.extend(item['dataIndex'])
-                        else:
-                            indexes.append(item['dataIndex'])
-                    elif isinstance(item, int):
-                        indexes.append(item)
-                if indexes:
-                    selection['indexes'] = indexes
+            indexes: list[int] = []
+            for item in selected:
+                if isinstance(item, dict) and 'dataIndex' in item:
+                    if isinstance(item['dataIndex'], list):
+                        indexes.extend(item['dataIndex'])
+                    else:
+                        indexes.append(item['dataIndex'])
+                elif isinstance(item, int):
+                    indexes.append(item)
+            if indexes:
+                selection['indexes'] = indexes
             selection['selected'] = selected
             selection['isFromClick'] = data.get('isFromClick', False)
 
@@ -96,25 +92,24 @@ class EChartsAdapter(InteractionAdapter):
             selection['selected'] = data.get('selected', {})
             selection['name'] = data.get('name')
 
-        if selection:
-            selection['event_type'] = etype
-            return selection
-        return None
+        if not selection:
+            return None
+        selection['event_type'] = etype
+        return selection
 
     def _extract_viewport(self, etype: str, data: dict[str, t.Any]) -> dict[str, t.Any] | None:
         if etype != 'datazoom' or not data:
             return None
         viewport: dict[str, t.Any] = {}
         for batch in data.get('batch', []):
+            xidx = batch.get('xAxisIndex', 0)
             if 'startValue' in batch or 'endValue' in batch:
-                axis_key = f"xAxisIndex_{batch.get('xAxisIndex', 0)}"
-                viewport[axis_key] = {
+                viewport[f'xAxisIndex_{xidx}'] = {
                     'start': batch.get('startValue'),
                     'end': batch.get('endValue'),
                 }
             if 'start' in batch or 'end' in batch:
-                axis_key = f"xAxisIndex_{batch.get('xAxisIndex', 0)}_percent"
-                viewport[axis_key] = {
+                viewport[f'xAxisIndex_{xidx}_percent'] = {
                     'start': batch.get('start'),
                     'end': batch.get('end'),
                 }
@@ -126,7 +121,7 @@ class EChartsAdapter(InteractionAdapter):
         data = getattr(raw, 'data', None)
         query = getattr(raw, 'query', None)
 
-        result: dict[str, t.Any] = {'event_type': etype}
+        result: dict[str, t.Any] = {'event_type': etype, 'raw_data': data}
         if query is not None:
             result['query'] = query
 
@@ -138,24 +133,4 @@ class EChartsAdapter(InteractionAdapter):
         if viewport:
             result['viewport'] = viewport
 
-        result['raw_data'] = data
-        result['_raw_event'] = raw
         return result
-
-    def on_standardized_event(self, event: StandardEvent, raw: AdapterEvent) -> None:
-        comp = self._component
-        raw_event = event.payload.get('_raw_event')
-        if raw_event is None:
-            return
-        etype = event.payload.get('event_type', '')
-        query = event.payload.get('query')
-        callbacks = comp._py_callbacks.get(etype, {})
-        for cb in callbacks.get(None, []):
-            cb(raw_event)
-        if query is None:
-            return
-        for cb in callbacks.get(query, []):
-            cb(raw_event)
-
-    def register_events(self, model, doc, comm=None) -> None:
-        self._component._register_events('echarts_event', model=model, doc=doc, comm=comm)

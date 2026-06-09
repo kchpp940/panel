@@ -89,6 +89,14 @@ class ECharts(ModelPane):
         return False
 
     def _process_event(self, event):
+        callbacks = self._py_callbacks.get(event.type, {})
+        for cb in callbacks.get(None, []):
+            cb(event)
+        if event.query is None:
+            return
+        for cb in callbacks.get(event.query, []):
+            cb(event)
+
         self.interaction_adapter.handle_event(event, event_name='echarts_event')
 
     def _get_js_events(self, ref):
