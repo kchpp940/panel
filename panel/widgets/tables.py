@@ -37,8 +37,9 @@ from ..util import (
 from ..util.warnings import warn
 from .base import Widget
 from .button import Button
-from .column_profile import (
-    ColumnProfile, ColumnProfileState, SortState, FilterState,
+from .column_profile import ColumnProfile, ColumnProfileState
+from .table_helpers import (
+    SortState, FilterState,
     sort_dataframe as _cp_sort_dataframe,
     filter_dataframe as _cp_filter_dataframe,
     get_header_filters as _cp_get_header_filters,
