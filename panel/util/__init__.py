@@ -39,6 +39,11 @@ from .checks import (  # noqa
     datetime_types, is_dataframe, is_holoviews, is_number, is_parameterized,
     is_series, isdatetime, isfile, isIn, isurl,
 )
+from .dependencies import (  # noqa
+    DependencyIssue, OptionalDependencyError, check_extension_loaded,
+    check_frontend_resources, check_python_package, import_optional,
+    require_optional,
+)
 from .parameters import (  # noqa
     edit_readonly, extract_dependencies, get_method_owner,
     recursive_parameterized,

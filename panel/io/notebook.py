@@ -39,11 +39,10 @@ from pyviz_comms import (
 )
 
 from ..util import _descendents
-from ._resource_locator import get_resource_paths
 from .embed import embed_state
 from .model import add_to_doc, diff
 from .resources import (
-    CDN_DIST, Resources, _env, bundle_resources,
+    CDN_DIST, DIST_DIR, PANEL_DIR, Resources, _env, bundle_resources,
     patch_model_css, set_resource_mode,
 )
 from .state import state
@@ -371,10 +370,8 @@ class Mimebundle:
 def replace_inline_css(stylesheet: ImportedStyleSheet):
     if not stylesheet.url.startswith(CDN_DIST):
         return stylesheet
-    rel_path = stylesheet.url[len(CDN_DIST):]
-    paths = get_resource_paths()
-    path = paths.dist_file(rel_path)
-    if path is None:
+    path = DIST_DIR / stylesheet.url.replace(CDN_DIST, '')  # type: ignore
+    if not path.exists():
         return stylesheet
     return InlineStyleSheet(css=path.read_text(encoding='utf-8'))
 
@@ -445,7 +442,7 @@ def load_notebook(
             load_timeout=load_timeout
         )
 
-    CSS = (get_resource_paths().internal_templates_dir / 'jupyter.css').read_text(encoding='utf-8')
+    CSS = (PANEL_DIR / '_templates' / 'jupyter.css').read_text(encoding='utf-8')
     shim = '<script type="esms-options">{"shimMode": true}</script>'
     publish_display_data(data={'text/html': f'{shim}<style>{CSS}</style>'})
     publish_display_data({

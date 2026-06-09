@@ -12,14 +12,9 @@ from bokeh.themes import Theme as _BkTheme, _dark_minimal, built_in_themes
 
 from ..config import config
 from ..custom import PyComponent
-from ..io._resource_locator import (
-    add_version_suffix,
-    get_dist_base_url,
-    get_resource_paths,
-    resolve_custom_path,
-)
 from ..io.resources import (
-    ResourceComponent, component_resource_path,
+    JS_VERSION, ResourceComponent, component_resource_path, get_dist_path,
+    resolve_custom_path,
 )
 from ..io.state import set_curdoc, state
 from ..util import relative_to
@@ -206,7 +201,9 @@ class Design(param.Parameterized, ResourceComponent):
     def _get_modifiers(
         cls, viewable: Viewable, theme: Theme | None = None, isolated: bool = True
     ):
-        paths = get_resource_paths()
+        from ..io.resources import (
+            CDN_DIST, component_resource_path, resolve_custom_path,
+        )
         theme_type = type(theme) if isinstance(theme, Theme) else theme
         is_server = bool(state.curdoc.session_context) if not state._is_pyodide and state.curdoc else False
         modifiers, child_modifiers = cls._resolve_modifiers(type(viewable), theme_type, is_server=is_server)  # type: ignore
@@ -218,32 +215,13 @@ class Design(param.Parameterized, ResourceComponent):
                     css = getattr(theme, p)
                     if css is None:
                         continue
-                    css_path = pathlib.Path(css)
-                    if relative_to(css_path, THEME_CSS):
-                        bundled = paths.bundled_file('theme', css_path.name)
-                        if bundled is not None:
-                            from ..io._resource_locator import use_cdn_for_resources
-                            dist_url = get_dist_base_url(cdn=use_cdn_for_resources())
-                            pre.append(add_version_suffix(
-                                f'{dist_url}bundled/theme/{css_path.name}'
-                            ))
-                        else:
-                            dist_url = get_dist_base_url(cdn=True)
-                            pre.append(add_version_suffix(
-                                f'{dist_url}bundled/theme/{css_path.name}'
-                            ))
+                    css = pathlib.Path(css)
+                    if relative_to(css, THEME_CSS):
+                        pre.append(f'{CDN_DIST}bundled/theme/{css.name}')
                     elif resolve_custom_path(theme, css):
                         pre.append(component_resource_path(theme, p, css))
                     else:
-                        try:
-                            pre.append(css_path.read_text(encoding='utf-8'))
-                        except FileNotFoundError as e:
-                            from ..io._resource_locator import ResourceNotFoundError
-                            raise ResourceNotFoundError(
-                                f"Theme CSS file not found: {css_path}",
-                                kind='file',
-                                relpath=str(css_path),
-                            ) from e
+                        pre.append(css.read_text(encoding='utf-8'))
             else:
                 pre = []
             modifiers['stylesheets'] = pre + modifiers['stylesheets']
@@ -422,11 +400,11 @@ class Design(param.Parameterized, ResourceComponent):
         -------
         Dictionary containing JS and CSS resources.
         """
-        paths = get_resource_paths()
         resource_types = super().resolve_resources(cdn=cdn, extras=extras)
         if not include_theme:
             return resource_types
-        dist_path = get_dist_base_url(cdn=cdn)
+        dist_path = get_dist_path(cdn=cdn)
+        version_suffix = f'?v={JS_VERSION}'
         css_files = resource_types['css']
         theme = self.theme
         if theme is None:
@@ -438,13 +416,7 @@ class Design(param.Parameterized, ResourceComponent):
             basename = os.path.basename(css)
             key = 'theme_base' if 'base' in attr else 'theme'
             if relative_to(css, THEME_CSS):
-                bundled = paths.bundled_file('theme', basename)
-                if bundled is not None:
-                    css_files[key] = add_version_suffix(
-                        f'{dist_path}bundled/theme/{basename}'
-                    )
-                else:
-                    css_files[key] = f'{CDN_DIST}bundled/theme/{basename}'
+                css_files[key] = dist_path + f'bundled/theme/{basename}{version_suffix}'
             elif resolve_custom_path(theme, css):
                 owner = type(theme).param[attr].owner
                 css_files[key] = component_resource_path(owner, attr, css)

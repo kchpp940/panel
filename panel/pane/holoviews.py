@@ -24,6 +24,7 @@ from ..io import state, unlocked
 from ..layout import (
     Column, HSpacer, Row, WidgetBox,
 )
+from ..util import check_python_package, import_optional
 from ..viewable import Layoutable, Viewable
 from ..widgets import (
     DatetimeInput, DiscreteSlider, EditableFloatSlider, EditableIntSlider,
@@ -54,8 +55,13 @@ if t.TYPE_CHECKING:
 
 
 def check_holoviews(version):
-    import holoviews as hv
-
+    hv = import_optional(
+        "holoviews", "HoloViews pane",
+        min_version=version,
+        pip_package="holoviews",
+        conda_package="holoviews",
+        conda_channel="conda-forge",
+    )
     return Version(Version(hv.__version__).base_version) >= Version(version)
 
 
@@ -608,6 +614,11 @@ class HoloViews(Pane):
     def applies(cls, object: t.Any) -> float | bool | None:
         if 'holoviews' not in sys.modules:
             return False
+        check_python_package(
+            "holoviews", "HoloViews pane",
+            pip_package="holoviews", conda_package="holoviews",
+            conda_channel="conda-forge",
+        )
         from holoviews.core.dimension import Dimensioned
         from holoviews.plotting.plot import Plot
         return isinstance(object, (Dimensioned, Plot))

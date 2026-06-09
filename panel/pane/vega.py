@@ -11,7 +11,7 @@ import param
 from bokeh.models import ColumnDataSource
 from pyviz_comms import JupyterComm
 
-from ..util import lazy_load
+from ..util import import_optional, lazy_load, require_optional
 from .base import ModelPane
 from .image import PDF, SVG, Image
 from .markup import HTML, JSON
@@ -267,10 +267,14 @@ class Vega(ModelPane):
 
     @classmethod
     def is_altair(cls, obj):
-        if 'altair' in sys.modules:
-            import altair as alt
-            return isinstance(obj, alt.api.TopLevelMixin)
-        return False
+        if 'altair' not in sys.modules:
+            return False
+        alt = import_optional(
+            "altair", "Vega pane (Altair support)",
+            pip_package="altair", conda_package="altair",
+            conda_channel="conda-forge",
+        )
+        return isinstance(obj, alt.api.TopLevelMixin)
 
     @classmethod
     def applies(cls, object: t.Any) -> float | bool | None:
@@ -316,13 +320,10 @@ class Vega(ModelPane):
         >>> png_bytes = vega_pane.export('png')
         >>> image_pane = vega_pane.export('png', as_pane=True)
         """
-        try:
-            import vl_convert as vlc  # type: ignore[import-untyped]
-        except ImportError:
-            raise ImportError(
-                'vl-convert-python is required to export Vega specs. '
-                'Please install it via `pip install vl-convert-python`.'
-            ) from None
+        vlc = import_optional(
+            "vl_convert", "Vega pane export",
+            pip_package="vl-convert-python",
+        )
 
         spec = self.object if isinstance(self.object, dict) else self.object.to_dict()
         spec = dict(spec)
@@ -446,6 +447,10 @@ class Vega(ModelPane):
         self, doc: Document, root: Model | None = None,
         parent: Model | None = None, comm: Comm | None = None
     ) -> Model:
+        require_optional(
+            "Vega pane",
+            extension_name="vega",
+        )
         Vega._bokeh_model = lazy_load(
             'panel.models.vega', 'VegaPlot', isinstance(comm, JupyterComm), root
         )

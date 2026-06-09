@@ -18,7 +18,6 @@ from contextlib import contextmanager
 from bokeh.application.handlers.code_runner import CodeRunner
 
 from ..custom import ReactComponent, ReactiveESM
-from ._resource_locator import resolve_custom_path, resolve_module_path
 
 if t.TYPE_CHECKING:
     from ..custom import ExportSpec
@@ -155,21 +154,19 @@ def find_module_bundles(module_spec: str) -> dict[pathlib.Path, list[type[Reacti
     assert module_file is not None
 
     bundles: defaultdict[pathlib.Path, list[type[ReactiveESM]]] = defaultdict(list)
-    module_path = resolve_module_path(module_name if module.endswith('.py') else module) or pathlib.Path(module_file).parent
+    module_path = pathlib.Path(module_file).parent
     for component in components:
         if component._bundle:
             bundle_path = component._bundle
             if isinstance(bundle_path, str):
-                resolved = resolve_custom_path(component, bundle_path)
-                path = resolved.absolute() if resolved is not None else (module_path / bundle_path).absolute()
+                path = (module_path / bundle_path).absolute()
             else:
                 path = bundle_path.absolute()
         elif len(components) > 1 and not classes:
             component_module = module_name or component.__module__
             path = module_path / f'{component_module}.bundle.js'
         else:
-            comp_mod_path = resolve_module_path(component) or component._module_path
-            path = comp_mod_path / f'{component.__name__}.bundle.js'
+            path = component._module_path / f'{component.__name__}.bundle.js'
         if component not in bundles[path]:
             bundles[path].append(component)
 

@@ -20,11 +20,10 @@ from bokeh.resources import CDN, INLINE, Resources as BkResources
 from pyviz_comms import Comm
 
 from ..config import config
-from ._resource_locator import get_dist_base_url
 from .embed import embed_state
 from .model import add_to_doc
 from .resources import (
-    BASE_TEMPLATE, DEFAULT_TITLE, Resources, bundle_resources,
+    BASE_TEMPLATE, CDN_DIST, DEFAULT_TITLE, Resources, bundle_resources,
     set_resource_mode,
 )
 from .state import state
@@ -164,7 +163,7 @@ def file_html(
     else:
         models_seq = models
 
-    template_variables['dist_url'] = get_dist_base_url(cdn=True)
+    template_variables['dist_url'] = CDN_DIST
 
     with OutputDocumentFor(models_seq, apply_theme=theme, always_new=_always_new):
         (docs_json, render_items) = standalone_docs_json_and_render_items(

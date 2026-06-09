@@ -64,14 +64,6 @@ from tornado.wsgi import WSGIContainer
 from ..config import config
 from ..util import HTML_SANITIZER, edit_readonly, fullpath
 from ..util.warnings import warn
-from ._resource_locator import (
-    COMPONENT_PATH,
-    LOCAL_DIST,
-    ResourceNotFoundError,
-    get_dist_base_url,
-    get_resource_paths,
-    resolve_custom_path,
-)
 from .application import build_applications
 from .document import (  # noqa
     _cleanup_doc, init_doc, unlocked, with_lock,
@@ -81,8 +73,9 @@ from .loading import LOADING_INDICATOR_CSS_CLASS
 from .logging import LOG_SESSION_CREATED
 from .reload import record_modules
 from .resources import (
-    BASE_TEMPLATE, CDN_DIST, ERROR_TEMPLATE,
-    Resources, _env, bundle_resources, patch_model_css,
+    BASE_TEMPLATE, CDN_DIST, COMPONENT_PATH, DIST_DIR, ERROR_TEMPLATE,
+    LOCAL_DIST, Resources, _env, bundle_resources, patch_model_css,
+    resolve_custom_path,
 )
 from .session import generate_session
 from .state import set_curdoc, state
@@ -115,8 +108,7 @@ if t.TYPE_CHECKING:
 # Private API
 #---------------------------------------------------------------------
 
-_resource_paths = get_resource_paths()
-INDEX_HTML = str(_resource_paths.internal_templates_dir / "index.html")
+INDEX_HTML = os.path.join(os.path.dirname(__file__), '..', '_templates', "index.html")
 DEFAULT_TITLE = "Panel Application"
 _PATH_TEMPLATE_PATTERN = re.compile(
     r'^\{(?P<name>[A-Za-z_][A-Za-z0-9_]*)(?::(?P<converter>str|path|int|float|uuid))?\}$'
@@ -372,8 +364,11 @@ def server_html_page_for_session(
 ) -> str:
 
     # ALERT: Replace with better approach before Bokeh 3.x compatible release
-    with set_curdoc(session.document):
-        dist_url = get_dist_base_url(cdn=(resources.mode != 'server'))
+    if resources.mode == 'server':
+        with set_curdoc(session.document):
+            dist_url = f'{state.rel_path}/{LOCAL_DIST}' if state.rel_path else LOCAL_DIST
+    else:
+        dist_url = CDN_DIST
 
     doc = session.document
     doc._template_variables['theme_name'] = config.theme
@@ -835,7 +830,7 @@ class RootHandler(LoginUrlMixin, BkRootHandler):
             self.render(index, prefix=self.prefix, items=apps)
 
     def render(self, *args, **kwargs):
-        kwargs['PANEL_CDN'] = get_dist_base_url(cdn=True)
+        kwargs['PANEL_CDN'] = CDN_DIST
         return super().render(*args, **kwargs)
 
 toplevel_patterns[0] = (r'/?', RootHandler)
@@ -947,32 +942,32 @@ class ComponentResourceHandler(StaticFileHandler):
         """
         parts = path.split('/')
         if len(parts) < 4:
-            raise HTTPError(400, f'Malformed component resource URL: {path!r}. Expected /module/class/attr/path')
+            raise HTTPError(400, 'Malformed URL')
         mod, cls, rtype, *subpath = parts
         try:
             module = importlib.import_module(mod)
         except ModuleNotFoundError:
-            raise HTTPError(404, f'Module {mod!r} not found for component resource {path!r}') from None
+            raise HTTPError(404, 'Module not found') from None
         try:
             component = getattr(module, cls)
         except AttributeError:
-            raise HTTPError(404, f'Component {cls!r} not found in module {mod!r}') from None
+            raise HTTPError(404, 'Component not found') from None
 
         # May only access resources listed in specific attributes
         if rtype not in self._resource_attrs:
-            raise HTTPError(403, f'Requested resource type {rtype!r} not in allowed list for {mod}.{cls}')
+            raise HTTPError(403, 'Requested resource type not valid.')
 
         try:
             resources = getattr(component, rtype)
         except AttributeError:
-            raise HTTPError(404, f'Resource type {rtype!r} not found on {mod}.{cls}') from None
+            raise HTTPError(404, 'Resource type not found') from None
 
         # Handle template resources
         if rtype == '_resources':
             rtype = subpath[0]
             subpath = subpath[1:]
             if rtype not in resources:
-                raise HTTPError(404, f'Resource type {rtype!r} not found in _resources on {mod}.{cls}')
+                raise HTTPError(404, 'Resource type not found')
             resources = resources[rtype]
             rtype = f'_resources/{rtype}'
         elif rtype == 'modifiers':
@@ -995,18 +990,12 @@ class ComponentResourceHandler(StaticFileHandler):
         # Important: May only access resources explicitly listed on the component
         # Otherwise this potentially exposes all files to the web
         if rel_path not in resources:
-            raise HTTPError(403, (
-                f'Requested resource {rel_path!r} was not declared on {mod}.{cls}.{rtype}. '
-                f'Expected one of: {resources}'
-            ))
+            raise HTTPError(403, 'Requested resource was not listed.')
 
         if not module.__file__:
-            raise HTTPError(404, f'Requested module {mod!r} does not reference a file (frozen / built-in)')
+            raise HTTPError(404, 'Requested module does not reference a file.')
 
-        resolved = str(pathlib.Path(module.__file__).parent / rel_path)
-        if not os.path.isfile(resolved):
-            raise HTTPError(404, str(ResourceNotFoundError.component(component, rtype, rel_path)))
-        return resolved
+        return str(pathlib.Path(module.__file__).parent / rel_path)
 
     @classmethod
     def get_absolute_path(cls, root: str, path: str) -> str:

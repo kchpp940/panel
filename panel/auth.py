@@ -25,9 +25,8 @@ from tornado.websocket import WebSocketHandler
 
 from .config import config
 from .entry_points import entry_points_for
-from .io._resource_locator import get_dist_base_url
 from .io.resources import (
-    BASIC_LOGIN_TEMPLATE, ERROR_TEMPLATE, LOGOUT_TEMPLATE, _env,
+    BASIC_LOGIN_TEMPLATE, CDN_DIST, ERROR_TEMPLATE, LOGOUT_TEMPLATE, _env,
 )
 from .io.state import state
 from .util import HTML_SANITIZER, base64url_encode, decode_token
@@ -572,7 +571,7 @@ class PasswordLoginHandler(GenericLoginHandler):
             self.set_cookie("next_url", next_url)
         html = self._login_template.render(
             errormessage=errormessage,
-            PANEL_CDN=get_dist_base_url()
+            PANEL_CDN=CDN_DIST
         )
         self.write(html)
 
@@ -890,7 +889,7 @@ class BasicLoginHandler(RequestHandler):
         html = self._login_template.render(
             login_endpoint=self._login_endpoint,
             errormessage=errormessage,
-            PANEL_CDN=get_dist_base_url()
+            PANEL_CDN=CDN_DIST
         )
         self.write(html)
 
@@ -949,7 +948,7 @@ class LogoutHandler(tornado.web.RequestHandler):
         self.clear_cookie("oauth_expiry")
         self.clear_cookie(STATE_COOKIE_NAME)
         html = self._logout_template.render(
-            PANEL_CDN=get_dist_base_url(),
+            PANEL_CDN=CDN_DIST,
             LOGIN_ENDPOINT=self._login_endpoint
         )
         self.write(html)

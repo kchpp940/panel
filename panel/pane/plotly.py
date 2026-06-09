@@ -12,7 +12,9 @@ import param
 from bokeh.models import ColumnDataSource
 from pyviz_comms import JupyterComm
 
-from ..util import lazy_load, try_datetime64_to_datetime
+from ..util import (
+    import_optional, lazy_load, require_optional, try_datetime64_to_datetime,
+)
 from ..util.checks import datetime_types, isdatetime
 from ..viewable import Layoutable
 from .base import ModelPane
@@ -120,7 +122,11 @@ class Plotly(ModelPane):
         self._relayout_data = None
 
     def _to_figure(self, obj):
-        import plotly.graph_objs as go
+        go = import_optional(
+            "plotly.graph_objs", "Plotly pane",
+            pip_package="plotly", conda_package="plotly",
+            conda_channel="plotly",
+        )
         if isinstance(obj, (go.Figure, go.FigureWidget)):
             return obj
         elif isinstance(obj, dict):
@@ -349,6 +355,10 @@ class Plotly(ModelPane):
         self, doc: Document, root: Model | None = None,
         parent: Model | None = None, comm: Comm | None = None
     ) -> Model:
+        require_optional(
+            "Plotly pane",
+            extension_name="plotly",
+        )
         Plotly._bokeh_model = lazy_load(
             'panel.models.plotly', 'PlotlyPlot', isinstance(comm, JupyterComm), root
         )
