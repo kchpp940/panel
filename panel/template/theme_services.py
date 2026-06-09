@@ -262,8 +262,8 @@ class SoftReloadService:
 
     职责：
     - 判断是否需要触发软重载
+    - 更新 URL 中的 theme 查询参数
     - 通过 location.reload 触发页面刷新
-    - 保留 URL 中的 theme 参数
     """
 
     @staticmethod
@@ -285,13 +285,32 @@ class SoftReloadService:
         return False
 
     @staticmethod
-    def trigger_reload(theme_name: str) -> None:
+    def get_theme_name(design: Design) -> str:
         """
-        触发软重载，将 theme 写入 URL 并刷新页面。
+        从 Design 实例中获取主题名称（用于 URL 查询参数）。
+        """
+        theme = design.theme
+        if theme is None:
+            return 'default'
+        return getattr(theme, '_name', 'default')
 
-        通过设置 location 对象的 reload 标志触发前端刷新。
+    @staticmethod
+    def trigger_reload(template: BaseTemplate, theme_name: str | None = None) -> None:
         """
-        for doc, loc in state._locations.items():
+        触发软重载：更新 URL theme 参数并刷新页面。
+
+        对 template 关联的所有 Document 的 Location：
+        1. 设置 URL 查询参数 ?theme=<theme_name>
+        2. 设置 loc.reload = True 触发前端刷新
+        """
+        if theme_name is None:
+            theme_name = SoftReloadService.get_theme_name(template._design)
+
+        for doc in template._documents:
+            loc = state._locations.get(doc)
+            if loc is None:
+                continue
+            loc.update_query(theme=theme_name)
             if not doc.session_context:
                 continue
             if state._loaded.get(doc):
@@ -307,9 +326,10 @@ class SnapshotStateMigrator:
     SnapshotStateMigrator 负责在主题/Design 切换时迁移状态。
 
     职责：
-    - 在重新应用 Design 前保存当前 Viewable 状态快照
+    - 在重新应用 Design 前保存当前 Viewable 状态快照（_models、_hooks、_plots）
     - 在新 Design 应用后恢复 Viewable 状态
-    - 迁移 Document 中的 hooks 和模型引用
+    - 保存/恢复 Document 级别的状态（theme、template_variables）
+    - 在 Design 切换时执行完整迁移流程
     """
 
     def __init__(self) -> None:
@@ -324,16 +344,18 @@ class SnapshotStateMigrator:
         保存单个 Viewable 的状态快照。
 
         保存内容：
-        - 模型引用（_models）
-        - hooks
-        - _design 引用
+        - _models: 模型引用映射
+        - _hooks: 已注册的 hooks 列表
+        - _plots (HoloViews): 绘图引用映射
         """
         key = f"{id(viewable)}_{mref}"
-        self._snapshots[key] = {
+        snapshot: dict[str, t.Any] = {
             'models': dict(viewable._models),
             'hooks': list(viewable._hooks),
-            'has_design': getattr(viewable, '_design', None) is not None,
         }
+        if hasattr(viewable, '_plots'):
+            snapshot['plots'] = dict(viewable._plots)
+        self._snapshots[key] = snapshot
 
     def restore_viewable_state(
         self,
@@ -342,30 +364,85 @@ class SnapshotStateMigrator:
     ) -> None:
         """
         恢复单个 Viewable 的状态快照。
+
+        恢复已保存的 _models、_hooks、_plots。
         """
         key = f"{id(viewable)}_{mref}"
         snapshot = self._snapshots.pop(key, None)
         if snapshot is None:
             return
 
-        for ref, model_data in snapshot['models'].items():
+        for ref, model_data in snapshot.get('models', {}).items():
             if ref not in viewable._models:
                 viewable._models[ref] = model_data
+
+        for hook in snapshot.get('hooks', []):
+            if hook not in viewable._hooks:
+                viewable._hooks.append(hook)
+
+        if 'plots' in snapshot and hasattr(viewable, '_plots'):
+            for ref, plot in snapshot['plots'].items():
+                if ref not in viewable._plots:
+                    viewable._plots[ref] = plot
+
+    def snapshot_render_items(
+        self,
+        template: BaseTemplate,
+        fake_ref: str,
+    ) -> None:
+        """
+        保存模板所有 render items 中 Viewable 的状态快照。
+
+        在 Design 切换前调用，保存每个组件在 fake_ref 和自身 mref 下的状态。
+        """
+        for _, (obj, _) in template._render_items.values():
+            if not isinstance(obj, Viewable):
+                continue
+            for mref in list(obj._models.keys()):
+                self.snapshot_viewable_state(obj, mref)
+            if hasattr(obj, 'select'):
+                for sub in obj.select(Viewable):
+                    for mref in list(sub._models.keys()):
+                        self.snapshot_viewable_state(sub, mref)
+                    if hasattr(sub, '_plots'):
+                        self.snapshot_viewable_state(sub, fake_ref)
+
+    def restore_render_items(
+        self,
+        template: BaseTemplate,
+        fake_ref: str,
+    ) -> None:
+        """
+        恢复模板所有 render items 中 Viewable 的状态快照。
+
+        在 Design 切换、重新构建模型后调用。
+        """
+        for _, (obj, _) in template._render_items.values():
+            if not isinstance(obj, Viewable):
+                continue
+            for mref in list(obj._models.keys()):
+                self.restore_viewable_state(obj, mref)
+            if hasattr(obj, 'select'):
+                for sub in obj.select(Viewable):
+                    for mref in list(sub._models.keys()):
+                        self.restore_viewable_state(sub, mref)
+                    if hasattr(sub, '_plots'):
+                        self.restore_viewable_state(sub, fake_ref)
 
     def snapshot_document(
         self,
         doc: Document,
-        template: BaseTemplate,
     ) -> dict[str, t.Any]:
         """
-        保存整个模板 Document 的状态快照。
+        保存 Document 级别的状态快照。
 
-        用于 Design/Theme 切换前保存，切换后恢复。
+        用于 Design/Theme 切换前保存。
         """
         snapshot: dict[str, t.Any] = {
-            'template_variables': dict(doc._template_variables),
-            'theme': doc.theme,
+            'theme': getattr(doc, 'theme', None),
         }
+        if hasattr(doc, '_template_variables'):
+            snapshot['template_variables'] = dict(doc._template_variables)
         return snapshot
 
     def restore_document(
@@ -374,10 +451,12 @@ class SnapshotStateMigrator:
         snapshot: dict[str, t.Any],
     ) -> None:
         """
-        恢复 Document 状态。
+        恢复 Document 级别的状态快照。
         """
-        for key, value in snapshot.get('template_variables', {}).items():
-            doc._template_variables[key] = value
+        tvars = snapshot.get('template_variables')
+        if tvars and hasattr(doc, '_template_variables'):
+            for key, value in tvars.items():
+                doc._template_variables[key] = value
 
     def migrate_design(
         self,
@@ -386,17 +465,20 @@ class SnapshotStateMigrator:
         template: BaseTemplate,
     ) -> None:
         """
-        在 Design 切换时执行完整的状态迁移流程。
+        在 Design 切换时执行 hooks 迁移。
 
-        1. 保存所有 Viewable 的 hooks 状态
-        2. 清理旧 Design 相关的 hooks
-        3. 注册新 Design 的 hooks
+        1. 从所有 Viewable 移除旧 Design 的 _apply_hooks
+        2. 为所有 Viewable 添加新 Design 的 _apply_hooks
         """
         if old_design is None:
             return
 
         for obj, _ in template._render_items.values():
-            if old_design._apply_hooks in obj._hooks:
-                obj._hooks.remove(old_design._apply_hooks)
-            if new_design._apply_hooks not in obj._hooks:
-                obj._hooks.append(new_design._apply_hooks)
+            all_viewables = [obj] if isinstance(obj, Viewable) else []
+            if hasattr(obj, 'select'):
+                all_viewables.extend(list(obj.select(Viewable)))
+            for viewable in all_viewables:
+                if old_design._apply_hooks in viewable._hooks:
+                    viewable._hooks.remove(old_design._apply_hooks)
+                if new_design._apply_hooks not in viewable._hooks:
+                    viewable._hooks.append(new_design._apply_hooks)

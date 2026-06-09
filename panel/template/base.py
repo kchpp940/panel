@@ -152,12 +152,37 @@ class BaseTemplate(param.Parameterized, MimeRenderMixin, ServableMixin, Resource
     def _setup_design(self):
         old_design = getattr(self, '_design', None)
         theme_cls = self.design_resolver.resolve_theme_class(self.theme)
-        self._design = self.design_resolver.instantiate(self.design, theme_cls)
+        new_design = self.design_resolver.instantiate(self.design, theme_cls)
+
+        doc_snapshots: dict[Document, dict[str, t.Any]] = {}
+        for doc in self._documents:
+            doc_snapshots[doc] = self.state_migrator.snapshot_document(doc)
+
+        self._design = new_design
+
         if old_design is not None:
-            self.state_migrator.migrate_design(old_design, self._design, self)
-            if self.soft_reload_service.should_reload(old_design, self._design):
-                theme_name = getattr(self._design.theme, '_name', 'default')
-                self.soft_reload_service.trigger_reload(theme_name)
+            self.state_migrator.migrate_design(old_design, new_design, self)
+
+            for doc in self._documents:
+                self.theme_synchronizer.sync_to_document(new_design, doc)
+                self.theme_synchronizer.sync_to_config(new_design, doc)
+                snapshot = doc_snapshots.get(doc, {})
+                self.state_migrator.restore_document(doc, snapshot)
+
+            all_viewables: list[Viewable] = []
+            for obj, _ in self._render_items.values():
+                if isinstance(obj, Viewable):
+                    all_viewables.append(obj)
+                if hasattr(obj, 'select'):
+                    all_viewables.extend(list(obj.select(Viewable)))
+            self.component_theme_updater.update_holoviews_themes(all_viewables, new_design)
+
+            self._update_vars()
+            for doc in self._documents:
+                doc._template_variables.update(self._render_variables)
+
+            if self.soft_reload_service.should_reload(old_design, new_design):
+                self.soft_reload_service.trigger_reload(self)
 
     def _update_vars(self, *args) -> None:
         """

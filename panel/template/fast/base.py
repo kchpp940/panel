@@ -3,6 +3,8 @@ import typing as t
 
 import param
 
+from ...io.state import state
+from ...theme import THEMES, DefaultTheme
 from ...theme.fast import Design, Fast
 from ..base import BasicTemplate
 from ..react import ReactTemplate
@@ -65,7 +67,6 @@ class FastBaseTemplate(BasicTemplate):
         if query_theme:
             params['theme'] = self.design_resolver.resolve_theme_class(query_theme)
         elif "theme" not in params:
-            from ...theme import DefaultTheme
             params['theme'] = DefaultTheme
         elif isinstance(params['theme'], str):
             params['theme'] = self.design_resolver.resolve_theme_class(params['theme'])
@@ -80,6 +81,8 @@ class FastBaseTemplate(BasicTemplate):
         super().__init__(**params)
         self.component_theme_updater.sync_template_params_from_style(
             self, self._design, override_params=user_params)
+        if user_params:
+            self.component_theme_updater.sync_style_from_template_params(self, self._design)
 
     def _update_vars(self):
         super()._update_vars()
