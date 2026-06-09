@@ -265,11 +265,17 @@ pixi run build-pyodide
 pixi run build-npm
 ```
 
+`pixi run build-pip` is the release-quality Pip build pipeline. It runs three steps in order — none can be skipped:
+
+1. **Clean** — deletes the top-level `dist/` directory so stale wheels/sdists from earlier builds cannot interfere
+2. **Build** — runs `python -m build .` to produce a fresh sdist and wheel
+3. **Verify** — runs `python scripts/verify_frontend_artifacts.py --release` (see below)
+
 ### Frontend Artifact Verification
 
 Panel verifies frontend build artifacts in two phases. Both run automatically in CI and must pass before release.
 
-**Release entry point** (runs both phases, this is what `pixi run build-pip` and CI use):
+**Release entry point** (runs both phases; `pixi run build-pip` invokes this automatically):
 
 ```bash
 pixi run verify-frontend-artifacts-release
@@ -277,10 +283,10 @@ pixi run verify-frontend-artifacts-release
 python scripts/verify_frontend_artifacts.py --release
 ```
 
-Release mode first runs all source/dist checks, then locates exactly **one** `.whl` file under `dist/` and verifies its contents. It fails immediately with a clear message if:
+Release mode first runs all source/dist checks, then locates exactly **one** `.whl` file under `dist/` and verifies its contents. Because `build-pip` cleans `dist/` before building, there will always be exactly one freshly-built wheel. Running `--release` standalone fails immediately with a clear message if:
 - `dist/` does not exist
 - zero `.whl` files are found (build didn't complete)
-- two or more `.whl` files are found (ambiguous — clean `dist/` and rebuild)
+- two or more `.whl` files are found (ambiguous — leftover from previous builds)
 
 **Phase 1 — Source / Dist checks only** (for conda/npm builds and local iteration):
 
