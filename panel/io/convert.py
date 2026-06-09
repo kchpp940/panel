@@ -27,7 +27,12 @@ from packaging.requirements import Requirement
 
 from .. import __version__, config
 from ..util import base_version
-from ._resource_locator import get_dist_base_url, get_resource_paths
+from ._resource_locator import (
+    dist_file_exists,
+    get_dist_base_url,
+    get_resource_paths,
+    read_dist_text,
+)
 from .application import Application, build_single_handler_application
 from .document import MockSessionContext
 from .loading import LOADING_INDICATOR_CSS_CLASS
@@ -307,19 +312,22 @@ def pack_files(filemap: dict, destination: str | os.PathLike | t.IO):
 def loading_resources(template, inline) -> list[str]:
     css_resources = []
     if template in (BASE_TEMPLATE, FILE):
-        paths = get_resource_paths()
-        if inline:
+        cdn_base = get_dist_base_url(cdn=True)
+        if inline and dist_file_exists('css', 'loading.css'):
             svg_name = f'{config.loading_spinner}_spinner.svg'
-            svg_path = paths.require_dist_file('assets', svg_name)
-            svg_b64 = base64.b64encode(svg_path.read_bytes()).decode('utf-8')
-            loading_css_path = paths.require_dist_file('css', 'loading.css')
-            loading_base = loading_css_path.read_text(encoding='utf-8').replace(
-                f'../assets/{svg_name}', f'data:image/svg+xml;base64,{svg_b64}'
-            )
-            loading_style = f'<style type="text/css">\n{loading_base}\n</style>'
+            loading_base = read_dist_text('css', 'loading.css')
+            if loading_base is not None and dist_file_exists('assets', svg_name):
+                paths = get_resource_paths()
+                svg_path = paths.dist_file('assets', svg_name)
+                svg_b64 = base64.b64encode(svg_path.read_bytes()).decode('utf-8')
+                loading_base = loading_base.replace(
+                    f'../assets/{svg_name}', f'data:image/svg+xml;base64,{svg_b64}'
+                )
+                loading_style = f'<style type="text/css">\n{loading_base}\n</style>'
+            else:
+                loading_style = f'<link rel="stylesheet" href="{cdn_base}css/loading.css" type="text/css" />'
         else:
-            cdn = get_dist_base_url(cdn=True)
-            loading_style = f'<link rel="stylesheet" href="{cdn}css/loading.css" type="text/css" />'
+            loading_style = f'<link rel="stylesheet" href="{cdn_base}css/loading.css" type="text/css" />'
         css_resources.append(loading_style)
     spinner_css = loading_css(
         config.loading_spinner, config.loading_color, config.loading_max_height

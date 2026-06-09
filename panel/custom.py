@@ -20,6 +20,7 @@ from param.parameterized import ParameterizedMetaclass
 
 from .config import config
 from .io._resource_locator import (
+    ResourceNotFoundError,
     add_file_version_suffix,
     resolve_custom_path,
     resolve_module_path,
@@ -392,7 +393,15 @@ class ReactiveESM(ReactiveCustomBase, metaclass=ReactiveESMMetaclass):
                 if config.autoreload:
                     esm = add_file_version_suffix(esm, esm_path)
             else:
-                esm = esm_path.read_text(encoding='utf-8')
+                try:
+                    esm = esm_path.read_text(encoding='utf-8')
+                except FileNotFoundError as e:
+                    raise ResourceNotFoundError(
+                        f"ESM module not found: {esm_path}",
+                        kind='file',
+                        relpath=str(esm_path),
+                        component=cls,
+                    ) from e
         else:
             esm = cls._esm
         if esm is None:

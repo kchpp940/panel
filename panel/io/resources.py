@@ -282,7 +282,16 @@ def resolve_stylesheet(cls, stylesheet: str, attribute: str | None = None):
         stylesheet = component_resource_path(cls, attribute, stylesheet)
         stylesheet = add_version_suffix(stylesheet)
     else:
-        stylesheet = custom_path.read_text(encoding='utf-8')
+        try:
+            stylesheet = custom_path.read_text(encoding='utf-8')
+        except FileNotFoundError as e:
+            raise ResourceNotFoundError(
+                f"Component stylesheet not found: {custom_path}",
+                kind='file',
+                relpath=str(custom_path),
+                component=cls,
+                attr=attribute,
+            ) from e
     return stylesheet
 
 def patch_model_css(root: Model, dist_url: str):

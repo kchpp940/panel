@@ -19,7 +19,7 @@ from ..io._resource_locator import (
     resolve_custom_path,
 )
 from ..io.resources import (
-    CDN_DIST, ResourceComponent, component_resource_path,
+    ResourceComponent, component_resource_path,
 )
 from ..io.state import set_curdoc, state
 from ..util import relative_to
@@ -228,11 +228,22 @@ class Design(param.Parameterized, ResourceComponent):
                                 f'{dist_url}bundled/theme/{css_path.name}'
                             ))
                         else:
-                            pre.append(f'{CDN_DIST}bundled/theme/{css_path.name}')
+                            dist_url = get_dist_base_url(cdn=True)
+                            pre.append(add_version_suffix(
+                                f'{dist_url}bundled/theme/{css_path.name}'
+                            ))
                     elif resolve_custom_path(theme, css):
                         pre.append(component_resource_path(theme, p, css))
                     else:
-                        pre.append(css_path.read_text(encoding='utf-8'))
+                        try:
+                            pre.append(css_path.read_text(encoding='utf-8'))
+                        except FileNotFoundError as e:
+                            from ..io._resource_locator import ResourceNotFoundError
+                            raise ResourceNotFoundError(
+                                f"Theme CSS file not found: {css_path}",
+                                kind='file',
+                                relpath=str(css_path),
+                            ) from e
             else:
                 pre = []
             modifiers['stylesheets'] = pre + modifiers['stylesheets']
