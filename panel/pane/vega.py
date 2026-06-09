@@ -11,7 +11,6 @@ import param
 from bokeh.models import ColumnDataSource
 from pyviz_comms import JupyterComm
 
-from ..interaction import VegaAdapter
 from ..util import lazy_load
 from .base import ModelPane
 from .image import PDF, SVG, Image
@@ -239,42 +238,6 @@ class Vega(ModelPane):
         super().__init__(object, **params)
         self.param.watch(self._update_selections, ['object'])
         self._update_selections()
-        self._interaction_adapter: VegaAdapter | None = None
-
-    @property
-    def interaction_adapter(self) -> VegaAdapter:
-        if self._interaction_adapter is None:
-            self._interaction_adapter = VegaAdapter(self)
-        return self._interaction_adapter
-
-    @property
-    def interaction_store(self):
-        """
-        The per-component event store for standardized interaction
-        events. Subscribe here to consume normalized events from this
-        Vega pane independent of the raw vega_event protocol.
-        """
-        return self.interaction_adapter.store
-
-    def subscribe_interaction(self, callback, *, kind: str | None = None) -> None:
-        """
-        Register a callback for standardized interaction events.
-
-        Parameters
-        ----------
-        callback : callable
-            Invoked with a ``StandardEvent`` instance.
-        kind : str, optional
-            If provided, only fire on events whose ``.kind`` matches.
-        """
-        self.interaction_store.subscribe(callback, kind=kind)
-
-    def unsubscribe_interaction(self, callback, *, kind: str | None = None) -> None:
-        """
-        Remove a callback previously registered with
-        :meth:`subscribe_interaction`.
-        """
-        self.interaction_store.unsubscribe(callback, kind=kind)
 
     @property
     def _selections(self):
@@ -449,8 +412,6 @@ class Vega(ModelPane):
         if stype != 'interval':
             value = list(value)
         self.selection.param.update(**{name: value})
-
-        self.interaction_adapter.handle_event(event, event_name='vega_event')
 
     def _process_param_change(self, params):
         props = super()._process_param_change(params)

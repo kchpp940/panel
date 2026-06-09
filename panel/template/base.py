@@ -40,15 +40,18 @@ from ..pane import (
 from ..pane.image import ImageBase
 from ..reactive import ReactiveHTML
 from ..theme.base import (
-    THEMES, DefaultTheme, Design, Theme,
+    DefaultTheme, Design, Theme,
 )
-from ..theme.native import Native
 from ..util import isurl
 from ..viewable import (
     MimeRenderMixin, Renderable, ServableMixin, Viewable,
 )
 from ..widgets import Button
 from ..widgets.indicators import BooleanIndicator, LoadingSpinner
+from .theme_services import (
+    ComponentThemeUpdater, DesignResolver, SnapshotStateMigrator,
+    SoftReloadService, ThemeSynchronizer,
+)
 
 if t.TYPE_CHECKING:
     from bokeh.model import Model
@@ -92,6 +95,12 @@ class BaseTemplate(param.Parameterized, MimeRenderMixin, ServableMixin, Resource
     # Dictionary of property overrides by Viewable type
     modifiers: t.ClassVar[dict[type[Viewable], dict[str, t.Any]]] = {}
 
+    design_resolver: t.ClassVar[DesignResolver] = DesignResolver()
+    theme_synchronizer: t.ClassVar[ThemeSynchronizer] = ThemeSynchronizer()
+    component_theme_updater: t.ClassVar[ComponentThemeUpdater] = ComponentThemeUpdater()
+    soft_reload_service: t.ClassVar[SoftReloadService] = SoftReloadService()
+    state_migrator: t.ClassVar[SnapshotStateMigrator] = SnapshotStateMigrator()
+
     #############
     # Resources #
     #############
@@ -118,12 +127,7 @@ class BaseTemplate(param.Parameterized, MimeRenderMixin, ServableMixin, Resource
         }
         self._render_items: dict[str, tuple[Renderable, list[str]]]  = {}
         self._render_variables: dict[str, t.Any] = {}
-        if (
-            'design' not in params
-            and self.param.design.default in (None, Design, Native)
-            and config.design is not None
-        ):
-            params['design'] = config.design
+        params['design'] = self.design_resolver.resolve_design_class(type(self), params)
         super().__init__(**{
             p: v for p, v in params.items() if p not in _base_config.param or p == 'name'
         })
@@ -146,7 +150,14 @@ class BaseTemplate(param.Parameterized, MimeRenderMixin, ServableMixin, Resource
 
     @param.depends('design', watch=True)
     def _setup_design(self):
-        self._design = self.design(theme=self.theme)
+        old_design = getattr(self, '_design', None)
+        theme_cls = self.design_resolver.resolve_theme_class(self.theme)
+        self._design = self.design_resolver.instantiate(self.design, theme_cls)
+        if old_design is not None:
+            self.state_migrator.migrate_design(old_design, self._design, self)
+            if self.soft_reload_service.should_reload(old_design, self._design):
+                theme_name = getattr(self._design.theme, '_name', 'default')
+                self.soft_reload_service.trigger_reload(theme_name)
 
     def _update_vars(self, *args) -> None:
         """
@@ -216,7 +227,7 @@ class BaseTemplate(param.Parameterized, MimeRenderMixin, ServableMixin, Resource
         # link objects across multiple roots in a template.
         col = Column()
         preprocess_root = col.get_root(document, comm, preprocess=False)
-        col._hooks.append(self._design._apply_hooks)
+        self.theme_synchronizer.ensure_hook_registered(self._design, col)
         ref = preprocess_root.ref['id']
 
         # Add all render items to the document
@@ -232,8 +243,7 @@ class BaseTemplate(param.Parameterized, MimeRenderMixin, ServableMixin, Resource
             mref = model.ref['id']
             if isinstance(model, LayoutDOM):
                 sizing_modes[mref] = model.sizing_mode
-                if self._design._apply_hooks not in obj._hooks:
-                    obj._hooks.append(self._design._apply_hooks)
+                self.theme_synchronizer.ensure_hook_registered(self._design, obj)
 
                 # Alias model ref with the fake root ref to ensure that
                 # pre-processor correctly operates on fake root
@@ -270,7 +280,7 @@ class BaseTemplate(param.Parameterized, MimeRenderMixin, ServableMixin, Resource
         col.objects = objs
         preprocess_root.children[:] = models
         preprocess_root.document = document
-        self._design.apply(col, preprocess_root, isolated=False)
+        self.theme_synchronizer.apply_design_to_viewable(self._design, col, preprocess_root, isolated=False)
         col._preprocess(preprocess_root)
         col._documents[document] = preprocess_root
         document.on_session_destroyed(col._server_destroy) # type: ignore
@@ -733,10 +743,9 @@ class BasicTemplate(BaseTemplate):
         else:
             params['modal'] = self._get_params(params['modal'], self.param.modal.class_)
         if 'theme' in params:
-            if isinstance(params['theme'], str):
-                params['theme'] = THEMES[params['theme']]
+            params['theme'] = self.design_resolver.resolve_theme_class(params['theme'])
         else:
-            params['theme'] = THEMES[config.theme]
+            params['theme'] = self.design_resolver.resolve_theme_class(None)
         if 'favicon' in params and isinstance(params['favicon'], PurePath):
             params['favicon'] = str(params['favicon'])
         if 'notifications' not in params and config.notifications:
@@ -775,10 +784,8 @@ class BasicTemplate(BaseTemplate):
         document = super()._init_doc(doc, comm, title, notebook, location)
         if self.notifications:
             state._notifications[document] = self.notifications
-        if self._design.theme.bokeh_theme:
-            document.theme = self._design.theme.bokeh_theme
-        with set_curdoc(document):
-            config.design = type(self._design)
+        self.theme_synchronizer.sync_to_document(self._design, document)
+        self.theme_synchronizer.sync_to_config(self._design, document)
         return document
 
     def _update_vars(self, *args) -> None:
@@ -829,7 +836,7 @@ class BasicTemplate(BaseTemplate):
         self._render_variables['header_color'] = self.header_color
         self._render_variables['main_max_width'] = self.main_max_width
         self._render_variables['sidebar_width'] = self.sidebar_width
-        self._render_variables['theme'] = self._design.theme
+        self.component_theme_updater.collect_render_variables(self, self._design, self._render_variables)
         self._render_variables['collapsed_sidebar'] = self.collapsed_sidebar
 
     def _update_busy(self) -> None:
@@ -858,12 +865,9 @@ class BasicTemplate(BaseTemplate):
                 del self._render_items[ref]
 
         new = event.new if isinstance(event.new, list) else event.new.values()
-        if self._design.theme.bokeh_theme:
-            for o in new:
-                if o in old:
-                    continue
-                for hvpane in o.select(HoloViews):
-                    hvpane.theme = self._design.theme.bokeh_theme
+        new_objects = [o for o in new if o not in old]
+        if new_objects:
+            self.component_theme_updater.update_holoviews_themes(new_objects, self._design)
 
         labels = {}
         for obj in new:

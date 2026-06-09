@@ -11,7 +11,6 @@ from bokeh.core.serialization import Serializer
 from bokeh.models import CustomJS
 from pyviz_comms import JupyterComm
 
-from ..interaction import EChartsAdapter
 from ..util import lazy_load
 from ..viewable import Viewable
 from .base import ModelPane
@@ -65,42 +64,6 @@ class ECharts(ModelPane):
         super().__init__(object, **params)
         self._py_callbacks = defaultdict(lambda: defaultdict(list))
         self._js_callbacks = defaultdict(list)
-        self._interaction_adapter: EChartsAdapter | None = None
-
-    @property
-    def interaction_adapter(self) -> EChartsAdapter:
-        if self._interaction_adapter is None:
-            self._interaction_adapter = EChartsAdapter(self)
-        return self._interaction_adapter
-
-    @property
-    def interaction_store(self):
-        """
-        The per-component event store for standardized interaction
-        events. Subscribe here to consume normalized events from this
-        ECharts pane independent of the raw echarts_event protocol.
-        """
-        return self.interaction_adapter.store
-
-    def subscribe_interaction(self, callback, *, kind: str | None = None) -> None:
-        """
-        Register a callback for standardized interaction events.
-
-        Parameters
-        ----------
-        callback : callable
-            Invoked with a ``StandardEvent`` instance.
-        kind : str, optional
-            If provided, only fire on events whose ``.kind`` matches.
-        """
-        self.interaction_store.subscribe(callback, kind=kind)
-
-    def unsubscribe_interaction(self, callback, *, kind: str | None = None) -> None:
-        """
-        Remove a callback previously registered with
-        :meth:`subscribe_interaction`.
-        """
-        self.interaction_store.unsubscribe(callback, kind=kind)
 
     @classmethod
     def applies(cls, object: t.Any, **params) -> float | bool | None:
@@ -125,8 +88,6 @@ class ECharts(ModelPane):
             return
         for cb in callbacks.get(event.query, []):
             cb(event)
-
-        self.interaction_adapter.handle_event(event, event_name='echarts_event')
 
     def _get_js_events(self, ref):
         js_events = defaultdict(list)

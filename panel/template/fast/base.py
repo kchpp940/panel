@@ -3,8 +3,6 @@ import typing as t
 
 import param
 
-from ...io.state import state
-from ...theme import THEMES, DefaultTheme
 from ...theme.fast import Design, Fast
 from ..base import BasicTemplate
 from ..react import ReactTemplate
@@ -47,7 +45,6 @@ class FastBaseTemplate(BasicTemplate):
     sidebar_footer = param.String("", doc="""
         A HTML string appended to the sidebar""")
 
-    # Might be extended to accordion or tabs in the future
     main_layout: t.Literal[None, "card"] = param.Selector(
         default="card", label="Layout", objects=[None, "card"], doc="""
         What to wrap the main components into. Options are '' (i.e. none) and 'card' (Default).
@@ -64,13 +61,14 @@ class FastBaseTemplate(BasicTemplate):
     __abstract = True
 
     def __init__(self, **params):
-        query_theme = self._get_theme_from_query_args()
+        query_theme = self.design_resolver.resolve_query_theme()
         if query_theme:
-            params['theme'] = THEMES[query_theme]
+            params['theme'] = self.design_resolver.resolve_theme_class(query_theme)
         elif "theme" not in params:
+            from ...theme import DefaultTheme
             params['theme'] = DefaultTheme
         elif isinstance(params['theme'], str):
-            params['theme'] = THEMES[params['theme']]
+            params['theme'] = self.design_resolver.resolve_theme_class(params['theme'])
         if "accent" in params:
             accent = params.pop("accent")
             if "accent_base_color" not in params:
@@ -78,27 +76,15 @@ class FastBaseTemplate(BasicTemplate):
             if "header_background" not in params:
                 params["header_background"] = accent
 
+        user_params = {p for p in params if p in self.param and p != 'name'}
         super().__init__(**params)
-        self.param.update({
-            p: v for p, v in self._design.theme.style.param.values().items()
-            if p != 'name' and p in self.param and p not in params
-        })
-
-    @staticmethod
-    def _get_theme_from_query_args():
-        theme_arg = state.session_args.get("theme", None)
-        if not theme_arg:
-            return
-        theme_arg = theme_arg[0].decode("utf-8")
-        return theme_arg.strip("'").strip('"')
+        self.component_theme_updater.sync_template_params_from_style(
+            self, self._design, override_params=user_params)
 
     def _update_vars(self):
         super()._update_vars()
+        self.component_theme_updater.sync_style_from_template_params(self, self._design)
         style = self._design.theme.style
-        style.param.update({
-            p: getattr(self, p) for p in style.param
-            if p != 'name' and p in self.param
-        })
         self._render_variables["style"] = style
         self._render_variables["theme_toggle"] = self.theme_toggle
         self._render_variables["theme"] = self.theme.__name__[:-5].lower()

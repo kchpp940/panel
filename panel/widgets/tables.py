@@ -29,7 +29,6 @@ from pyviz_comms import JupyterComm
 from ..io.model import JSCode
 from ..io.resources import CDN_DIST, CSS_URLS
 from ..io.state import state
-from ..interaction import TabulatorAdapter
 from ..reactive import Reactive, ReactiveData
 from ..util import (
     clone_model, datetime_as_utctimestamp, isdatetime, lazy_load,
@@ -1402,7 +1401,6 @@ class Tabulator(BaseTable):
         self._on_edit_callbacks = []
         self._on_click_callbacks = {}
         self._old_value = None
-        self._interaction_adapter: TabulatorAdapter | None = None
         super().__init__(value=value, **params)
         self._configuration = configuration
         self.param.watch(self._update_children, self._content_params)
@@ -1415,42 +1413,6 @@ class Tabulator(BaseTable):
         if style is not None:
             self.style._todo = style._todo
         self.param.selection.callable = self._get_selectable
-
-    @property
-    def interaction_adapter(self) -> TabulatorAdapter:
-        if self._interaction_adapter is None:
-            self._interaction_adapter = TabulatorAdapter(self)
-        return self._interaction_adapter
-
-    @property
-    def interaction_store(self):
-        """
-        The per-component event store for standardized interaction
-        events. Subscribe here to consume normalized events from this
-        Tabulator widget independent of the raw Tabulator event
-        protocol.
-        """
-        return self.interaction_adapter.store
-
-    def subscribe_interaction(self, callback, *, kind: str | None = None) -> None:
-        """
-        Register a callback for standardized interaction events.
-
-        Parameters
-        ----------
-        callback : callable
-            Invoked with a ``StandardEvent`` instance.
-        kind : str, optional
-            If provided, only fire on events whose ``.kind`` matches.
-        """
-        self.interaction_store.subscribe(callback, kind=kind)
-
-    def unsubscribe_interaction(self, callback, *, kind: str | None = None) -> None:
-        """
-        Remove a callback previously registered with
-        :meth:`subscribe_interaction`.
-        """
-        self.interaction_store.unsubscribe(callback, kind=kind)
 
     @param.depends('value', watch=True, on_init=True)
     def _apply_max_size(self):
@@ -1512,7 +1474,6 @@ class Tabulator(BaseTable):
         if event.event_name == 'selection-change':
             if self.pagination == 'remote':
                 self._update_selection(event)
-            self.interaction_adapter.handle_event(event, event_name=event.event_name)
             return
 
         event_col = self._renamed_cols.get(event.column, event.column)
@@ -1530,7 +1491,7 @@ class Tabulator(BaseTable):
             else:
                 event.value = self.value.index[event.row]
 
-        # Set the old attribute on a table edit event (before publish so adapter sees it)
+        # Set the old attribute on a table edit event
         if event.event_name == 'table-edit':
             if event.pre:
                 import pandas as pd
@@ -1542,14 +1503,6 @@ class Tabulator(BaseTable):
             else:
                 if self._old_value is not None:
                     event.old = self._old_value[event_col].iloc[event.row]
-
-        # Publish the standardized event AFTER resolving row / column / value / old
-        # so the adapter sees the same resolved data as user callbacks.
-        self.interaction_adapter.handle_event(event, event_name=event.event_name)
-
-        # Fire user callbacks after publishing (preserves original timing)
-        if event.event_name == 'table-edit':
-            if not event.pre:
                 for cb in self._on_edit_callbacks:
                     state.execute(partial(cb, event), schedule=False)
                 self._update_style()

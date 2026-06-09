@@ -12,7 +12,6 @@ import param
 from bokeh.models import ColumnDataSource
 from pyviz_comms import JupyterComm
 
-from ..interaction import InteractionStore, PlotlyAdapter
 from ..util import lazy_load, try_datetime64_to_datetime
 from ..util.checks import datetime_types, isdatetime
 from ..viewable import Layoutable
@@ -119,53 +118,6 @@ class Plotly(ModelPane):
         self._event = None
         self._update_figure()
         self._relayout_data = None
-        self._interaction_adapter: PlotlyAdapter | None = None
-
-    @property
-    def interaction_adapter(self) -> PlotlyAdapter:
-        if self._interaction_adapter is None:
-            self._interaction_adapter = PlotlyAdapter(self)
-        return self._interaction_adapter
-
-    @property
-    def interaction_store(self) -> "InteractionStore":
-        """
-        The per-component event store for standardized interaction
-        events. Subscribe here to consume normalized events from this
-        Plotly pane independent of the raw plotly_event protocol.
-        """
-        return self.interaction_adapter.store
-
-    def subscribe_interaction(
-        self,
-        callback,
-        *,
-        kind: str | None = None,
-    ) -> None:
-        """
-        Register a callback for standardized interaction events.
-
-        Parameters
-        ----------
-        callback : callable
-            Invoked with a :class:`StandardEvent` instance.
-        kind : str, optional
-            If provided, only fire on events whose ``.kind`` matches.
-        """
-        self.interaction_store.subscribe(callback, kind=kind)
-
-    def unsubscribe_interaction(
-        self,
-        callback,
-        *,
-        kind: str | None = None,
-    ) -> None:
-        """
-        Remove a callback previously registered with
-        :meth:`subscribe_interaction`.  ``kind`` must match the value
-        used at subscription time.
-        """
-        self.interaction_store.unsubscribe(callback, kind=kind)
 
     def _to_figure(self, obj):
         import plotly.graph_objs as go
@@ -413,8 +365,6 @@ class Plotly(ModelPane):
         else:
             self.param.update(**{pname: data})
 
-        self.interaction_adapter.handle_event(event, event_name='plotly_event')
-
         if data is None or not hasattr(self.object, '_handler_js2py_pointsCallback'):
             return
 
@@ -440,6 +390,7 @@ class Plotly(ModelPane):
             'ys': [],
         }
 
+        # Add z if present
         has_z = points[0] is not None and 'z' in points[0]
         if has_z:
             points_object['zs'] = []
