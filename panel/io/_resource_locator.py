@@ -204,6 +204,52 @@ class ResourcePaths:
         """Look up a template JS file in ``dist/bundled/<template>/``."""
         return self.bundled_file(template_name.lower(), js_file)
 
+    def read_dist_text(
+        self, *parts: str, encoding: str = 'utf-8', warn: bool = True
+    ) -> str | None:
+        """
+        Read a text file from ``dist/`` if it exists locally.
+
+        Returns the file content as a ``str``, or ``None`` if the file
+        cannot be found.  When ``warn`` is ``True`` a helpful warning
+        (with editable-install recovery hint) is emitted via ``logger``.
+        """
+        path = self.dist_file(*parts)
+        if path is not None:
+            return path.read_text(encoding=encoding)
+        if warn:
+            rel = '/'.join(parts)
+            hint = (
+                "Run `panel build` to populate dist/."
+                if self.install_mode == 'editable'
+                else "Reinstall Panel to restore missing files."
+            )
+            logger.warning(
+                "Cannot inline dist file '%s' (not found under %s). %s",
+                rel, self._dist_dir, hint,
+            )
+        return None
+
+    def read_bundled_text(
+        self, *parts: str, encoding: str = 'utf-8', warn: bool = True
+    ) -> str | None:
+        """Like :meth:`read_dist_text` but relative to ``dist/bundled/``."""
+        path = self.bundled_file(*parts)
+        if path is not None:
+            return path.read_text(encoding=encoding)
+        if warn:
+            rel = '/'.join(parts)
+            hint = (
+                "Run `panel build` to populate dist/."
+                if self.install_mode == 'editable'
+                else "Reinstall Panel to restore missing files."
+            )
+            logger.warning(
+                "Cannot inline bundled file '%s' (not found under %s). %s",
+                rel, self._bundle_dir, hint,
+            )
+        return None
+
 
 # Singleton instance — cheap to construct, safe to share
 _resource_paths = ResourcePaths()
@@ -212,6 +258,30 @@ _resource_paths = ResourcePaths()
 def get_resource_paths() -> ResourcePaths:
     """Return the process-wide :class:`ResourcePaths` singleton."""
     return _resource_paths
+
+
+def read_dist_text(
+    *parts: str, encoding: str = 'utf-8', warn: bool = True
+) -> str | None:
+    """Module-level convenience wrapper for :meth:`ResourcePaths.read_dist_text`."""
+    return _resource_paths.read_dist_text(*parts, encoding=encoding, warn=warn)
+
+
+def read_bundled_text(
+    *parts: str, encoding: str = 'utf-8', warn: bool = True
+) -> str | None:
+    """Module-level convenience wrapper for :meth:`ResourcePaths.read_bundled_text`."""
+    return _resource_paths.read_bundled_text(*parts, encoding=encoding, warn=warn)
+
+
+def dist_file_exists(*parts: str) -> bool:
+    """Return ``True`` if ``dist/<parts>`` exists on disk."""
+    return _resource_paths.dist_file(*parts) is not None
+
+
+def bundled_file_exists(*parts: str) -> bool:
+    """Return ``True`` if ``dist/bundled/<parts>`` exists on disk."""
+    return _resource_paths.bundled_file(*parts) is not None
 
 
 # ---------------------------------------------------------------------------
@@ -644,6 +714,10 @@ __all__ = [
     'InstallMode',
     'LOCAL_DIST',
     'COMPONENT_PATH',
+    'bundled_file_exists',
+    'dist_file_exists',
+    'read_bundled_text',
+    'read_dist_text',
     'ResourceNotFoundError',
     'ResourcePaths',
     'ResolvedKind',

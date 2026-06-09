@@ -45,8 +45,10 @@ from ._resource_locator import (
     add_version_suffix,
     apply_dist_url_to_stylesheet,
     component_resource_url,
+    dist_file_exists,
     get_dist_base_url,
     get_resource_paths,
+    read_dist_text,
     resolve_custom_path as _locator_resolve_custom_path,
     resolve_resource,
     use_cdn_for_resources,
@@ -718,9 +720,15 @@ class Resources(BkResources):
         self.extra_resources(files, '_bundle_css')
         if config.notifications and state.notifications:
             files += state.notifications._stylesheets
-        css_files = self.adjust_paths([
-            css for css in files if self.mode != 'inline' or not is_cdn_url(css)
-        ])
+        if self.mode == 'inline':
+            # In inline mode, keep CDN URLs only for dist files that are
+            # missing locally (those that exist will be inlined in css_raw).
+            css_files = self.adjust_paths([
+                css for css in files
+                if not is_cdn_url(css) or not dist_file_exists(css.replace(CDN_DIST, ''))
+            ])
+        else:
+            css_files = self.adjust_paths(files)
         if config.design:
             css_files += list(config.design._resources.get('font', {}).values())
         for cssf in config.css_files:
@@ -729,27 +737,34 @@ class Resources(BkResources):
             css_files.append(cssf)
         return css_files
 
-    def _inline_read_dist_file(self, relative_path: str) -> str:
-        """Read a file from the dist directory with a helpful error if missing."""
-        paths = get_resource_paths()
-        full_path = paths.dist_file(relative_path)
-        if full_path is None:
-            raise ResourceNotFoundError.dist(relative_path, paths.dist_dir)
-        return full_path.read_text(encoding='utf-8')
+    def _inline_read_dist_file(self, relative_path: str) -> str | None:
+        """
+        Read a dist file for inline mode.  Returns the text content if
+        the file is available locally, or ``None`` (with a helpful
+        warning logged) when the file is missing.  Callers should skip
+        inlining when ``None`` is returned and keep the CDN URL as an
+        external resource instead.
+        """
+        return read_dist_text(relative_path)
 
     @property
     def css_raw(self):
         from ..config import config
         raw = super().css_raw
 
-        # Inline local dist resources
+        # Inline local dist resources — skip files missing locally;
+        # those will be kept as external CDN URLs in css_files.
         css_files = self._collect_external_resources("__css__")
         self.extra_resources(css_files, '__css__')
         if self.mode.lower() not in ('server', 'cdn'):
-            raw += [
-                self._inline_read_dist_file(css.replace(CDN_DIST, ''))
-                for css in css_files if is_cdn_url(css)
-            ]
+            inlined = []
+            for css in css_files:
+                if not is_cdn_url(css):
+                    continue
+                content = self._inline_read_dist_file(css.replace(CDN_DIST, ''))
+                if content is not None:
+                    inlined.append(content)
+            raw += inlined
 
         # Add local CSS files
         for cssf in config.css_files:
@@ -761,12 +776,13 @@ class Resources(BkResources):
 
         # Add loading spinner
         if config.global_loading_spinner:
-            loading_base = self._inline_read_dist_file("css/loading.css").replace(
-                '../assets', self.dist_dir + 'assets'
-            )
-            raw.extend([loading_base, loading_css(
+            loading_base = self._inline_read_dist_file("css/loading.css")
+            if loading_base is not None:
+                loading_base = loading_base.replace('../assets', self.dist_dir + 'assets')
+                raw.append(loading_base)
+            raw.append(loading_css(
                 config.loading_spinner, config.loading_color, config.loading_max_height
-            )])
+            ))
         return raw + process_raw_css(config.raw_css) + process_raw_css(config.global_css)
 
     @property
@@ -784,10 +800,17 @@ class Resources(BkResources):
             )['js'].values()
             files += [res for res in design_js if res not in files]
 
-        # Filter and adjust JS file urls
-        js_files = self.adjust_paths([
-            js for js in files if self.mode != 'inline' or not is_cdn_url(js)
-        ])
+        # Filter and adjust JS file urls — in inline mode, only strip CDN
+        # URLs whose corresponding local dist file is present (those will
+        # be inlined in js_raw).  Keep CDN URLs for files missing locally
+        # so they still load as external resources.
+        if self.mode == 'inline':
+            js_files = self.adjust_paths([
+                js for js in files
+                if not is_cdn_url(js) or not dist_file_exists(js.replace(CDN_DIST, ''))
+            ])
+        else:
+            js_files = self.adjust_paths(files)
 
         # Load requirejs last to avoid interfering with other libraries
         require_index = [i for i, jsf in enumerate(js_files) if 'require' in jsf]
@@ -847,13 +870,15 @@ class Resources(BkResources):
         if not self.mode == 'inline':
             return raw_js
 
-        # Inline local dist resources
+        # Inline local dist resources — skip files missing locally will stay in js_files
         js_files = self._collect_external_resources("__javascript__")
         self.extra_resources(js_files, '__javascript__')
-        raw_js += [
-            self._inline_read_dist_file(js.replace(CDN_DIST, ''))
-            for js in js_files if is_cdn_url(js)
-        ]
+        for js in js_files:
+            if not is_cdn_url(js):
+                continue
+            content = self._inline_read_dist_file(js.replace(CDN_DIST, ''))
+            if content is not None:
+                raw_js.append(content)
 
         # Inline config.js_files
         from ..config import config
@@ -867,10 +892,12 @@ class Resources(BkResources):
             design_js = config.design().resolve_resources(
                 cdn=True, include_theme=False
             )['js'].values()
-            raw_js += [
-                self._inline_read_dist_file(js.replace(CDN_DIST, ''))
-                for js in design_js if is_cdn_url(js)
-            ]
+            for js in design_js:
+                if not is_cdn_url(js):
+                    continue
+                content = self._inline_read_dist_file(js.replace(CDN_DIST, ''))
+                if content is not None:
+                    raw_js.append(content)
         return raw_js
 
     @property
