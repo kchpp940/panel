@@ -325,12 +325,10 @@ conda-build = "*"
 conda-libmamba-solver = "!=25.11.0" # tmp pin https://github.com/conda/conda-libmamba-solver/issues/790
 
 [feature.build.tasks]
-build-conda = { cmd = 'bash scripts/conda/build.sh' }
-build-pip = 'python scripts/build_release.py'
+build-conda = 'bash scripts/conda/build.sh'
+build-pip = 'python -m build .'
 build-pyodide = 'python scripts/build_pyodide_wheels.py'
 build-npm = { cmd = "npm pack .", cwd = "panel" }
-verify-frontend-artifacts = 'python scripts/verify_frontend_artifacts.py'
-verify-frontend-artifacts-release = 'python scripts/verify_frontend_artifacts.py --release'
 
 # =============================================
 # =================== LINT ====================

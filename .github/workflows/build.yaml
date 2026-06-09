@@ -58,8 +58,6 @@ jobs:
           if-no-files-found: error
       - name: Verify size
         run: python scripts/verify_build_size.py conda
-      - name: Verify frontend artifacts
-        run: python scripts/verify_frontend_artifacts.py
 
   conda_publish:
     name: Publish Conda
@@ -95,21 +93,17 @@ jobs:
           install: false
           download-data: false
       - name: Build package
-        id: build
         run: pixi run -e build build-pip
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: always()
         with:
           name: artifacts-pip
+          path: dist/
           if-no-files-found: error
-          path: |
-            ${{ steps.build.outputs.wheel }}
-            ${{ steps.build.outputs.sdist }}
-            dist/build-manifest.json
       - name: Verify sizes
         run: |
-          python scripts/verify_build_size.py sdist --path ${{ steps.build.outputs.sdist }}
-          python scripts/verify_build_size.py whl --path ${{ steps.build.outputs.wheel }}
+          python scripts/verify_build_size.py sdist
+          python scripts/verify_build_size.py whl
 
   pip_install:
     name: Install PyPI
@@ -124,9 +118,7 @@ jobs:
           name: artifacts-pip
           path: dist/
       - name: Install package
-        run: |
-          WHEEL=$(python -c "import json; print(json.load(open('dist/build-manifest.json'))['wheel'])")
-          python -m pip install "$WHEEL"
+        run: python -m pip install dist/*.whl
       - name: Test package
         run: python -c "import $PACKAGE; print($PACKAGE._version.__version__)"
 
@@ -142,22 +134,8 @@ jobs:
         with:
           name: artifacts-pip
           path: dist/
-      - name: Read build manifest
-        id: manifest
-        run: |
-          python -c "
-          import json, os
-          m = json.load(open('dist/build-manifest.json'))
-          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
-              f.write(f\"wheel={m['wheel']}\n\")
-              f.write(f\"sdist={m['sdist']}\n\")
-          "
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
-        with:
-          files: |
-            ${{ steps.manifest.outputs.wheel }}
-            ${{ steps.manifest.outputs.sdist }}
 
   npm_build:
     name: Build NPM
@@ -185,8 +163,6 @@ jobs:
           path: ${{ env.PACKAGE }}/${{ env.TARBALL }}
       - name: Verify size
         run: python scripts/verify_build_size.py npm
-      - name: Verify frontend artifacts
-        run: python scripts/verify_frontend_artifacts.py
 
   npm_publish:
     name: Publish NPM

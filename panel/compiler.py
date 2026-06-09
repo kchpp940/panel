@@ -19,6 +19,7 @@ import requests
 from bokeh.model import Model
 
 from .config import config, panel_extension
+from .io._resource_locator import get_resource_paths
 from .io.resources import RESOURCE_URLS
 from .models.tabulator import TABULATOR_VERSION
 from .reactive import ReactiveHTML
@@ -26,8 +27,9 @@ from .template.base import BasicTemplate
 from .theme import Design
 from .util import _descendents
 
-BASE_DIR = pathlib.Path(__file__).parent
-BUNDLE_DIR = pathlib.Path(__file__).parent / 'dist' / 'bundled'
+_resource_paths = get_resource_paths()
+BASE_DIR = _resource_paths.panel_root
+BUNDLE_DIR = _resource_paths.bundle_dir
 
 
 @cache

@@ -265,69 +265,6 @@ pixi run build-pyodide
 pixi run build-npm
 ```
 
-`pixi run build-pip` is the release-quality Pip build pipeline. It runs five steps in order — none can be skipped:
-
-1. **Clean** — deletes the top-level `dist/` directory so stale wheels/sdists from earlier builds cannot interfere
-2. **Build** — runs `python -m build .` to produce a fresh sdist and wheel
-3. **Locate** — validates that `dist/` contains exactly one `.whl` and exactly one `.tar.gz`; fails immediately if 0 or 2+ of either are found
-4. **Manifest** — writes `dist/build-manifest.json` with the exact paths of the generated artifacts. In CI, also emits them as `$GITHUB_OUTPUT` variables (`wheel`, `wheel_name`, `sdist`, `sdist_name`) for downstream steps. Downstream CI steps and manual release commands should read this manifest instead of globs like `dist/*.whl`.
-5. **Verify** — runs `python scripts/verify_frontend_artifacts.py --release` (see below)
-
-Example manifest:
-
-```json
-{
-  "wheel": "dist/panel-1.5.0-py3-none-any.whl",
-  "wheel_name": "panel-1.5.0-py3-none-any.whl",
-  "sdist": "dist/panel-1.5.0.tar.gz",
-  "sdist_name": "panel-1.5.0.tar.gz"
-}
-```
-
-Reading artifact paths from the manifest:
-
-```bash
-# Install the exact wheel produced by build-pip
-WHEEL=$(python -c "import json; print(json.load(open('dist/build-manifest.json'))['wheel'])")
-python -m pip install "$WHEEL"
-```
-
-### Frontend Artifact Verification
-
-Panel verifies frontend build artifacts in two phases. Both run automatically in CI and must pass before release.
-
-**Release entry point** (runs both phases; `pixi run build-pip` invokes this automatically):
-
-```bash
-pixi run verify-frontend-artifacts-release
-# or equivalently:
-python scripts/verify_frontend_artifacts.py --release
-```
-
-Release mode first runs all source/dist checks, then locates exactly **one** `.whl` file under `dist/` and verifies its contents. Because `build-pip` cleans `dist/` before building, there will always be exactly one freshly-built wheel. Running `--release` standalone fails immediately with a clear message if:
-- `dist/` does not exist
-- zero `.whl` files are found (build didn't complete)
-- two or more `.whl` files are found (ambiguous — leftover from previous builds)
-
-**Phase 1 — Source / Dist checks only** (for conda/npm builds and local iteration):
-
-```bash
-pixi run verify-frontend-artifacts
-```
-
-Checks:
-
-- **TypeScript models** in `panel/models/` have corresponding built JS in `panel/dist/`
-- **CSS files** exist in `panel/dist/css/`
-- **Bundled resources** referenced by Python models/templates (via `__javascript_raw__`, `__css_raw__`, `__tarball__`, `_css`, `_js`, `_resources`) exist in `panel/dist/bundled/`
-- **Source maps** are not orphaned (stale `.map` files without corresponding sources fail)
-- **`package.json`** `main` entry exists and `files` patterns cover dist contents
-- **Python package data** in `pyproject.toml` is present and `panel/dist/` is non-empty
-
-**Phase 2 — Wheel contents check**: checks that every file under `panel/dist/` is present inside the `.whl` (missing resources fail, stale extras warn).
-
-Missing JS/CSS, stale sourcemaps, unpackaged models, references to non-existent frontend modules, or wheel/dist mismatches all cause verification to fail with exit code 1. The `pip_build` and `cdn_build` CI jobs run release mode (both phases) via `pixi run build-pip`; `conda_build` and `npm_build` run Phase 1 only.
-
 ## Continuous Integration
 
 Every push to the `main` branch or any PR branch on GitHub automatically triggers a test build with [GitHub Actions](https://github.com/features/actions).

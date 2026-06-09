@@ -1,11 +1,15 @@
 """
 Patches bokeh resources to make it easy to add external JS and CSS
 resources via the panel.config object.
+
+All low-level resource-path discovery is delegated to
+``panel.io._resource_locator``.  This module keeps the high-level,
+public-facing APIs (``Resources``, ``ResourceComponent``, etc.) and the
+Tornado/Jinja helpers that Panel's server layer depends on.
 """
 from __future__ import annotations
 
 import functools
-import importlib
 import json
 import logging
 import mimetypes
@@ -14,7 +18,6 @@ import pathlib
 import re
 import textwrap
 import typing as t
-import uuid
 
 from contextlib import contextmanager
 from functools import lru_cache
@@ -36,6 +39,19 @@ from markupsafe import Markup
 
 from ..config import config, panel_extension as extension
 from ..util import _descendents, isurl, url_path
+from ._resource_locator import (
+    ResourceNotFoundError,
+    ResolvedResource,
+    add_version_suffix,
+    apply_dist_url_to_stylesheet,
+    component_resource_url,
+    get_dist_base_url,
+    get_resource_paths,
+    resolve_custom_path as _locator_resolve_custom_path,
+    resolve_resource,
+    use_cdn_for_resources,
+    version_suffix as _version_suffix,
+)
 from .state import state
 
 if t.TYPE_CHECKING:
@@ -62,17 +78,20 @@ logger = logging.getLogger(__name__)
 
 ResourceAttr = t.Literal["__css__", "__javascript__"]
 
-with open(Path(__file__).parent.parent / 'package.json') as f:
-    package_json = json.load(f)
-    JS_VERSION = package_json['version'].split('+')[0]
+_resource_paths = get_resource_paths()
+JS_VERSION = _resource_paths.js_version
+PANEL_DIR = _resource_paths.panel_root
+DIST_DIR = _resource_paths.dist_dir
+BUNDLE_DIR = _resource_paths.bundle_dir
+ASSETS_DIR = _resource_paths.assets_dir
+
 
 def get_env():
     ''' Get the correct Jinja2 Environment, also for frozen scripts.
     '''
-    internal_path = Path(__file__).parent / '..' / '_templates'
-    template_path = Path(__file__).parent / '..' / 'template'
     return Environment(loader=FileSystemLoader([
-        str(internal_path.resolve()), str(template_path.resolve())
+        str(_resource_paths.internal_templates_dir.resolve()),
+        str(_resource_paths.templates_dir.resolve()),
     ]))
 
 def conffilter(value):
@@ -97,10 +116,6 @@ def parse_template(*args, **kwargs):
 
 # Handle serving of the panel extension before session is loaded
 RESOURCE_MODE: MODES = 'server'
-PANEL_DIR = Path(__file__).parent.parent
-DIST_DIR = PANEL_DIR / 'dist'
-BUNDLE_DIR = DIST_DIR / 'bundled'
-ASSETS_DIR = PANEL_DIR / 'assets'
 INDEX_TEMPLATE = _env.get_template('convert_index.html')
 BASE_TEMPLATE = _env.get_template('base.html')
 ERROR_TEMPLATE = _env.get_template('error.html')
@@ -112,8 +127,7 @@ CDN_ROOT = config.cdn_root
 CDN_URL = f"{CDN_ROOT}{JS_VERSION}/"
 CDN_DIST = f"{CDN_URL}dist/"
 DOC_DIST = "https://panel.holoviz.org/_static/"
-LOCAL_DIST = "static/extensions/panel/"
-COMPONENT_PATH = "components/"
+from ._resource_locator import LOCAL_DIST, COMPONENT_PATH
 
 BK_PREFIX_RE = re.compile(r'\.bk\.')
 
@@ -190,17 +204,10 @@ def set_resource_mode(mode: MODES | None):
             _settings.resources.set_value(old_resources)  # type: ignore
 
 def use_cdn() -> bool:
-    return _settings.resources(default="server") != 'server' or state._is_pyodide
+    return use_cdn_for_resources()
 
 def get_dist_path(cdn: bool | t.Literal['auto'] = 'auto') -> str:
-    cdn = use_cdn() if cdn == 'auto' else cdn
-    if cdn:
-        dist_path = CDN_DIST
-    elif state.rel_path:
-        dist_path = f'{state.rel_path}/{LOCAL_DIST}'
-    else:
-        dist_path = f'{LOCAL_DIST}'
-    return dist_path
+    return get_dist_base_url(cdn=cdn)
 
 def is_cdn_url(url: str) -> bool:
     return isurl(url) and url.startswith(CDN_DIST)
@@ -223,120 +230,20 @@ def loading_css(loading_spinner: str, color: str, max_height: int):
 def resolve_custom_path(
     obj, path: str | os.PathLike, relative: bool = False
 ) -> Path | None:
-    """
-    Attempts to resolve a path relative to some component.
-
-    Parameters
-    ----------
-    obj: type | object
-       The component to resolve the path relative to.
-    path: str | os.PathLike
-        Absolute or relative path to a resource.
-    relative: bool
-        Whether to return a relative path.
-
-    Returns
-    -------
-    path: pathlib.Path | None
-    """
-    if not path:
-        return None
-    if not isinstance(obj, type):
-        obj = type(obj)
-    try:
-        mod = importlib.import_module(obj.__module__)
-        if mod.__file__ is None:
-            return None
-        module_path = Path(mod.__file__).parent
-        assert module_path.exists()
-    except Exception:
-        return None
-    path = Path(path)
-    if path.is_absolute():
-        abs_path = path
-    else:
-        abs_path = module_path / path
-    try:
-        if not abs_path.is_file():
-            return None
-    except OSError:
-        return None
-    abs_path = Path(os.path.normpath(abs_path.absolute()))
-    if not relative:
-        return abs_path
-    return Path(os.path.relpath(abs_path, module_path))
+    return _locator_resolve_custom_path(obj, path, relative=relative)
 
 def component_resource_path(component, attr: str, path: str | os.PathLike) -> str:
-    """
-    Generates a canonical URL for a component resource.
-
-    To be used in conjunction with the `panel.io.server.ComponentResourceHandler`
-    which allows dynamically resolving resources defined on components.
-    """
-    if not isinstance(component, type):
-        component = type(component)
-    component_path = COMPONENT_PATH
-
-    # Attempt to see if custom resource path is actually
-    # a subpath of an existing bokeh extension
-    is_ext = False
-    for ext, dist_dir in extension_dirs.items():
-        if _is_subpath(path, dist_dir):
-            is_ext = True
-            component_path = f'static/extensions/{ext}'
-            break
-
-    if state.rel_path:
-        component_path = f"{state.rel_path}/{component_path}"
-
-    # If the component path was matched against a registered extension
-    # we can resolve it relative to that path instead of using the custom
-    # resource handler
-    if is_ext:
-        dist_path = str(path).replace(str(dist_dir.absolute()), '').replace(os.path.sep, '/')
-        return f'{component_path}{dist_path}'
-    custom_path = resolve_custom_path(component, path, relative=True)
-    rel_path = os.fspath(custom_path).replace(os.path.sep, '/') if custom_path else path
-    return f'{component_path}{component.__module__}/{component.__name__}/{attr}/{rel_path}'
+    return component_resource_url(component, attr, path)
 
 def patch_stylesheet(stylesheet, dist_url):
-    try:
-        url = stylesheet.url
-    except Exception:
-        return
-    if url.startswith(CDN_DIST+dist_url) and dist_url != CDN_DIST:
-        patched_url = url.replace(CDN_DIST+dist_url, dist_url)
-    elif url.startswith(CDN_DIST) and dist_url != CDN_DIST:
-        patched_url = url.replace(CDN_DIST, dist_url)
-    elif url.startswith(LOCAL_DIST) and dist_url.lstrip('./').startswith(LOCAL_DIST):
-        patched_url = url.replace(LOCAL_DIST, dist_url)
-    elif url.startswith(LOCAL_DIST) and dist_url != LOCAL_DIST:
-        patched_url = url.replace(LOCAL_DIST, dist_url)
-    else:
-        return
-    version_suffix = f'?v={JS_VERSION}'
-    if not patched_url.endswith(version_suffix):
-        patched_url += version_suffix
-    try:
-        stylesheet.url = patched_url
-    except Exception:
-        pass
+    apply_dist_url_to_stylesheet(stylesheet, dist_url)
 
 def _is_file_path(stylesheet: str)->bool:
     return stylesheet.lower().endswith(".css")
 
 def _is_subpath(path: str | os.PathLike, parent: str | os.PathLike) -> bool:
-    """
-    Return True if `path` is located inside `parent` (or equal to it).
-    Both paths are resolved (absolute, symlinks resolved).
-    """
-    path = Path(os.path.normpath(os.path.abspath(path)))
-    parent = Path(os.path.normpath(os.path.abspath(parent)))
-    try:
-        path.relative_to(parent)
-        return True
-    except ValueError:
-        return False
+    from ._resource_locator import _is_subpath as _impl
+    return _impl(path, parent)
 
 def resolve_resource_cdn(resource: str | os.PathLike) -> str | os.PathLike:
     """
@@ -371,8 +278,7 @@ def resolve_stylesheet(cls, stylesheet: str, attribute: str | None = None):
         return stylesheet
     if not state._is_pyodide and state.curdoc and state.curdoc.session_context:
         stylesheet = component_resource_path(cls, attribute, stylesheet)
-        if config.autoreload and '?' not in stylesheet:
-            stylesheet += f'?v={uuid.uuid4().hex}'
+        stylesheet = add_version_suffix(stylesheet)
     else:
         stylesheet = custom_path.read_text(encoding='utf-8')
     return stylesheet
@@ -402,8 +308,7 @@ def patch_model_css(root: Model, dist_url: str):
 def global_css(name: str) -> str:
     if RESOURCE_MODE == 'server':
         return f'static/extensions/panel/css/{name}.css'
-    else:
-        return f'{CDN_DIST}css/{name}.css'
+    return f'{CDN_DIST}css/{name}.css'
 
 def bundled_files(model: Model, file_type: str = 'javascript') -> list[str]:
     name = model.__name__.lower()
@@ -414,7 +319,7 @@ def bundled_files(model: Model, file_type: str = 'javascript') -> list[str]:
             name = cls.__name__.lower()
     bdir = BUNDLE_DIR / name
     shared = list((JS_URLS if file_type == 'javascript' else CSS_URLS).values())
-    files = []
+    files: list[str] = []
     npm_cdn_prefixes = (config.npm_cdn, 'https://cdn.jsdelivr.net/npm', 'https://unpkg.com')
     for url in raw_files:
         if url.startswith(CDN_DIST):
@@ -436,7 +341,11 @@ def bundled_files(model: Model, file_type: str = 'javascript') -> list[str]:
         else:
             prefixed = test_filepath
             test_path = BUNDLE_DIR / test_filepath
-        if test_path.is_file():
+        try:
+            test_ok = test_path.is_file()
+        except OSError:
+            test_ok = False
+        if test_ok:
             if RESOURCE_MODE == 'server':
                 files.append(f'static/extensions/panel/bundled/{prefixed}')
             elif filepath == test_filepath:
@@ -562,38 +471,13 @@ class ResourceComponent:
         resource: str,
         cdn: bool = False
     ) -> str:
-        dist_path = get_dist_path(cdn=cdn)
-        if resource.startswith(CDN_DIST):
-            resource_path = resource.replace(f'{CDN_DIST}bundled/', '')
-        elif resource.startswith(config.npm_cdn):
-            resource_path = resource.replace(config.npm_cdn, '')[1:]
-        elif resource.startswith('http:'):
-            resource_path = url_path(resource)
-        else:
-            resource_path = resource
-
-        if resource_type == 'js_modules' and not (state.rel_path or cdn):
-            prefixed_dist = f'./{dist_path}'
-        else:
-            prefixed_dist = dist_path
-
-        bundlepath = BUNDLE_DIR / resource_path.replace('/', os.path.sep)
-        # Windows may trigger OSError: [WinError 123]
         try:
-            is_file = bundlepath.is_file()
-        except Exception:
-            is_file = False
-        if is_file or (state._is_pyodide and not isurl(resource)):
-            return f'{prefixed_dist}bundled/{resource_path}'
-        elif isurl(resource):
-            return resource
-        elif resolve_custom_path(cls, resource):
-            return component_resource_path(
-                cls, f'_resources/{resource_type}', resource
+            resolved: ResolvedResource = resolve_resource(
+                cls, resource_type, resource, cdn=cdn
             )
-        raise FileNotFoundError(
-            f'Could not resolve resource {resource!r}'
-        )
+        except ResourceNotFoundError:
+            raise FileNotFoundError(f'Could not resolve resource {resource!r}')
+        return resolved.value
 
     def resolve_resources(
         self,
@@ -652,15 +536,14 @@ class ResourceComponent:
                 if resolved_resource:
                     resource_files[rname] = resolved_resource  # type: ignore
 
-        version_suffix = f'?v={JS_VERSION}'
+        vsuffix = _version_suffix()
         dist_path = get_dist_path(cdn=cdn)
         for resource_type, extra_resources in (extras or {}).items():
             resource_files = resource_types[resource_type]  # type: ignore
             for name, res in extra_resources.items():
                 if not cdn:
                     res = res.replace(CDN_DIST, dist_path)
-                    if not res.endswith(version_suffix):
-                        res += version_suffix
+                    res = add_version_suffix(res)
                 resource_files[name] = res
 
         return resource_types
@@ -752,7 +635,6 @@ class Resources(BkResources):
         Computes relative and absolute paths for resources.
         """
         new_resources = []
-        version_suffix = f'?v={JS_VERSION}'
         cdn_base = f'{config.npm_cdn}/@holoviz/panel@{JS_VERSION}/dist/'
         for resource in resources:
             if not isinstance(resource, str):
@@ -772,7 +654,7 @@ class Resources(BkResources):
                 elif self.absolute and self.mode == 'server':
                     resource = f'{self.root_url}{resource}'
             if resource.endswith('.css') and not resource.startswith(('http:', 'https:')):
-                resource += version_suffix
+                resource = add_version_suffix(resource)
             new_resources.append(resource)
         return new_resources
 
@@ -830,6 +712,14 @@ class Resources(BkResources):
             css_files.append(cssf)
         return css_files
 
+    def _inline_read_dist_file(self, relative_path: str) -> str:
+        """Read a file from the dist directory with a helpful error if missing."""
+        paths = get_resource_paths()
+        full_path = paths.dist_file(relative_path)
+        if full_path is None:
+            raise ResourceNotFoundError.dist(relative_path, paths.dist_dir)
+        return full_path.read_text(encoding='utf-8')
+
     @property
     def css_raw(self):
         from ..config import config
@@ -840,7 +730,7 @@ class Resources(BkResources):
         self.extra_resources(css_files, '__css__')
         if self.mode.lower() not in ('server', 'cdn'):
             raw += [
-                (DIST_DIR / css.replace(CDN_DIST, '')).read_text(encoding='utf-8')
+                self._inline_read_dist_file(css.replace(CDN_DIST, ''))
                 for css in css_files if is_cdn_url(css)
             ]
 
@@ -854,7 +744,7 @@ class Resources(BkResources):
 
         # Add loading spinner
         if config.global_loading_spinner:
-            loading_base = (DIST_DIR / "css" / "loading.css").read_text(encoding='utf-8').replace(
+            loading_base = self._inline_read_dist_file("css/loading.css").replace(
                 '../assets', self.dist_dir + 'assets'
             )
             raw.extend([loading_base, loading_css(
@@ -944,7 +834,7 @@ class Resources(BkResources):
         js_files = self._collect_external_resources("__javascript__")
         self.extra_resources(js_files, '__javascript__')
         raw_js += [
-            (DIST_DIR / js.replace(CDN_DIST, '')).read_text(encoding='utf-8')
+            self._inline_read_dist_file(js.replace(CDN_DIST, ''))
             for js in js_files if is_cdn_url(js)
         ]
 
@@ -961,7 +851,7 @@ class Resources(BkResources):
                 cdn=True, include_theme=False
             )['js'].values()
             raw_js += [
-                (DIST_DIR / js.replace(CDN_DIST, '')).read_text(encoding='utf-8')
+                self._inline_read_dist_file(js.replace(CDN_DIST, ''))
                 for js in design_js if is_cdn_url(js)
             ]
         return raw_js

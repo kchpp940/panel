@@ -25,10 +25,16 @@ from ..io.document import init_doc
 from ..io.model import add_to_doc
 from ..io.notebook import render_template
 from ..io.notifications import NotificationArea, NotificationAreaBase
+from ..io._resource_locator import (
+    add_version_suffix,
+    get_dist_base_url,
+    get_resource_paths,
+    resolve_custom_path,
+    use_cdn_for_resources,
+)
 from ..io.resources import (
-    BUNDLE_DIR, CDN_DIST, JS_VERSION, ResourceComponent, _env,
-    component_resource_path, get_dist_path, loading_css, parse_template,
-    resolve_custom_path, use_cdn,
+    CDN_DIST, ResourceComponent, _env,
+    component_resource_path, loading_css, parse_template,
 )
 from ..io.save import save
 from ..io.state import set_curdoc, state
@@ -360,6 +366,7 @@ class BaseTemplate(param.Parameterized, MimeRenderMixin, ServableMixin, Resource
         -------
         Dictionary containing JS and CSS resources.
         """
+        paths = get_resource_paths()
         cls = type(self)
         resource_types = super().resolve_resources(cdn=cdn, extras=extras)
         js_files = resource_types['js']
@@ -369,11 +376,10 @@ class BaseTemplate(param.Parameterized, MimeRenderMixin, ServableMixin, Resource
 
         clsname = cls.__name__
         name = clsname.lower()
-        cdn = use_cdn() if cdn == 'auto' else cdn
-        dist_path = get_dist_path(cdn=cdn)
-        version_suffix = f'?v={JS_VERSION}'
+        cdn = use_cdn_for_resources() if cdn == 'auto' else cdn
+        dist_path = get_dist_base_url(cdn=cdn)
 
-        css_files['loading'] = f'{dist_path}css/loading.css{version_suffix}'
+        css_files['loading'] = add_version_suffix(f'{dist_path}css/loading.css')
         raw_css.extend(list(self.config.raw_css) + [loading_css(
             config.loading_spinner, config.loading_color, config.loading_max_height
         )])
@@ -415,8 +421,11 @@ class BaseTemplate(param.Parameterized, MimeRenderMixin, ServableMixin, Resource
                     tmpl_name = scls.__name__.lower()
 
             css_file = os.path.basename(css)
-            if (BUNDLE_DIR / tmpl_name / css_file).is_file():
-                css_files[f'base_{css_file}'] = f'{dist_path}bundled/{tmpl_name}/{css_file}{version_suffix}'
+            bundled_css = paths.template_css_file(tmpl_name, css_file)
+            if bundled_css is not None:
+                css_files[f'base_{css_file}'] = add_version_suffix(
+                    f'{dist_path}bundled/{tmpl_name}/{css_file}'
+                )
             elif isurl(css):
                 css_files[f'base_{css_file}'] = t.cast("str", css)
             elif resolve_custom_path(self, css):
@@ -437,8 +446,9 @@ class BaseTemplate(param.Parameterized, MimeRenderMixin, ServableMixin, Resource
                 if js in tmpl_js:
                     tmpl_name = cls.__name__.lower()
             js_name = os.path.basename(js)
-            if (BUNDLE_DIR / tmpl_name / js_name).is_file():
-                js_files[f'base_{js_name}'] = dist_path + f'bundled/{tmpl_name}/{js_name}'
+            bundled_js = paths.template_js_file(tmpl_name, js_name)
+            if bundled_js is not None:
+                js_files[f'base_{js_name}'] = f'{dist_path}bundled/{tmpl_name}/{js_name}'
             elif isurl(js):
                 js_files[f'base_{js_name}'] = t.cast("str", js)
             elif resolve_custom_path(self, js):
