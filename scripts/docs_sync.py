@@ -17,6 +17,30 @@ REF_DIR = EXAMPLES_DIR / "reference"
 DIST_DIR = PANEL_DIR / "dist"
 BUNDLE_DIR = DIST_DIR / "bundled"
 
+# Allow importing panel directly from the source tree even before a build/install.
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
+
+# Modules / packages that are genuinely optional extras; failures to import them
+# (or submodules under them) must NOT block the sync checks.
+OPTIONAL_DEPENDENCY_ROOTS: tuple[str, ...] = (
+    "panel.pane.vtk",
+    "panel.chat.langchain",
+)
+
+
+def _is_optional_import_error(exc: Exception, module_name: str) -> bool:
+    """Return True when an import failure is caused by a known optional dependency."""
+    msg = str(exc).lower()
+    if any(root in module_name for root in OPTIONAL_DEPENDENCY_ROOTS):
+        return True
+    # Heuristic: the exception message names a known optional package
+    optional_packages = (
+        "vtk", "pyvista", "langchain", "pyvistaqt", "reacton", "ipyleaflet",
+        "textual", "django", "fastapi", "flask",
+    )
+    return any(pkg in msg for pkg in optional_packages)
+
 GREEN = "\033[0;32m"
 RED = "\033[0;31m"
 YELLOW = "\033[0;33m"
@@ -177,7 +201,14 @@ class ReferencePathChecker(SyncChecker):
 
             try:
                 module = importlib.import_module(module_path)
-            except ImportError:
+            except Exception as exc:
+                if _is_optional_import_error(exc, module_path):
+                    continue
+                self.add_error(
+                    file=section,
+                    kind="ReferencePath",
+                    message=f"Failed to import core module '{module_path}': {exc}",
+                )
                 continue
 
             overrides = REF_NAME_OVERRIDES.get(section_name, {})
@@ -188,8 +219,24 @@ class ReferencePathChecker(SyncChecker):
 
                 if not hasattr(module, component_name):
                     # Also check top-level panel exports
-                    import panel as pn
-                    if not hasattr(pn, component_name):
+                    try:
+                        import panel as pn
+                    except Exception as exc:
+                        if _is_optional_import_error(exc, "panel"):
+                            continue
+                        self.add_error(
+                            file=nb,
+                            kind="ReferencePath",
+                            message=f"Failed to import top-level 'panel' module: {exc}",
+                        )
+                        continue
+                    try:
+                        exported = hasattr(pn, component_name)
+                    except Exception as exc:
+                        if _is_optional_import_error(exc, f"panel.{component_name}"):
+                            continue
+                        raise
+                    if not exported:
                         self.add_error(
                             file=nb,
                             kind="ReferencePath",
@@ -261,29 +308,42 @@ _NON_COMPONENT_ATTRS = {
 }
 
 
-def _resolve_component_class(attr_chain: str) -> type | None:
-    """Resolve a dotted name like 'pn.widgets.Select' to the actual class."""
+def _resolve_component_class(attr_chain: str) -> tuple[type | None, Exception | None]:
+    """Resolve a dotted name like 'pn.widgets.Select' to the actual class.
+
+    Returns ``(cls_or_None, exc_or_None)``. The second element is only populated
+    when a **core** (non-optional) import failed so the caller can surface it.
+    """
     import importlib
 
     parts = attr_chain.split(".")
     if parts[0] != "pn":
-        return None
+        return None, None
     parts[0] = "panel"
+    module_name = ".".join(parts[:-1])
     try:
-        module = importlib.import_module(".".join(parts[:-1]))
-    except Exception:
-        return None
+        module = importlib.import_module(module_name)
+    except Exception as exc:
+        if _is_optional_import_error(exc, module_name):
+            return None, None
+        return None, exc
+    full_name = ".".join(parts)
     try:
         obj = __import__(parts[0], fromlist=parts[1:])
-    except Exception:
-        return None
+    except Exception as exc:
+        if _is_optional_import_error(exc, full_name):
+            return None, None
+        return None, exc
     try:
         for seg in parts[1:]:
             obj = getattr(obj, seg)
         if isinstance(obj, type):
-            return obj
-    except Exception:
-        return None
+            return obj, None
+    except Exception as exc:
+        if _is_optional_import_error(exc, full_name):
+            return None, None
+        return None, exc
+    return None, None
 
 
 class _ComponentInstantiationVisitor(ast.NodeVisitor):
@@ -335,6 +395,9 @@ class GalleryParamChecker(SyncChecker):
         if REF_DIR.is_dir():
             targets.extend(iter_notebooks(REF_DIR))
 
+        # Avoid reporting the same broken core import for every single notebook.
+        reported_core_failures: set[str] = set()
+
         for nb_path in targets:
             try:
                 cells = read_notebook_code_cells(nb_path)
@@ -356,12 +419,37 @@ class GalleryParamChecker(SyncChecker):
                 visitor = _ComponentInstantiationVisitor()
                 visitor.visit(tree)
                 for chain, kwargs, lineno in visitor.calls:
-                    cls = _resolve_component_class(chain)
+                    cls, core_exc = _resolve_component_class(chain)
+                    if core_exc is not None and chain not in reported_core_failures:
+                        reported_core_failures.add(chain)
+                        self.add_error(
+                            file=nb_path,
+                            kind="GalleryParam",
+                            message=(
+                                f"Failed to resolve core component '{chain}': {core_exc}"
+                            ),
+                            line=lineno,
+                            object_name=chain,
+                        )
                     if cls is None:
                         continue
                     try:
                         valid_params = set(cls.param.objects(instance=False).keys())
-                    except Exception:
+                    except Exception as exc:
+                        if _is_optional_import_error(exc, chain):
+                            continue
+                        if chain not in reported_core_failures:
+                            reported_core_failures.add(chain)
+                            self.add_error(
+                                file=nb_path,
+                                kind="GalleryParam",
+                                message=(
+                                    f"Failed to introspect parameters of "
+                                    f"'{chain}': {exc}"
+                                ),
+                                line=lineno,
+                                object_name=chain,
+                            )
                         continue
                     for kw in kwargs:
                         if kw.startswith("_"):
@@ -420,11 +508,25 @@ class PublicImportChecker(SyncChecker):
                 continue
             try:
                 module = importlib.import_module(mod_name)
-            except Exception:
-                # Module not importable in current env (missing deps) — skip, not a sync error
+            except Exception as exc:
+                if _is_optional_import_error(exc, mod_name):
+                    continue
+                self.add_error(
+                    file=mod_path,
+                    kind="PublicImport",
+                    message=f"Failed to import core module '{mod_name}': {exc}",
+                )
                 continue
             for name in all_names:
-                if not hasattr(module, name):
+                # Lazy-exported names (e.g. panel.chat.langchain via __getattr__)
+                # are allowed; only flag names that are definitely absent.
+                try:
+                    present = hasattr(module, name)
+                except Exception as exc:
+                    if _is_optional_import_error(exc, f"{mod_name}.{name}"):
+                        continue
+                    raise
+                if not present:
                     self.add_error(
                         file=mod_path,
                         kind="PublicImport",
@@ -457,41 +559,75 @@ class ComponentSignatureChecker(SyncChecker):
         import importlib
         import inspect
 
-        # Gather all Parameterized subclasses exported from the public modules
-        for mod_name, _ in PUBLIC_MODULES:
+        # Core dependencies — not optional, so any import failure must surface as an error.
+        try:
+            from param import Parameterized
+        except Exception as exc:
+            self.add_error(
+                file=PANEL_DIR / "__init__.py",
+                kind="ComponentSignature",
+                message=f"Failed to import core dependency 'param.Parameterized': {exc}",
+            )
+            return
+        try:
+            from panel.viewable import Layoutable
+        except Exception as exc:
+            self.add_error(
+                file=PANEL_DIR / "viewable.py",
+                kind="ComponentSignature",
+                message=f"Failed to import core class 'panel.viewable.Layoutable': {exc}",
+            )
+            return
+
+        for mod_name, mod_path in PUBLIC_MODULES:
             try:
                 module = importlib.import_module(mod_name)
-            except Exception:
+            except Exception as exc:
+                if _is_optional_import_error(exc, mod_name):
+                    continue
+                self.add_error(
+                    file=mod_path,
+                    kind="ComponentSignature",
+                    message=f"Failed to import core module '{mod_name}': {exc}",
+                )
                 continue
             for attr_name in dir(module):
                 if attr_name.startswith("_"):
                     continue
                 try:
                     obj = getattr(module, attr_name)
-                except Exception:
-                    continue
+                except Exception as exc:
+                    if _is_optional_import_error(exc, f"{mod_name}.{attr_name}"):
+                        continue
+                    raise
                 if not inspect.isclass(obj):
                     continue
-                try:
-                    from param import Parameterized
-                except Exception:
-                    return
                 if not issubclass(obj, Parameterized) or obj is Parameterized:
                     continue
                 try:
                     params = set(obj.param.objects(instance=False).keys())
-                except Exception:
-                    continue
-                # If a class name suggests it should be layoutable, check base params
-                try:
-                    from panel.viewable import Layoutable
-                except Exception:
+                except Exception as exc:
+                    if _is_optional_import_error(exc, f"{mod_name}.{attr_name}"):
+                        continue
+                    self.add_error(
+                        file=Path(inspect.getfile(obj)),
+                        kind="ComponentSignature",
+                        message=(
+                            f"Failed to introspect parameters of "
+                            f"'{mod_name}.{attr_name}': {exc}"
+                        ),
+                        object_name=f"{mod_name}.{attr_name}",
+                    )
                     continue
                 if issubclass(obj, Layoutable):
                     missing = [p for p in REQUIRED_BASE_PARAMS["Layoutable"] if p not in params]
                     if missing:
+                        try:
+                            src_file = Path(inspect.getfile(obj))
+                        except Exception:
+                            src_file = mod_path
                         self.add_error(
-                            file=Path(inspect.getfile(obj)),
+                            file=src_file,
                             kind="ComponentSignature",
                             message=(
                                 f"Class '{mod_name}.{attr_name}' (Layoutable subclass) is "
@@ -506,6 +642,7 @@ class ComponentSignatureChecker(SyncChecker):
 # ---------------------------------------------------------------------------
 
 DOC_STATIC_DIR = DOC_DIR / "_static"
+THEME_CSS_SRC_DIR = PANEL_DIR / "theme" / "css"
 
 
 class ResourceRefChecker(SyncChecker):
@@ -521,6 +658,12 @@ class ResourceRefChecker(SyncChecker):
             for p in DIST_DIR.rglob("*"):
                 if p.is_file():
                     bundled.add(str(p.relative_to(DIST_DIR)))
+        # Theme CSS source files are copied into bundled/theme/ at build time;
+        # accept the source tree as valid even when dist/ hasn't been built yet.
+        if THEME_CSS_SRC_DIR.is_dir():
+            for p in THEME_CSS_SRC_DIR.rglob("*.css"):
+                if p.is_file():
+                    bundled.add("bundled/theme/" + p.name)
         return bundled
 
     def _collect_doc_static_files(self) -> set[str]:
@@ -532,10 +675,17 @@ class ResourceRefChecker(SyncChecker):
         return static_files
 
     def _scan_refs(self) -> list[tuple[Path, int, str, str]]:
-        """Scan markdown and notebooks. Returns (file, line, prefix, rel_path)."""
+        """Scan markdown and notebooks. Returns (file, line, prefix, rel_path).
+
+        The prefix must be preceded by a non-path character (or string start)
+        so that we don't pick up ``_static/`` segments inside full URLs such as
+        ``https://.../docs/_static/...``.
+        """
         import re
         matches: list[tuple[Path, int, str, str]] = []
-        pattern = re.compile(r"(_static|bundled|dist|panel_dist)/([^\s\"'`)\]]+)")
+        pattern = re.compile(
+            r"(?<![A-Za-z0-9/_-])(_static|bundled|dist|panel_dist)/([^\s\"'`)\]]+)"
+        )
         for md_path in iter_markdown(DOC_DIR):
             try:
                 text = md_path.read_text(encoding="utf-8")
@@ -631,12 +781,47 @@ ALL_CHECKERS: list[type[SyncChecker]] = [
     ResourceRefChecker,
 ]
 
+# Checkers that perform purely static analysis and do not need panel's runtime
+# dependencies (param, bokeh, etc.) to work correctly.
+STATIC_ONLY_CHECKERS: frozenset[str] = frozenset({"ResourceRefChecker"})
+
+
+def _probe_core_dependencies() -> Exception | None:
+    """Probe whether the panel runtime core dependencies are importable.
+
+    Returns ``None`` on success or the first import exception on failure.
+    Failure is **not** silent for callers that need these imports.
+    """
+    try:
+        import param  # noqa: F401
+    except Exception as exc:
+        return exc
+    try:
+        import panel  # noqa: F401
+    except Exception as exc:
+        return exc
+    return None
+
 
 def run_checks(verbose: bool = True) -> int:
     all_errors: list[SyncError] = []
+    core_exc = _probe_core_dependencies()
+    runtime_available = core_exc is None
+
+    if not runtime_available and verbose:
+        print(
+            f"{YELLOW}INFO{RESET} Core panel runtime dependencies unavailable "
+            f"(first failure: {core_exc}); only static-analysis checkers will run.",
+            flush=True,
+        )
+
     for cls in ALL_CHECKERS:
-        checker = cls()
         name = cls.__name__
+        if not runtime_available and name not in STATIC_ONLY_CHECKERS:
+            if verbose:
+                print(f"{CYAN}Skipping{RESET} {name} (needs runtime imports).", flush=True)
+            continue
+        checker = cls()
         if verbose:
             print(f"{CYAN}Running{RESET} {name}...", flush=True)
         try:
