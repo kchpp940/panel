@@ -463,6 +463,7 @@ export class DataTabulatorView extends HTMLBoxView {
       configuration, layout, columns, groupby, visible, download,
       children, expanded, cell_styles, hidden_columns, page_size,
       page, max_page, frozen_rows, sorters, theme_classes,
+      active_profile,
     } = this.model.properties
 
     this.on_change([configuration, layout, groupby], debounce(() => {
@@ -528,6 +529,15 @@ export class DataTabulatorView extends HTMLBoxView {
     this.on_change(frozen_rows, () => this.setFrozen())
     this.on_change(sorters, () => this.setSorters())
     this.on_change(theme_classes, () => this.setCSSClasses(this.tabulator.element))
+
+    this.on_change(active_profile, () => {
+      // When Python side switches active profile, apply the new state
+      // by collecting the model properties (already synced by Bokeh)
+      // and applying them to the Tabulator instance.
+      if (!this.cp().isUpdatingProfile()) {
+        this.cp().applyFromModel()
+      }
+    })
 
     this.on_change(this.model.source.properties.data, () => {
       if (this.tabulator === undefined) {
@@ -1406,6 +1416,37 @@ export class DataTabulatorView extends HTMLBoxView {
     if (this.cp().isLocalPagination()) {
       this.setStyles()
     }
+  }
+
+  // ------------------------------------------------------------------
+  // ColumnProfile public API — exposed to Bokeh/JS callers
+  // These dispatch Bokeh ModelEvents to Python; the Python side
+  // handles state updates, which then sync back to the frontend via
+  // the model property watchers above.
+  // ------------------------------------------------------------------
+
+  saveProfile(name?: string): string {
+    return this.cp().saveProfile(name)
+  }
+
+  loadProfile(name: string): void {
+    this.cp().loadProfile(name)
+  }
+
+  deleteProfile(name: string): void {
+    this.cp().deleteProfile(name)
+  }
+
+  switchProfile(name: string | null): void {
+    this.cp().switchProfile(name)
+  }
+
+  listProfileNames(): string[] {
+    return this.cp().listProfileNames()
+  }
+
+  getActiveProfile(): string | null {
+    return this.cp().getActiveProfile()
   }
 
   setSelection(): void {

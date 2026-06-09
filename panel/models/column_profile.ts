@@ -336,7 +336,22 @@ export class ColumnProfile {
     }
   }
 
+  applyColumnWidths(widths: ColumnWidthState[]): void {
+    if (!this.tabulator) {
+      return
+    }
+    for (const w of widths) {
+      const col = this.tabulator.getColumn(w.field)
+      if (col && w.width != null) {
+        col.setWidth(w.width)
+      }
+    }
+  }
+
   applyAll(state: Partial<ColumnProfileState>): void {
+    if (state.column_widths !== undefined) {
+      this.applyColumnWidths(state.column_widths)
+    }
     if (state.hidden_columns !== undefined) {
       this.applyHiddenColumns(state.hidden_columns)
     }
@@ -358,6 +373,17 @@ export class ColumnProfile {
   }
 
   applyFromModel(): void {
+    // If there is an active profile, apply the FULL serialized state
+    // (including column_widths which are not stored as separate model props)
+    const activeProfile = this.getActiveProfile()
+    if (activeProfile != null) {
+      const profileState = this.getProfileState(activeProfile)
+      if (profileState != null) {
+        this.applyAll(profileState)
+        return
+      }
+    }
+    // Otherwise fall back to individual model properties
     this.applyHiddenColumns(this.getHiddenColumns())
     this.applySorters(this.getSorters())
     this.applyFilters(this.getFilters())

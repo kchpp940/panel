@@ -37,7 +37,14 @@ from ..util import (
 from ..util.warnings import warn
 from .base import Widget
 from .button import Button
-from .column_profile import ColumnProfile, ColumnProfileState, SortState, FilterState
+from .column_profile import (
+    ColumnProfile, ColumnProfileState, SortState, FilterState,
+    sort_dataframe as _cp_sort_dataframe,
+    filter_dataframe as _cp_filter_dataframe,
+    get_header_filters as _cp_get_header_filters,
+    compute_max_page as _cp_compute_max_page,
+    get_page_bounds as _cp_get_page_bounds,
+)
 from .input import TextInput
 
 if t.TYPE_CHECKING:
@@ -174,7 +181,6 @@ class BaseTable(ReactiveData, Widget):
         self._filters = []
         self._index_mapping = {}
         self._edited_indexes = []
-        self._column_profile = ColumnProfile()
         super().__init__(value=value, **params)
         self._internal_callbacks.extend([
             self.param.watch(self._setup_on_change, ['editors', 'formatters']),
@@ -451,7 +457,7 @@ class BaseTable(ReactiveData, Widget):
                 self._update_columns(event, model)
 
     def _sort_df(self, df: pd.DataFrame) -> pd.DataFrame:
-        return self._column_profile.sort_dataframe(df, self.sorters)
+        return _cp_sort_dataframe(df, self.sorters, self._renamed_cols)
 
     def _filter_dataframe(
         self,
@@ -474,19 +480,21 @@ class BaseTable(ReactiveData, Widget):
         """
         hf = self.filters if header_filters else []
         int_filters = self._filters if internal_filters else []
-        return self._column_profile.filter_dataframe(
+        return _cp_filter_dataframe(
             df,
             header_filters=hf,
             internal_filters=int_filters,
             header_filters_config=getattr(self, 'header_filters', None),
             edited_indexes=self._edited_indexes if self._edited_indexes else None,
+            indexes=self.indexes,
         )
 
     def _get_header_filters(self, df: pd.DataFrame) -> list[pd.Series | np.ndarray]:
-        return self._column_profile.get_header_filters(
+        return _cp_get_header_filters(
             df,
             self.filters,
             getattr(self, 'header_filters', None),
+            self.indexes,
         )
 
     def add_filter(self, filter: t.Any, column: str | None = None):
@@ -1273,12 +1281,12 @@ class Tabulator(BaseTable):
         self._on_edit_callbacks = []
         self._on_click_callbacks = {}
         self._old_value = None
+        self._column_profile = ColumnProfile()
         super().__init__(value=value, **params)
         self._configuration = configuration
         self.param.watch(self._update_children, self._content_params)
         self.param.watch(self._clear_selection_remote_pagination, 'value')
         self.param.watch(lambda e: self.param.trigger("hidden_columns"), 'show_index')
-        self.param.watch(self._on_active_profile_change, 'active_profile')
         if click_handler:
             self.on_click(click_handler)
         if edit_handler:
@@ -1353,20 +1361,6 @@ class Tabulator(BaseTable):
             self._column_profile.get_page_size(self),
             self.initial_page_size
         )
-
-    def _on_active_profile_change(self, event):
-        """
-        Watcher that applies a profile when ``active_profile`` changes.
-        """
-        name = event.new
-        if name is None:
-            return
-        if name not in self._column_profile.list_profile_names(self):
-            raise ValueError(
-                f"Profile {name!r} not found in profiles. "
-                f"Available: {self._column_profile.list_profile_names(self)}"
-            )
-        self._column_profile.load_profile(self, name)
 
     # ------------------------------------------------------------------
     # ColumnProfile public API
