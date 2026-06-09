@@ -455,7 +455,9 @@ class BaseTable(ReactiveData, Widget):
                 self._update_columns(event, model)
 
     def _sort_df(self, df: pd.DataFrame) -> pd.DataFrame:
-        return self._column_profile.sort_dataframe(df, self.sorters)
+        return self._column_profile.sort_dataframe(
+            df, self._column_profile.get_sorters(self)
+        )
 
     def _filter_dataframe(
         self,
@@ -476,7 +478,7 @@ class BaseTable(ReactiveData, Widget):
         DataFrame
             The filtered DataFrame
         """
-        hf = self.filters if header_filters else []
+        hf = self._column_profile.get_filters(self) if header_filters else []
         int_filters = self._filters if internal_filters else []
         return self._column_profile.filter_dataframe(
             df,
@@ -489,7 +491,7 @@ class BaseTable(ReactiveData, Widget):
     def _get_header_filters(self, df: pd.DataFrame) -> list[pd.Series | np.ndarray]:
         return self._column_profile.get_header_filters(
             df,
-            self.filters,
+            self._column_profile.get_filters(self),
             getattr(self, 'header_filters', None),
         )
 
@@ -1154,6 +1156,17 @@ class Tabulator(BaseTable):
               Pagination is applied remotely, i.e. only the current page
               is loaded from the server.""")  # type: ignore[assignment, ty:invalid-assignment]
 
+    profiles = param.Dict(default={}, nested_refs=True, doc="""
+        Dictionary mapping column profile names to their serialized state.
+        Each profile captures column widths, hidden columns, sorters,
+        filters, groupby, and pagination state.""")
+
+    active_profile = param.String(default=None, allow_None=True, doc="""
+        Name of the currently active column profile. Setting this
+        applies the corresponding profile from the ``profiles`` dict.
+        Can be controlled via the :meth:`save_profile`, :meth:`load_profile`,
+        :meth:`delete_profile`, and :meth:`switch_profile` methods.""")
+
     page = param.Integer(default=1, doc="""
         Currently selected page (indexed starting at 1), if pagination is enabled.""")
 
@@ -1221,7 +1234,8 @@ class Tabulator(BaseTable):
        header title.""")
 
     _data_params: t.ClassVar[list[str]] = [
-        'value', 'page', 'page_size', 'pagination', 'sorters', 'filters'
+        'value', 'page', 'page_size', 'pagination', 'sorters', 'filters',
+        'profiles', 'active_profile'
     ]
 
     _config_params: t.ClassVar[list[str]] = [
@@ -1270,6 +1284,7 @@ class Tabulator(BaseTable):
         self.param.watch(self._update_children, self._content_params)
         self.param.watch(self._clear_selection_remote_pagination, 'value')
         self.param.watch(lambda e: self.param.trigger("hidden_columns"), 'show_index')
+        self.param.watch(self._on_active_profile_change, 'active_profile')
         if click_handler:
             self.on_click(click_handler)
         if edit_handler:
@@ -1289,9 +1304,9 @@ class Tabulator(BaseTable):
             if self.hierarchical:
                 pass
             elif self._MAX_ROW_LIMITS[0] < len(self.value) <= self._MAX_ROW_LIMITS[1]:
-                self.pagination = 'local'
+                self._column_profile.set_pagination_mode(self, 'local')
             elif len(self.value) > self._MAX_ROW_LIMITS[1]:
-                self.pagination = 'remote'
+                self._column_profile.set_pagination_mode(self, 'remote')
         self._explicit_pagination = False
 
     @param.depends('pagination', watch=True)
@@ -1329,8 +1344,80 @@ class Tabulator(BaseTable):
 
     def _get_page_bounds(self) -> tuple[int, int]:
         return self._column_profile.get_page_bounds(
-            self.page, self.page_size, self.initial_page_size
+            self._column_profile.get_page(self),
+            self._column_profile.get_page_size(self),
+            self.initial_page_size
         )
+
+    def _on_active_profile_change(self, event):
+        """
+        Watcher that applies a profile when ``active_profile`` changes.
+        """
+        name = event.new
+        if name is None:
+            return
+        if name not in self._column_profile.list_profile_names(self):
+            raise ValueError(
+                f"Profile {name!r} not found in profiles. "
+                f"Available: {self._column_profile.list_profile_names(self)}"
+            )
+        self._column_profile.load_profile(self, name)
+
+    # ------------------------------------------------------------------
+    # ColumnProfile public API
+    # ------------------------------------------------------------------
+
+    def list_profile_names(self) -> list[str]:
+        """
+        Return the list of saved column profile names.
+        """
+        return self._column_profile.list_profile_names(self)
+
+    def get_profile_state(self, name: str) -> dict[str, t.Any] | None:
+        """
+        Return the raw serialized state of the named profile, or ``None``
+        if the profile does not exist.
+        """
+        return self._column_profile.get_profile_state(self, name)
+
+    def save_profile(self, name: str | None = None) -> str:
+        """
+        Save the current column state (widths, visibility, sorters,
+        filters, groupby, and pagination) as a named profile.
+
+        Parameters
+        ----------
+        name : str, optional
+            Profile name. If ``None`` the currently active profile name is
+            reused; otherwise a default name of ``"profile_{N}"`` is used.
+
+        Returns
+        -------
+        str
+            The name under which the profile was saved.
+        """
+        return self._column_profile.save_profile(self, name)
+
+    def load_profile(self, name: str) -> None:
+        """
+        Apply a previously saved profile, restoring the column widths,
+        visibility, sorters, filters, groupby, and pagination state.
+        """
+        self._column_profile.load_profile(self, name)
+
+    def delete_profile(self, name: str) -> None:
+        """
+        Delete a saved profile. If the deleted profile was the active one
+        then ``active_profile`` is reset to ``None``.
+        """
+        self._column_profile.delete_profile(self, name)
+
+    def switch_profile(self, name: str | None) -> None:
+        """
+        Switch to the named profile, or clear the active profile when
+        ``name`` is ``None``.
+        """
+        self._column_profile.switch_profile(self, name)
 
     def _process_events(self, events: dict[str, t.Any]) -> None:
         if 'expanded' in events:
@@ -1341,12 +1428,12 @@ class Tabulator(BaseTable):
 
     def _process_event(self, event) -> None:
         if event.event_name == 'selection-change':
-            if self.pagination == 'remote':
+            if self._column_profile.is_remote_pagination(self):
                 self._update_selection(event)
             return
 
         event_col = self._renamed_cols.get(event.column, event.column)
-        if self.pagination == 'remote':
+        if self._column_profile.is_remote_pagination(self):
             start, _ = self._get_page_bounds()
             event.row = event.row + start
 
@@ -1415,7 +1502,7 @@ class Tabulator(BaseTable):
 
         import pandas as pd
         df = pd.DataFrame(data)
-        filters = self._get_header_filters(df) if self.pagination == 'remote' else []
+        filters = self._get_header_filters(df) if self._column_profile.is_remote_pagination(self) else []
         if filters:
             mask = filters[0]
             for f in filters:
@@ -1481,7 +1568,7 @@ class Tabulator(BaseTable):
         # Compute offsets (not that multi-indexes are reset so don't require an offset)
         offset = 1 + int(len(self.indexes) == 1)  + int(self.selectable in ('checkbox', 'checkbox-single')) + int(bool(self.row_content))
 
-        if self.pagination == 'remote':
+        if self._column_profile.is_remote_pagination(self):
             start, end = self._get_page_bounds()
 
         # Map column indexes in the data to indexes after frozen_columns are applied
@@ -1513,7 +1600,7 @@ class Tabulator(BaseTable):
 
         styles = {}
         for (r, c), s in styler.ctx.items():
-            if self.pagination == 'remote':
+            if self._column_profile.is_remote_pagination(self):
                 if (r < start or r >= end):
                     continue
                 else:
@@ -1528,7 +1615,7 @@ class Tabulator(BaseTable):
         if self.value is None or self.selectable_rows is None:
             return None
         df = self._processed
-        if self.pagination == 'remote':
+        if self._column_profile.is_remote_pagination(self):
             start, end = self._get_page_bounds()
             df = df.iloc[start:end]
         return self.selectable_rows(df)
@@ -1563,7 +1650,7 @@ class Tabulator(BaseTable):
         if self.row_content is None or self.value is None:
             return {}, [], []
         df = self._processed
-        if self.pagination == 'remote':
+        if self._column_profile.is_remote_pagination(self):
             start, end = self._get_page_bounds()
             df = df.iloc[start:end]
         indexed_children, children = {}, {}
@@ -1637,12 +1724,12 @@ class Tabulator(BaseTable):
 
     @updating
     def _stream(self, stream, rollover=None, follow=True):
-        if self.pagination == 'remote':
+        if self._column_profile.is_remote_pagination(self):
             length = self._length
             max_page = self._column_profile.compute_max_page(
-                length, self.page_size, self.initial_page_size
+                length, self._column_profile.get_page_size(self), self.initial_page_size
             )
-            if self.page != max_page and not follow:
+            if self._column_profile.get_page(self) != max_page and not follow:
                 return
             self._processed, _ = self._get_data()
             return
@@ -1655,22 +1742,23 @@ class Tabulator(BaseTable):
         for ref, (model, _) in self._models.copy().items():
             self._apply_update([], {'follow': follow}, model, ref)
         super().stream(stream_value, rollover, reset_index)
-        if follow and self.pagination:
+        if follow and self._column_profile.has_pagination(self):
             self._update_max_page()
-        if follow and self.pagination:
+        if follow and self._column_profile.has_pagination(self):
             length = self._length
             max_page = self._column_profile.compute_max_page(
-                length, self.page_size, self.initial_page_size
+                length, self._column_profile.get_page_size(self), self.initial_page_size
             )
-            self.page = max_page
+            self._column_profile.set_page(self, max_page)
 
     @updating
     def _patch(self, patch):
-        if self.filters or self._filters or self.sorters:
+        if (self._column_profile.get_filters(self) or self._filters or
+            self._column_profile.get_sorters(self)):
             self._updating = False
             self._update_cds()
             return
-        if self.pagination == 'remote':
+        if self._column_profile.is_remote_pagination(self):
             start, end = self._get_page_bounds()
             filtered = {}
             for c, values in patch.items():
@@ -1691,18 +1779,18 @@ class Tabulator(BaseTable):
         page_events = ('page', 'page_size', 'sorters')
         if self._updating:
             return
-        elif events and all(e.name in page_events for e in events) and self.pagination == 'local':
+        elif events and all(e.name in page_events for e in events) and self._column_profile.is_local_pagination(self):
             return
-        elif events and all(e.name in page_events for e in events) and not self.pagination:
+        elif events and all(e.name in page_events for e in events) and not self._column_profile.has_pagination(self):
             self._processed, _ = self._get_data()
             return
-        elif self.pagination == 'remote':
+        elif self._column_profile.is_remote_pagination(self):
             self._processed = None
         recompute = not all(
             e.name in ('page', 'page_size', 'pagination') for e in events
         )
         super()._update_cds(*events)
-        if self.pagination:
+        if self._column_profile.has_pagination(self):
             self._update_max_page()
         self._update_selected()
         self._update_style(recompute)
@@ -1717,14 +1805,14 @@ class Tabulator(BaseTable):
     def _update_max_page(self):
         length = self._length
         max_page = self._column_profile.compute_max_page(
-            length, self.page_size, self.initial_page_size
+            length, self._column_profile.get_page_size(self), self.initial_page_size
         )
         self.param.page.bounds = (1, max_page)
         for ref, (model, _) in self._models.copy().items():
             self._apply_update([], {'max_page': max_page}, model, ref)
 
     def _clear_selection_remote_pagination(self, event):
-        if not self._updating and self.selection and event.new is not event.old and self.pagination == 'remote':
+        if not self._updating and self.selection and event.new is not event.old and self._column_profile.is_remote_pagination(self):
             self.selection = []
 
     def _update_selected(self, *events: param.parameterized.Event, indices=None):
@@ -1741,7 +1829,7 @@ class Tabulator(BaseTable):
                     indices.append((ind, iloc))
                 except KeyError:
                     continue
-            if self.pagination == 'remote':
+            if self._column_profile.is_remote_pagination(self):
                 start, end = self._get_page_bounds()
                 p_range = self._processed.index[start:end]
                 indices = [iloc - start for ind, iloc in indices
@@ -1771,7 +1859,7 @@ class Tabulator(BaseTable):
             self._processed.loc[index, column] = array
 
     def _map_indexes(self, indexes: list[int], existing: list[int] = [], add: bool = True) -> list[int]:
-        if self.pagination == 'remote':
+        if self._column_profile.is_remote_pagination(self):
             start, _ = self._get_page_bounds()
         else:
             start = 0
@@ -2197,7 +2285,7 @@ class Tabulator(BaseTable):
         sorting are applied.
         """
         df = self._processed
-        if self.pagination == 'remote':
+        if self._column_profile.is_remote_pagination(self):
             return df
         df = self._filter_dataframe(df, header_filters=True, internal_filters=False)
         return self._sort_df(df)

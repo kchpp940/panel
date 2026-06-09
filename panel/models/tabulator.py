@@ -161,6 +161,10 @@ class DataTabulator(HTMLBox):
 
     max_page = Int()
 
+    profiles = Dict(String, Any)
+
+    active_profile = Nullable(String)
+
     sorters = List(Dict(String, String))
 
     select_mode = Any()

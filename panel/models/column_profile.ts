@@ -42,6 +42,9 @@ export interface TabulatorModelLike {
   page: number
   page_size: number | null
   pagination: string | null
+  max_page: number
+  profiles: {[key: string]: any}
+  active_profile: string | null
 }
 
 export class ColumnProfile {
@@ -50,6 +53,7 @@ export class ColumnProfile {
   private _updating_sort: boolean = false
   private _updating_page: boolean = false
   private _updating_page_size: boolean = false
+  private _updating_profile: boolean = false
 
   constructor(tabulator: any, model: TabulatorModelLike) {
     this.tabulator = tabulator
@@ -59,6 +63,104 @@ export class ColumnProfile {
   updateTabulator(tabulator: any): void {
     this.tabulator = tabulator
   }
+
+  // --- Unified Model Read Accessors ---
+
+  getHiddenColumns(): string[] {
+    return [...this.model.hidden_columns]
+  }
+
+  getSorters(): SortState[] {
+    return [...this.model.sorters]
+  }
+
+  getFilters(): FilterState[] {
+    return [...this.model.filters]
+  }
+
+  getGroupBy(): string[] {
+    return [...this.model.groupby]
+  }
+
+  getPage(): number {
+    return this.model.page
+  }
+
+  getPageSize(): number | null {
+    return this.model.page_size
+  }
+
+  getPaginationMode(): string | null {
+    return this.model.pagination
+  }
+
+  isRemotePagination(): boolean {
+    return this.model.pagination === "remote"
+  }
+
+  isLocalPagination(): boolean {
+    return this.model.pagination === "local"
+  }
+
+  hasPagination(): boolean {
+    return this.model.pagination != null
+  }
+
+  getMaxPage(): number {
+    return this.model.max_page
+  }
+
+  getProfiles(): {[key: string]: any} {
+    return {...this.model.profiles}
+  }
+
+  getActiveProfile(): string | null {
+    return this.model.active_profile
+  }
+
+  // --- Unified Model Write Accessors ---
+
+  setHiddenColumns(hidden: string[]): void {
+    this.model.hidden_columns = [...hidden]
+  }
+
+  setSorters(sorters: SortState[]): void {
+    this.model.sorters = [...sorters]
+  }
+
+  setFilters(filters: FilterState[]): void {
+    this.model.filters = [...filters]
+  }
+
+  setGroupBy(groupby: string[]): void {
+    this.model.groupby = [...groupby]
+  }
+
+  setPage(page: number): void {
+    this.model.page = page
+  }
+
+  setPageSize(pageSize: number | null): void {
+    this.model.page_size = pageSize
+  }
+
+  setPaginationMode(mode: string | null): void {
+    this.model.pagination = mode
+  }
+
+  setMaxPage(maxPage: number): void {
+    this.model.max_page = maxPage
+  }
+
+  setProfiles(profiles: {[key: string]: any}): void {
+    this.model.profiles = {...profiles}
+  }
+
+  setActiveProfile(name: string | null): void {
+    this.model.active_profile = name
+  }
+
+  // --- State Collection from Tabulator ---
 
   collectColumnWidths(): ColumnWidthState[] {
     const widths: ColumnWidthState[] = []
@@ -117,14 +219,14 @@ export class ColumnProfile {
   }
 
   collectGroupBy(): string[] {
-    return [...this.model.groupby]
+    return this.getGroupBy()
   }
 
   collectPagination(): PaginationState {
     return {
-      page: this.model.page,
-      page_size: this.model.page_size,
-      pagination: (this.model.pagination as PaginationState["pagination"]) ?? null,
+      page: this.getPage(),
+      page_size: this.getPageSize(),
+      pagination: (this.getPaginationMode() as PaginationState["pagination"]) ?? null,
     }
   }
 
@@ -138,6 +240,8 @@ export class ColumnProfile {
       pagination: this.collectPagination(),
     }
   }
+
+  // --- State Application to Tabulator ---
 
   applyHiddenColumns(hidden: string[]): void {
     if (!this.tabulator) {
@@ -205,10 +309,18 @@ export class ColumnProfile {
     if (!this.tabulator) {
       return
     }
-    if (!this._updating_page_size) {
-    }
     if (pageSize != null) {
       this.tabulator.setPageSize(pageSize)
+    }
+  }
+
+  applyMaxPage(maxPage: number): void {
+    if (!this.tabulator) {
+      return
+    }
+    this.tabulator.setMaxPage(maxPage)
+    if (this.tabulator.modules.page.pagesElement) {
+      this.tabulator.modules.page._setPageButtons()
     }
   }
 
@@ -233,6 +345,20 @@ export class ColumnProfile {
     }
   }
 
+  applyFromModel(): void {
+    this.applyHiddenColumns(this.getHiddenColumns())
+    this.applySorters(this.getSorters())
+    this.applyFilters(this.getFilters())
+    this.applyGroupBy(this.getGroupBy())
+    if (this.hasPagination()) {
+      this.applyPage(Math.min(this.getMaxPage(), this.getPage()))
+      this.applyPageSize(this.getPageSize())
+      this.applyMaxPage(this.getMaxPage())
+    }
+  }
+
+  // --- Sync: Tabulator -> Model ---
+
   syncFromTabulatorToModel(updatingFlags?: {
     sort?: boolean
     page?: boolean
@@ -248,9 +374,9 @@ export class ColumnProfile {
       this._updating_page_size = updatingFlags.page_size
     }
     try {
-      this.model.hidden_columns = this.collectHiddenColumns()
-      this.model.sorters = this.collectSorters()
-      this.model.filters = this.collectFilters()
+      this.setHiddenColumns(this.collectHiddenColumns())
+      this.setSorters(this.collectSorters())
+      this.setFilters(this.collectFilters())
     } finally {
       this._updating_sort = false
       this._updating_page = false
@@ -259,12 +385,12 @@ export class ColumnProfile {
   }
 
   syncSortersFromTabulatorToModel(): void {
-    if (!this.tabulator) {
+    if (!this.tabulator || this.isRemotePagination()) {
       return
     }
     this._updating_sort = true
     try {
-      this.model.sorters = this.collectSorters()
+      this.setSorters(this.collectSorters())
     } finally {
       this._updating_sort = false
     }
@@ -274,14 +400,14 @@ export class ColumnProfile {
     if (!this.tabulator) {
       return
     }
-    this.model.filters = this.collectFilters()
+    this.setFilters(this.collectFilters())
   }
 
   syncPageFromTabulatorToModel(pageno: number): void {
-    if (this.model.pagination === "local" && this.model.page !== pageno && !this._updating_page) {
+    if (this.isLocalPagination() && this.getPage() !== pageno && !this._updating_page) {
       this._updating_page = true
       try {
-        this.model.page = pageno
+        this.setPage(pageno)
       } finally {
         this._updating_page = false
       }
@@ -298,8 +424,8 @@ export class ColumnProfile {
           sorts.push({field: s.field, dir: s.dir})
         }
       }
-      this.model.sorters = sorts
-      this.model.page = page || 1
+      this.setSorters(sorts)
+      this.setPage(page || 1)
     } finally {
       this._updating_sort = false
       this._updating_page = false
@@ -309,11 +435,13 @@ export class ColumnProfile {
   syncPageSizeToModel(pageSize: number): void {
     this._updating_page_size = true
     try {
-      this.model.page_size = Math.max(pageSize || 1, 1)
+      this.setPageSize(Math.max(pageSize || 1, 1))
     } finally {
       this._updating_page_size = false
     }
   }
+
+  // --- Update Guard Flags ---
 
   isUpdatingSort(): boolean {
     return this._updating_sort
@@ -327,17 +455,185 @@ export class ColumnProfile {
     return this._updating_page_size
   }
 
+  isUpdatingProfile(): boolean {
+    return this._updating_profile
+  }
+
+  // --- Profile Lifecycle Management ---
+
+  listProfileNames(): string[] {
+    return Object.keys(this.getProfiles())
+  }
+
+  getProfileState(name: string): ColumnProfileState | null {
+    const profiles = this.getProfiles()
+    const data = profiles[name]
+    if (!data) {
+      return null
+    }
+    try {
+      return this.deserializeProfile(data)
+    } catch {
+      return null
+    }
+  }
+
+  saveProfile(name?: string): string {
+    if (this._updating_profile) {
+      return name ?? this.getActiveProfile() ?? ""
+    }
+    this._updating_profile = true
+    try {
+      if (name == null) {
+        const active = this.getActiveProfile()
+        if (active != null) {
+          name = active
+        } else {
+          const existing = new Set(this.listProfileNames())
+          let i = 0
+          while (existing.has(`profile_${i}`)) {
+            i += 1
+          }
+          name = `profile_${i}`
+        }
+      }
+      const state = this.collectAll()
+      const profiles = this.getProfiles()
+      profiles[name] = this.serializeProfile(state)
+      this.setProfiles(profiles)
+      this.setActiveProfile(name)
+      return name
+    } finally {
+      this._updating_profile = false
+    }
+  }
+
+  loadProfile(name: string): ColumnProfileState | null {
+    const state = this.getProfileState(name)
+    if (!state) {
+      return null
+    }
+    if (this._updating_profile) {
+      return state
+    }
+    this._updating_profile = true
+    try {
+      this._updating_sort = true
+      this._updating_page = true
+      this._updating_page_size = true
+      try {
+        this.setHiddenColumns(state.hidden_columns)
+        this.setSorters(state.sorters)
+        this.setFilters(state.filters)
+        this.setGroupBy(state.groupby)
+        this.setPage(state.pagination.page)
+        this.setPageSize(state.pagination.page_size)
+        this.setActiveProfile(name)
+      } finally {
+        this._updating_sort = false
+        this._updating_page = false
+        this._updating_page_size = false
+      }
+      this.applyAll(state)
+      return state
+    } finally {
+      this._updating_profile = false
+    }
+  }
+
+  deleteProfile(name: string): boolean {
+    const profiles = this.getProfiles()
+    if (!(name in profiles)) {
+      return false
+    }
+    this._updating_profile = true
+    try {
+      delete profiles[name]
+      this.setProfiles(profiles)
+      if (this.getActiveProfile() === name) {
+        this.setActiveProfile(null)
+      }
+      return true
+    } finally {
+      this._updating_profile = false
+    }
+  }
+
+  switchProfile(name: string | null): ColumnProfileState | null {
+    if (name === null) {
+      this._updating_profile = true
+      try {
+        this.setActiveProfile(null)
+      } finally {
+        this._updating_profile = false
+      }
+      return null
+    }
+    return this.loadProfile(name)
+  }
+
+  serializeProfile(state: ColumnProfileState): any {
+    return {
+      column_widths: state.column_widths,
+      hidden_columns: state.hidden_columns,
+      sorters: state.sorters,
+      filters: state.filters,
+      groupby: state.groupby,
+      pagination: state.pagination,
+    }
+  }
+
+  deserializeProfile(data: any): ColumnProfileState {
+    return {
+      column_widths: (data.column_widths ?? []).map((cw: any) => ({
+        field: cw.field,
+        width: cw.width ?? null,
+      })),
+      hidden_columns: [...(data.hidden_columns ?? [])],
+      sorters: (data.sorters ?? []).map((s: any) => ({
+        field: s.field ?? s.column ?? "",
+        dir: s.dir ?? "asc",
+      })),
+      filters: (data.filters ?? []).map((f: any) => ({
+        field: f.field ?? "",
+        type: f.type ?? "",
+        value: f.value,
+      })),
+      groupby: [...(data.groupby ?? [])],
+      pagination: {
+        page: data.pagination?.page ?? 1,
+        page_size: data.pagination?.page_size ?? null,
+        pagination: data.pagination?.pagination ?? null,
+      },
+    }
+  }
+
+  // --- Formatted Accessors ---
+
   getFormattedSorters(): any[] {
     const sorters: any[] = []
-    if (this.model.sorters.length > 0) {
+    const modelSorters = this.getSorters()
+    if (modelSorters.length > 0) {
       sorters.push({column: "_index", dir: "asc"})
     }
-    for (const sort of [...this.model.sorters].reverse()) {
+    for (const sort of [...modelSorters].reverse()) {
       sorters.push({
         column: (sort as any).column ?? sort.field,
         dir: sort.dir,
       })
     }
     return sorters
+  }
+
+  getGroupByFunction(): boolean | ((data: any) => string) {
+    const groupby = this.getGroupBy()
+    const groupFn = (data: any) => {
+      const groups: string[] = []
+      for (const g of groupby) {
+        groups.push(`${g}: ${data[g]}`)
+      }
+      return groups.join(", ")
+    }
+    return (groupby.length > 0) ? groupFn : false
   }
 }
