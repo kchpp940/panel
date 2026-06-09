@@ -269,7 +269,20 @@ pixi run build-npm
 
 Panel verifies frontend build artifacts in two phases. Both run automatically in CI and must pass before release.
 
-**Phase 1 — Source / Dist checks** (always run):
+**Release entry point** (runs both phases, this is what `pixi run build-pip` and CI use):
+
+```bash
+pixi run verify-frontend-artifacts-release
+# or equivalently:
+python scripts/verify_frontend_artifacts.py --release
+```
+
+Release mode first runs all source/dist checks, then locates exactly **one** `.whl` file under `dist/` and verifies its contents. It fails immediately with a clear message if:
+- `dist/` does not exist
+- zero `.whl` files are found (build didn't complete)
+- two or more `.whl` files are found (ambiguous — clean `dist/` and rebuild)
+
+**Phase 1 — Source / Dist checks only** (for conda/npm builds and local iteration):
 
 ```bash
 pixi run verify-frontend-artifacts
@@ -284,15 +297,9 @@ Checks:
 - **`package.json`** `main` entry exists and `files` patterns cover dist contents
 - **Python package data** in `pyproject.toml` is present and `panel/dist/` is non-empty
 
-**Phase 2 — Wheel contents check** (release mode, requires built wheel):
+**Phase 2 — Wheel contents check**: checks that every file under `panel/dist/` is present inside the `.whl` (missing resources fail, stale extras warn).
 
-```bash
-python scripts/verify_frontend_artifacts.py --wheel dist/panel-X.Y.Z-py3-none-any.whl
-```
-
-Checks that every file under `panel/dist/` is present inside the `.whl` (missing resources fail, stale extras warn). Missing wheel path or non-existent wheel file causes immediate failure.
-
-Missing JS/CSS, stale sourcemaps, unpackaged models, references to non-existent frontend modules, or wheel/dist mismatches all cause verification to fail with exit code 1. The CI `pip_build` and `cdn_build` jobs run both phases; `conda_build` and `npm_build` run Phase 1 only.
+Missing JS/CSS, stale sourcemaps, unpackaged models, references to non-existent frontend modules, or wheel/dist mismatches all cause verification to fail with exit code 1. The `pip_build` and `cdn_build` CI jobs run release mode (both phases) via `pixi run build-pip`; `conda_build` and `npm_build` run Phase 1 only.
 
 ## Continuous Integration
 

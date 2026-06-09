@@ -361,6 +361,32 @@ def run_wheel_check(wheel_path: Path) -> list[str]:
     return errors
 
 
+def find_unique_wheel() -> tuple[Path | None, list[str]]:
+    """Locate exactly one wheel in dist/. Returns (wheel_path, errors).
+
+    Fails if 0 or 2+ wheels are present, preventing ambiguous release verification.
+    """
+    errors: list[str] = []
+    dist_root = ROOT / "dist"
+    if not dist_root.exists():
+        errors.append(f"dist/ directory not found at {dist_root}")
+        return None, errors
+
+    wheels = sorted(dist_root.glob("*.whl"))
+    if len(wheels) == 0:
+        errors.append("No .whl files found in dist/ — build must complete before release verification")
+        return None, errors
+    if len(wheels) > 1:
+        names = ", ".join(w.name for w in wheels)
+        errors.append(
+            f"Multiple .whl files found in dist/ ({len(wheels)}): {names} "
+            "— clean dist/ and rebuild to avoid ambiguous verification"
+        )
+        return None, errors
+
+    return wheels[0], errors
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Verify Panel frontend build artifacts are consistent."
@@ -369,22 +395,44 @@ def main() -> int:
         "--wheel",
         type=Path,
         default=None,
-        help="Path to the built .whl file. If provided, also verifies wheel contents (release mode).",
+        help="Path to the built .whl file. If provided, also verifies wheel contents.",
+    )
+    parser.add_argument(
+        "--release",
+        action="store_true",
+        default=False,
+        help="Release-mode verification: run source/dist checks, then locate exactly one wheel "
+             "in dist/ and verify its contents. Fails if 0 or 2+ wheels are found.",
     )
     args = parser.parse_args()
 
+    if args.release and args.wheel:
+        print(f"{RED}ERROR{RESET}: --release and --wheel are mutually exclusive. "
+              "Use --release for auto-detection, or --wheel <path> for an explicit path.")
+        return 1
+
     print("=" * 70)
-    if args.wheel:
-        print(f"Panel Frontend Artifact Verification (RELEASE MODE)")
-        print(f"Wheel: {args.wheel}")
-    else:
-        print("Panel Frontend Artifact Verification (SOURCE/DIST ONLY)")
+    wheel_path: Path | None = None
+    mode_label = "SOURCE/DIST ONLY"
+    find_errors: list[str] = []
+
+    if args.release:
+        mode_label = "RELEASE (auto-locate wheel in dist/)"
+        wheel_path, find_errors = find_unique_wheel()
+        if wheel_path is not None:
+            mode_label = f"RELEASE (wheel: {wheel_path.name})"
+    elif args.wheel:
+        wheel_path = args.wheel
+        mode_label = f"WHEEL (explicit path: {wheel_path})"
+
+    print(f"Panel Frontend Artifact Verification — {mode_label}")
     print("=" * 70)
 
     errors = run_source_and_dist_checks()
+    errors.extend(find_errors)
 
-    if args.wheel:
-        wheel_errors = run_wheel_check(args.wheel)
+    if wheel_path is not None and not find_errors:
+        wheel_errors = run_wheel_check(wheel_path)
         errors.extend(wheel_errors)
 
     print("\n" + "=" * 70)
@@ -394,7 +442,7 @@ def main() -> int:
             print(f"  - {e}")
         return 1
     else:
-        if args.wheel:
+        if wheel_path is not None:
             _print_ok("All source/dist and wheel checks passed!")
         else:
             _print_ok("All source/dist checks passed! (wheel not checked)")
