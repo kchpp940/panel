@@ -11,6 +11,7 @@ import param
 from bokeh.models import ColumnDataSource
 from pyviz_comms import JupyterComm
 
+from ..interaction import VegaAdapter
 from ..util import lazy_load
 from .base import ModelPane
 from .image import PDF, SVG, Image
@@ -238,6 +239,13 @@ class Vega(ModelPane):
         super().__init__(object, **params)
         self.param.watch(self._update_selections, ['object'])
         self._update_selections()
+        self._interaction_adapter: VegaAdapter | None = None
+
+    @property
+    def interaction_adapter(self) -> VegaAdapter:
+        if self._interaction_adapter is None:
+            self._interaction_adapter = VegaAdapter(self)
+        return self._interaction_adapter
 
     @property
     def _selections(self):
@@ -412,6 +420,11 @@ class Vega(ModelPane):
         if stype != 'interval':
             value = list(value)
         self.selection.param.update(**{name: value})
+
+        try:
+            self.interaction_adapter(event, event_name='vega_event')
+        except Exception:
+            pass
 
     def _process_param_change(self, params):
         props = super()._process_param_change(params)

@@ -11,6 +11,7 @@ from bokeh.core.serialization import Serializer
 from bokeh.models import CustomJS
 from pyviz_comms import JupyterComm
 
+from ..interaction import EChartsAdapter
 from ..util import lazy_load
 from ..viewable import Viewable
 from .base import ModelPane
@@ -64,6 +65,13 @@ class ECharts(ModelPane):
         super().__init__(object, **params)
         self._py_callbacks = defaultdict(lambda: defaultdict(list))
         self._js_callbacks = defaultdict(list)
+        self._interaction_adapter: EChartsAdapter | None = None
+
+    @property
+    def interaction_adapter(self) -> EChartsAdapter:
+        if self._interaction_adapter is None:
+            self._interaction_adapter = EChartsAdapter(self)
+        return self._interaction_adapter
 
     @classmethod
     def applies(cls, object: t.Any, **params) -> float | bool | None:
@@ -81,6 +89,11 @@ class ECharts(ModelPane):
         return False
 
     def _process_event(self, event):
+        try:
+            self.interaction_adapter(event, event_name='echarts_event')
+        except Exception:
+            pass
+
         callbacks = self._py_callbacks.get(event.type, {})
         for cb in callbacks.get(None, []):
             cb(event)

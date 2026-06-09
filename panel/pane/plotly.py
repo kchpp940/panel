@@ -12,6 +12,7 @@ import param
 from bokeh.models import ColumnDataSource
 from pyviz_comms import JupyterComm
 
+from ..interaction import PlotlyAdapter
 from ..util import lazy_load, try_datetime64_to_datetime
 from ..util.checks import datetime_types, isdatetime
 from ..viewable import Layoutable
@@ -118,6 +119,13 @@ class Plotly(ModelPane):
         self._event = None
         self._update_figure()
         self._relayout_data = None
+        self._interaction_adapter: PlotlyAdapter | None = None
+
+    @property
+    def interaction_adapter(self) -> PlotlyAdapter:
+        if self._interaction_adapter is None:
+            self._interaction_adapter = PlotlyAdapter(self)
+        return self._interaction_adapter
 
     def _to_figure(self, obj):
         import plotly.graph_objs as go
@@ -364,6 +372,11 @@ class Plotly(ModelPane):
             self.param.trigger(pname)
         else:
             self.param.update(**{pname: data})
+
+        try:
+            self.interaction_adapter(event, event_name='plotly_event')
+        except Exception:
+            pass
 
         if data is None or not hasattr(self.object, '_handler_js2py_pointsCallback'):
             return
