@@ -1,14 +1,18 @@
 """Tests for the session cleanup handler registry (panel.io.cleanup).
 
 Covers:
-* All default handlers are registered with correct names and priorities
-  when ``register_default_handlers()`` is called on a clean registry,
-  regardless of prior import state.
-* Every resource module exposes ``register_session_cleanup_handlers(registry)``
-  and registers the handlers it owns.
+* All default handlers (including the autoreload no-op sentinel) are
+  registered with correct names and priorities when
+  ``register_default_handlers()`` is called on a clean registry.
+* Every resource module (state / reload / callbacks / location /
+  notifications / browser / template.base) exposes
+  ``register_session_cleanup_handlers(registry)``.
 * ``CleanupResult`` captures handler name and exception object for every
   failure, and subsequent handlers continue to execute after a failure.
 * ``raise_if_any()`` aggregates failures into a single ``RuntimeError``.
+* ``state._destroy_session()`` returns a ``CleanupResult`` whose
+  ``executed`` list matches the declared priority order and whose
+  ``failures`` list faithfully reflects any raised exceptions.
 * Registry operations (register / unregister / replace / idempotency).
 """
 from __future__ import annotations
@@ -18,8 +22,11 @@ import typing as t
 import pytest
 
 
+# Expected (name, priority) pairs for every default handler, in the
+# ascending priority order the registry must execute them in.
 _EXPECTED_DEFAULT_HANDLERS: t.List[t.Tuple[str, int]] = [
     ("session_info", 10),
+    ("autoreload", 15),       # no-op sentinel — explicitly audited
     ("periodic_callbacks", 20),
     ("locations", 30),
     ("notifications", 40),
@@ -29,14 +36,15 @@ _EXPECTED_DEFAULT_HANDLERS: t.List[t.Tuple[str, int]] = [
     ("document_state", 80),
 ]
 
-# Every module that owns session-scoped state must expose this hook,
-# which is called by register_default_handlers() in cleanup.py.
+# Every module that owns (or explicitly disclaims) session-scoped state
+# must expose ``register_session_cleanup_handlers(registry)``.
 _OWNER_MODULES = [
+    "panel.io.state",
+    "panel.io.reload",        # autoreload — explicitly declares no-op
     "panel.io.callbacks",
     "panel.io.location",
     "panel.io.notifications",
     "panel.io.browser",
-    "panel.io.state",
     "panel.template.base",
 ]
 
@@ -87,9 +95,9 @@ class TestDefaultHandlersRegistration:
 
     @pytest.mark.parametrize("modpath", _OWNER_MODULES)
     def test_every_resource_module_exposes_registration_hook(self, modpath):
-        """Each module that owns session-scoped state must expose a
-        ``register_session_cleanup_handlers(registry)`` function so
-        that it can declare its own cleanup logic."""
+        """Each module that owns (or disclaims) session-scoped state must
+        expose a ``register_session_cleanup_handlers(registry)`` function
+        so that it can declare its own cleanup logic."""
         import importlib
 
         module = importlib.import_module(modpath)
@@ -99,6 +107,29 @@ class TestDefaultHandlersRegistration:
         assert callable(module.register_session_cleanup_handlers), (
             f"{modpath}.register_session_cleanup_handlers must be callable"
         )
+
+    def test_autoreload_handler_is_registered_as_noop_sentinel(self):
+        """The autoreload handler is registered even though it performs
+        no work per session, so that its lifecycle is explicitly audited
+        rather than being silently omitted."""
+        from panel.io.cleanup import register_default_handlers, session_cleanup_registry
+
+        register_default_handlers()
+
+        names = [h.name for h in session_cleanup_registry.handlers]
+        assert "autoreload" in names, (
+            "autoreload must be an explicitly registered cleanup handler"
+        )
+
+        # Find the handler and invoke it — it must be a safe no-op that
+        # raises no exception.
+        autoreload_handler = next(
+            h for h in session_cleanup_registry.handlers if h.name == "autoreload"
+        )
+        assert autoreload_handler.priority == 15
+        # Should not raise for any session_context (including None / mock).
+        autoreload_handler.func(None)
+        autoreload_handler.func(object())
 
     def test_destroy_session_triggers_registration_implicitly(self):
         """state._destroy_session() lazily calls register_default_handlers()
@@ -130,7 +161,114 @@ class TestDefaultHandlersRegistration:
 
 
 # ---------------------------------------------------------------------------
-# 2. Failure details and continue-after-failure
+# 2. _destroy_session() end-to-end: execution order and failure details
+# ---------------------------------------------------------------------------
+
+class TestDestroySessionEndToEnd:
+    """state._destroy_session() returns a CleanupResult with the right
+    ``executed`` order and faithfully reports any failures."""
+
+    @pytest.fixture(autouse=True)
+    def _reset(self):
+        _reset_registry()
+        yield
+        _reset_registry()
+
+    def test_destroy_session_executed_order_matches_priority(self):
+        """The CleanupResult.executed list must follow the ascending
+        priority order declared by the default handlers."""
+        from bokeh.document import Document
+        from panel.io.state import state
+
+        doc = Document()
+        ctx = type("MockCtx", (), {"_document": doc, "id": "sess-1"})()
+        result = state._destroy_session(ctx)
+
+        expected_order = [name for name, _prio in _EXPECTED_DEFAULT_HANDLERS]
+        assert result.executed == expected_order, (
+            f"Execution order mismatch. Expected {expected_order!r}, "
+            f"got {result.executed!r}"
+        )
+
+    def test_destroy_session_failure_details_are_reported(self):
+        """If a registered handler raises, _destroy_session() must capture
+        its name and exception in CleanupResult.failures *and* continue
+        running the remaining handlers."""
+        from bokeh.document import Document
+        from panel.io.cleanup import session_cleanup_registry
+        from panel.io.state import state
+
+        # Ensure defaults are registered first so we can inject a failure.
+        from panel.io.cleanup import register_default_handlers
+        register_default_handlers()
+
+        class _Kaboom(Exception):
+            pass
+
+        ran: list[str] = []
+
+        def _handler_before(ctx):
+            ran.append("before")
+
+        def _handler_boom(ctx):
+            ran.append("boom")
+            raise _Kaboom("broken")
+
+        def _handler_after(ctx):
+            ran.append("after")
+
+        session_cleanup_registry.register(
+            name="before_boom", func=_handler_before, priority=25,
+        )
+        session_cleanup_registry.register(
+            name="boom", func=_handler_boom, priority=35,
+        )
+        session_cleanup_registry.register(
+            name="after_boom", func=_handler_after, priority=45,
+        )
+
+        doc = Document()
+        ctx = type("MockCtx", (), {"_document": doc, "id": "sess-1"})()
+        result = state._destroy_session(ctx)
+
+        # Both the before and after handler must have run — the failure
+        # did not short-circuit execution.
+        assert "before_boom" in result.executed
+        assert "boom" in result.executed
+        assert "after_boom" in result.executed
+        assert ran == ["before", "boom", "after"]
+
+        # Failure details must include the exact handler name and the
+        # exact exception object (with correct type and message).
+        assert result.success is False
+        failure_names = [name for name, _exc in result.failures]
+        assert "boom" in failure_names
+        for name, exc in result.failures:
+            if name == "boom":
+                assert isinstance(exc, _Kaboom)
+                assert str(exc) == "broken"
+
+    def test_destroy_session_returns_cleanupresult_with_all_fields(self):
+        """Sanity-check that every field of the returned CleanupResult is
+        populated correctly for a successful run."""
+        from bokeh.document import Document
+        from panel.io.cleanup import CleanupResult
+        from panel.io.state import state
+
+        doc = Document()
+        ctx = type("MockCtx", (), {"_document": doc, "id": "sess-42"})()
+        result = state._destroy_session(ctx)
+
+        assert isinstance(result, CleanupResult)
+        assert isinstance(result.executed, list)
+        assert isinstance(result.failures, list)
+        assert isinstance(result.success, bool)
+        # raise_if_any() on a successful run must be a silent no-op.
+        result.raise_if_any()
+
+
+# ---------------------------------------------------------------------------
+# 3. CleanupResult failure semantics
 # ---------------------------------------------------------------------------
 
 class _Boom(Exception):
@@ -251,7 +389,7 @@ class TestCleanupResult:
 
 
 # ---------------------------------------------------------------------------
-# 3. Registry operations
+# 4. Registry operations
 # ---------------------------------------------------------------------------
 
 class TestSessionCleanupRegistry:

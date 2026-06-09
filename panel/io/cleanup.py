@@ -232,6 +232,7 @@ def register_default_handlers() -> None:
     # --- handlers are sorted by priority at execution time.
     _MODULE_PATHS: t.List[str] = [
         "panel.io.state",
+        "panel.io.reload",       # autoreload — no-op, explicitly audited
         "panel.io.callbacks",
         "panel.io.location",
         "panel.io.notifications",

@@ -282,3 +282,39 @@ def _check_file(path: str | os.PathLike, modify_times: dict[str | os.PathLike, i
     elif last_modified != modified:
         modify_times[path] = modified
         return 2
+
+
+def register_session_cleanup_handlers(registry) -> None:
+    """Register autoreload session cleanup handlers with the given registry.
+
+    NOTE on autoreload lifecycle:
+        All autoreload state is **global** rather than per-session:
+
+        * ``_watched_files`` / ``_modules`` / ``_local_modules`` track
+          files and module names for the entire server process, not per
+          Document.
+        * ``async_file_watcher`` runs as a single global task started by
+          ``setup_autoreload_watcher`` and stopped via a process-level
+          ``stop_event``.
+        * When a file change is detected, ``_reload()`` iterates over
+          *all* active sessions via ``state._locations`` — that mapping
+          is owned by the ``locations`` cleanup handler and is cleared
+          per-session there.
+
+        Consequently there is **no per-session / per-Document autoreload
+        resource** that needs releasing when a single session is
+        destroyed.  We still register a no-op handler so that
+        autoreload is an explicit, audited participant in the cleanup
+        registry and future maintainers do not need to guess whether it
+        was simply forgotten.
+    """
+    def _cleanup_autoreload(_session_context) -> None:
+        # Intentionally a no-op: autoreload owns no per-session state.
+        # See the docstring of register_session_cleanup_handlers above.
+        pass
+
+    registry.register(
+        name="autoreload",
+        func=_cleanup_autoreload,
+        priority=15,  # between session_info (10) and periodic_callbacks (20)
+    )
