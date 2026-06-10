@@ -202,6 +202,42 @@ except Exception as e:
     print(f"Startup blocked: {e}")
 ```
 
+### Querying Effective Configuration and Server Status
+
+After the server starts, you can query the actual effective configuration and
+server status using the `state` object:
+
+```python
+import panel as pn
+from panel.io import state
+
+# Get the effective startup configuration as a dictionary
+cfg = state.get_startup_config()
+if cfg:
+    print("Websocket origins:", cfg["websocket_origin"])
+    print("Admin enabled:", cfg["admin"])
+    print("Session history:", cfg["session_history"])
+    print("Notifications:", cfg["notifications"])
+    print("Browser info:", cfg["browser_info"])
+
+# Get full structured server status (includes timestamp, config, diagnostics)
+status = state.get_server_status()
+print("Startup mode:", status["startup"]["startup_mode"])
+print("Services:", list(status["startup"]["services"].keys()))
+
+# Get status as formatted JSON string
+json_status = state.get_server_status(as_json=True, indent=2)
+
+# Print a human-readable status report to stdout
+state.print_server_status(include_diagnostics=True)
+```
+
+The `get_server_status()` function returns a dictionary with:
+- `timestamp`: ISO 8601 timestamp of when the status was captured
+- `active_servers`: Count of currently running Panel servers
+- `startup`: The effective startup configuration (same as `get_startup_config()` but includes per-service detail)
+- `diagnostics`: The last diagnostic result (if `include_diagnostics=True`)
+
 ### Diagnostic Severity Levels
 
 - **INFO**: Informational messages about configuration.

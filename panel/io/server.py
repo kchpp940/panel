@@ -263,8 +263,15 @@ def _initialize_session_info(session_context: SessionContext):
     from ..config import config
     session_id = session_context.id
     sessions = state.session_info['sessions']
-    history = -1 if config._admin else config.session_history
-    if not config._admin and (history == 0 or session_id in sessions):
+
+    startup_cfg = getattr(state, '_last_startup_config', None)
+    if startup_cfg is not None and startup_cfg.session_history is not None:
+        history = -1 if startup_cfg.admin else startup_cfg.session_history
+    else:
+        history = -1 if config._admin else config.session_history
+
+    is_admin_app = startup_cfg.admin if startup_cfg is not None else config._admin
+    if not is_admin_app and (history == 0 or session_id in sessions):
         return
 
     state.session_info['total'] += 1
@@ -1299,6 +1306,7 @@ def get_server(
         check_unused_sessions=check_unused_sessions,
     )
     startup_cfg.apply_to_config()
+    state._last_startup_config = startup_cfg
 
     if run_diagnostics:
         diagnostic_result = validate_startup(

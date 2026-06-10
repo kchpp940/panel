@@ -238,6 +238,7 @@ class _state(param.Parameterized):
 
     # Diagnostics
     _last_diagnostic_result: t.ClassVar[object | None] = None
+    _last_startup_config: t.ClassVar[object | None] = None
 
     # Types
     _notification_type: t.ClassVar[type[NotificationAreaBase] | None] = None
@@ -251,6 +252,83 @@ class _state(param.Parameterized):
         if not server_info:
             return "state(servers=[])"
         return "state(servers=[\n  {}\n])".format(",\n  ".join(server_info))
+
+    def get_startup_config(self) -> dict[str, t.Any] | None:
+        if self._last_startup_config is None:
+            return None
+        return self._last_startup_config.to_dict()
+
+    def get_server_status(
+        self, include_diagnostics: bool = True, as_json: bool = False, indent: int = 2
+    ) -> dict[str, t.Any] | str:
+        import datetime as dt
+
+        status: dict[str, t.Any] = {
+            "timestamp": dt.datetime.now().isoformat(),
+            "servers": [
+                {
+                    "address": server.address or "localhost",
+                    "port": server.port or 0,
+                }
+                for server, _panel, _docs in self._servers.values()
+            ],
+        }
+
+        if self._last_startup_config is not None:
+            status["startup"] = self._last_startup_config.to_status_dict()
+
+        if include_diagnostics and self._last_diagnostic_result is not None:
+            status["diagnostics"] = self._last_diagnostic_result.to_dict()
+
+        if as_json:
+            import json
+            return json.dumps(status, indent=indent, default=str)
+        return status
+
+    def print_server_status(self, include_diagnostics: bool = True) -> None:
+        status = self.get_server_status(include_diagnostics=include_diagnostics)
+        lines = [
+            "=" * 70,
+            "Panel Server Status",
+            "=" * 70,
+            f"Timestamp: {status['timestamp']}",
+            "",
+        ]
+        if status.get("servers"):
+            lines.append("Active Servers:")
+            for srv in status["servers"]:
+                lines.append(f"  - http://{srv['address']}:{srv['port']}/")
+            lines.append("")
+        if status.get("startup"):
+            startup = status["startup"]
+            lines.append(f"Startup Mode: {startup['startup_mode'].upper()}")
+            lines.append("")
+            lines.append("Effective Configuration:")
+            for svc_name, svc_info in startup["services"].items():
+                lines.append(f"  {svc_name}:")
+                lines.append(f"    enabled: {svc_info['enabled']}")
+                if svc_info["config"]:
+                    for k, v in svc_info["config"].items():
+                        lines.append(f"    {k}: {v}")
+            lines.append("")
+        if status.get("diagnostics"):
+            diag = status["diagnostics"]
+            lines.append(f"Diagnostic Status: {diag['overall_status'].upper()}")
+            lines.append(f"  has_fatal: {diag['has_fatal']}")
+            lines.append(f"  has_errors: {diag['has_errors']}")
+            lines.append(f"  has_warnings: {diag['has_warnings']}")
+            lines.append("")
+            for svc_name, svc in diag["services"].items():
+                if svc["issues"]:
+                    lines.append(f"  {svc_name} issues:")
+                    for issue in svc["issues"]:
+                        lines.append(
+                            f"    [{issue['severity'].upper()}] "
+                            f"({issue['code']}) {issue['message']}"
+                        )
+            lines.append("")
+        lines.append("=" * 70)
+        print("\n".join(lines))  # noqa: T201
 
     @property
     def _ioloop(self) -> IOLoop | asyncio.AbstractEventLoop:
@@ -1097,11 +1175,18 @@ class _state(param.Parameterized):
     def browser_info(self) -> BrowserInfo | None:
         from ..config import config
         from .browser import BrowserInfo
-        if (config.browser_info and self.curdoc and self.curdoc.session_context and
+
+        startup_cfg = getattr(self, '_last_startup_config', None)
+        if startup_cfg is not None and startup_cfg.browser_info is not None:
+            browser_info_enabled = startup_cfg.browser_info
+        else:
+            browser_info_enabled = config.browser_info
+
+        if (browser_info_enabled and self.curdoc and self.curdoc.session_context and
             self.curdoc not in self._browsers):
             browser = self._browsers[self.curdoc] = BrowserInfo()
         elif self.curdoc is None:
-            if self._browser is None and config.browser_info:
+            if self._browser is None and browser_info_enabled:
                 _state._browser = BrowserInfo()
             browser = self._browser  # type: ignore
         else:
@@ -1222,7 +1307,14 @@ class _state(param.Parameterized):
             return self._notifications[self.curdoc]
 
         from panel.config import config
-        if not (config.notifications and is_session):
+
+        startup_cfg = getattr(self, '_last_startup_config', None)
+        if startup_cfg is not None and startup_cfg.notifications is not None:
+            notifications_enabled = startup_cfg.notifications
+        else:
+            notifications_enabled = config.notifications
+
+        if not (notifications_enabled and is_session):
             return None if is_session else self._notification
 
         js_events = {}

@@ -319,6 +319,7 @@ def add_applications(
         session_history=session_history,
     )
     startup_cfg.apply_to_config()
+    state._last_startup_config = startup_cfg
 
     if run_diagnostics:
         diagnostic_result = validate_startup(

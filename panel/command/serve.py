@@ -340,6 +340,17 @@ class Serve(_BkServe):
             action  = 'store_true',
             help    = "Allow server to start even when diagnostics detect errors.",
         )),
+        ('--show-status', Argument(
+            action  = 'store_true',
+            help    = "Print effective server configuration and status after startup.",
+            default = False,
+        )),
+        ('--status-json', Argument(
+            action  = 'store',
+            type    = str,
+            help    = "Path to write the server status report as JSON.",
+            default = None,
+        )),
     )) # type: ignore[assignment, ty:invalid-assignment]
 
     # Supported file extensions
@@ -838,6 +849,7 @@ class Serve(_BkServe):
         )
         startup_cfg.apply_to_config()
         self._startup_cfg = startup_cfg
+        state._last_startup_config = startup_cfg
 
         run_diagnostics = not args.no_diagnostics
         if run_diagnostics:
@@ -853,6 +865,18 @@ class Serve(_BkServe):
                 json_path.parent.mkdir(parents=True, exist_ok=True)
                 json_path.write_text(diagnostic_result.to_json(), encoding='utf-8')
                 log.info(f"Diagnostics report written to: {json_path}")
+
+        if args.show_status:
+            state.print_server_status(include_diagnostics=run_diagnostics)
+
+        if args.status_json:
+            status_json = state.get_server_status(
+                include_diagnostics=run_diagnostics, as_json=True
+            )
+            status_path = pathlib.Path(args.status_json).absolute()
+            status_path.parent.mkdir(parents=True, exist_ok=True)
+            status_path.write_text(status_json, encoding='utf-8')
+            log.info(f"Server status report written to: {status_path}")
 
         args.dev = None
         super().invoke(args)

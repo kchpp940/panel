@@ -61,6 +61,13 @@ The `pn.state` object makes various global state available and provides methods 
   about configuration checks including services, issues, and overall status.
   Only available after starting a server with diagnostics enabled (the default).
 
+`_last_startup_config`
+: Stores the resolved `StartupConfig` object from the most recent server startup.
+  This is the unified configuration source used by the server, CLI, and FastAPI
+  integration. All websocket origin, static dirs, autoreload, admin endpoint,
+  session cleanup, notifications, and browser info settings are available from
+  this single object.
+
 ## Methods
 
 `add_periodic_callback`
@@ -75,11 +82,36 @@ The `pn.state` object makes various global state available and provides methods 
 `execute`
 : Executes both synchronous and asynchronous callbacks appropriately depending on the context the application is running in.
 
+`get_startup_config`
+: Returns the effective startup configuration from the most recent server
+  startup as a plain dictionary. Includes websocket origins, static dirs,
+  admin settings, session history, autoreload, notifications, browser info,
+  and detected startup mode. Returns `None` if no server has been started.
+
+`get_server_status`
+: Returns a structured server status dictionary (or JSON string when
+  `as_json=True`) containing:
+  - `timestamp`: ISO 8601 timestamp when the status was captured
+  - `active_servers`: Count of currently running servers
+  - `startup`: Effective per-service configuration (enabled, config details)
+  - `diagnostics`: Last diagnostic result (if `include_diagnostics=True`)
+  Parameters:
+  - `include_diagnostics` (bool): Whether to include the diagnostic report.
+  - `as_json` (bool): Whether to return a formatted JSON string instead of dict.
+  - `indent` (int): JSON indentation level when `as_json=True`.
+
 `kill_all_servers`
 : Stops all running server sessions.
 
 `onload`
 : Allows defining a callback which is run when a server is fully loaded
+
+`print_server_status`
+: Prints a human-readable formatted server status report to stdout.
+  Includes startup mode, effective configuration for each service,
+  and optionally the diagnostic report.
+  Parameters:
+  - `include_diagnostics` (bool): Whether to include the diagnostic report.
 
 `schedule`
 : Schedule a callback periodically at a specific time (click [here](../how_to/callbacks/schedule.md) for more details)

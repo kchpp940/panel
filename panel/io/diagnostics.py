@@ -388,6 +388,74 @@ class StartupConfig:
         if self.browser_info is not None:
             config.browser_info = self.browser_info
 
+    def to_dict(self) -> dict[str, t.Any]:
+        return {
+            "mode": self.detect_mode().value,
+            "websocket_origin": self.resolved_websocket_origin_list,
+            "address": self.address,
+            "port": self.port,
+            "static_dirs": self.normalized_static_dirs,
+            "autoreload": self.effective_autoreload,
+            "dev": self.dev,
+            "admin": self.admin,
+            "admin_endpoint": self.resolved_admin_endpoint,
+            "session_history": self.session_history,
+            "check_unused_sessions": self.check_unused_sessions,
+            "notifications": self.notifications,
+            "browser_info": self.browser_info,
+        }
+
+    def to_status_dict(self) -> dict[str, t.Any]:
+        return {
+            "startup_mode": self.detect_mode().value,
+            "services": {
+                "websocket_origin": {
+                    "enabled": True,
+                    "config": {
+                        "allowed_origins": self.resolved_websocket_origin_list,
+                        "address": self.address or "localhost",
+                        "port": self.port,
+                    },
+                },
+                "static_dirs": {
+                    "enabled": bool(self.static_dirs),
+                    "config": self.normalized_static_dirs,
+                },
+                "autoreload": {
+                    "enabled": self.effective_autoreload,
+                    "config": {
+                        "autoreload": self.effective_autoreload,
+                        "dev_mode": bool(self.dev),
+                    },
+                },
+                "admin_endpoint": {
+                    "enabled": self.admin,
+                    "config": {
+                        "endpoint": self.resolved_admin_endpoint,
+                    },
+                },
+                "session_cleanup": {
+                    "enabled": self.session_history != 0,
+                    "config": {
+                        "session_history": self.session_history,
+                        "check_unused_sessions_ms": self.check_unused_sessions,
+                    },
+                },
+                "notifications": {
+                    "enabled": bool(self.notifications),
+                    "config": {
+                        "notifications": self.notifications,
+                    },
+                },
+                "browser_info": {
+                    "enabled": bool(self.browser_info),
+                    "config": {
+                        "browser_info": self.browser_info,
+                    },
+                },
+            },
+        }
+
 
 
 DiagnosticContext = StartupConfig
