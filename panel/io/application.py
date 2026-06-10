@@ -22,6 +22,7 @@ from bokeh.application.handlers.document_lifecycle import (
 from bokeh.models import CustomJS
 
 from ..config import config
+from .diagnostics import StartupConfig
 from .document import _destroy_document
 from .handlers import (
     FunctionHandler, MarkdownHandler, NotebookHandler, ScriptHandler,
@@ -101,18 +102,22 @@ def _on_session_destroyed(session_context: SessionContext) -> None:
 class Application(BkApplication):
     """
     Extends Bokeh Application with ability to add global session
-    creation callbacks, support for the admin dashboard and the
-    ability to globally define a template.
+    creation callbacks, support for the admin dashboard, the
+    ability to globally define a template, and to track the
+    StartupConfig that was used to create it.
     """
 
     def __init__(self, *args, **kwargs):
         self._admin = kwargs.pop('admin', None)
+        self._startup_config: StartupConfig | None = kwargs.pop('startup_config', None)
         super().__init__(*args, **kwargs)
 
     async def on_session_created(self, session_context):
         with set_curdoc(session_context._document):
             if self._admin is not None:
                 config._admin = self._admin
+            if self._startup_config is not None:
+                session_context._startup_config = self._startup_config
             for cb in state._on_session_created_internal+state._on_session_created:
                 cb(session_context)
         await super().on_session_created(session_context)
@@ -254,7 +259,8 @@ def build_applications(
     location: bool | Location = True,
     admin: bool = False,
     server_id: str | None = None,
-    custom_handlers: Sequence[Callable[[str, TViewableFuncOrPath], TViewableFuncOrPath]] | None = None
+    custom_handlers: Sequence[Callable[[str, TViewableFuncOrPath], TViewableFuncOrPath]] | None = None,
+    startup_config: StartupConfig | None = None,
 ) -> dict[str, BkApplication]:
     """
     Converts a variety of objects into a dictionary of Applications.
@@ -274,6 +280,8 @@ def build_applications(
         Whether to enable the admin panel
     server_id: str
         ID of the server running the application(s)
+    startup_config: StartupConfig | None
+        Resolved startup configuration to attach to each Application.
     """
     if not isinstance(panel, dict):
         panel = {'/': panel}
@@ -315,11 +323,14 @@ def build_applications(
             built_app = build_single_handler_application(app)
             apps[slug] = built_app
             built_app._admin = admin
+            built_app._startup_config = startup_config
         elif isinstance(app, BkApplication):
             apps[slug] = app
+            if not hasattr(app, '_startup_config') or app._startup_config is None:
+                app._startup_config = startup_config
         else:
             handler = FunctionHandler(partial(_eval_panel, app, server_id, title_, location, admin))
-            apps[slug] = Application(handler, admin=admin)
+            apps[slug] = Application(handler, admin=admin, startup_config=startup_config)
 
     if admin:
         if '/admin' in apps:
@@ -329,6 +340,6 @@ def build_applications(
             )
         from .admin import admin_panel
         admin_handler = FunctionHandler(admin_panel)
-        apps['/admin'] = Application(admin_handler)
+        apps['/admin'] = Application(admin_handler, startup_config=startup_config)
 
     return apps

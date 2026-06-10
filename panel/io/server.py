@@ -264,13 +264,14 @@ def _initialize_session_info(session_context: SessionContext):
     session_id = session_context.id
     sessions = state.session_info['sessions']
 
-    startup_cfg = getattr(state, '_last_startup_config', None)
+    startup_cfg = getattr(session_context, '_startup_config', None)
     if startup_cfg is not None and startup_cfg.session_history is not None:
         history = -1 if startup_cfg.admin else startup_cfg.session_history
+        is_admin_app = startup_cfg.admin
     else:
         history = -1 if config._admin else config.session_history
+        is_admin_app = config._admin
 
-    is_admin_app = startup_cfg.admin if startup_cfg is not None else config._admin
     if not is_admin_app and (history == 0 or session_id in sessions):
         return
 
@@ -423,10 +424,25 @@ def autoload_js_script(doc, resources, token, element_id, app_path, absolute_url
 class Server(BokehServer):
 
     def __init__(self, *args, **kwargs):
+        self._startup_config = kwargs.pop('startup_config', None)
+        self._diagnostic_result = kwargs.pop('diagnostic_result', None)
+        self._server_id: str | None = kwargs.pop('server_id', None)
         super().__init__(*args, **kwargs)
         self._autoreload_stop_event = None
         if state._admin_context:
             state._admin_context._loop = self._loop
+
+    @property
+    def server_id(self) -> str | None:
+        return self._server_id
+
+    @property
+    def startup_config(self):
+        return self._startup_config
+
+    @property
+    def diagnostic_result(self):
+        return self._diagnostic_result
 
     def start(self) -> None:
         super().start()
@@ -1306,15 +1322,16 @@ def get_server(
         check_unused_sessions=check_unused_sessions,
     )
     startup_cfg.apply_to_config()
-    state._last_startup_config = startup_cfg
+    state._last_startup_config = startup_cfg  # Backward compat
 
+    diagnostic_result = None
     if run_diagnostics:
         diagnostic_result = validate_startup(
             startup_cfg,
             blocking=block_on_diagnostics_errors,
             log_report=verbose,
         )
-        state._last_diagnostic_result = diagnostic_result
+        state._last_diagnostic_result = diagnostic_result  # Backward compat
 
     def flask_handler(slug, app):
         if 'flask' not in sys.modules:
@@ -1334,7 +1351,7 @@ def get_server(
 
     apps = build_applications(
         panel, title=title, location=location, admin=startup_cfg.admin,
-        custom_handlers=(flask_handler,)
+        custom_handlers=(flask_handler,), startup_config=startup_cfg,
     )
     normalized_apps: dict[str, BkApplication] = {}
     normalized_sources: dict[str, str] = {}
@@ -1440,6 +1457,9 @@ def get_server(
             state.base_url = root_path  # type: ignore
     opts['cookie_path'] = config.cookie_path
     opts['cookie_secret'] = config.cookie_secret
+    opts['startup_config'] = startup_cfg
+    opts['diagnostic_result'] = diagnostic_result
+    opts['server_id'] = server_id
 
     server = Server(apps, port=port, **opts)
     if verbose:

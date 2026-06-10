@@ -364,6 +364,13 @@ class Serve(_BkServe):
                     index = index[:-len(ext)]
             if f'/{index}' in applications:
                 applications['/'] = applications[f'/{index}']
+        startup_cfg = getattr(self, '_startup_cfg', None)
+        if startup_cfg is not None:
+            for _path, app in applications.items():
+                if not hasattr(app, '_startup_config') or app._startup_config is None:
+                    app._startup_config = startup_cfg
+                if not hasattr(app, '_admin'):
+                    app._admin = startup_cfg.admin
         return super().customize_applications(args, applications)
 
     def warm_applications(self, applications, reuse_sessions, error=True, initialize_session=True, index=None):
@@ -814,6 +821,13 @@ class Serve(_BkServe):
         if config.cookie_secret:
             kwargs['cookie_secret'] = config.cookie_secret
 
+        startup_cfg = getattr(self, '_startup_cfg', None)
+        if startup_cfg is not None:
+            kwargs['startup_config'] = startup_cfg
+        diagnostic_result = getattr(self, '_diagnostic_result', None)
+        if diagnostic_result is not None:
+            kwargs['diagnostic_result'] = diagnostic_result
+
         return kwargs
 
     def invoke(self, args: argparse.Namespace):
@@ -849,16 +863,18 @@ class Serve(_BkServe):
         )
         startup_cfg.apply_to_config()
         self._startup_cfg = startup_cfg
-        state._last_startup_config = startup_cfg
+        state._last_startup_config = startup_cfg  # Backward compat
 
         run_diagnostics = not args.no_diagnostics
+        self._diagnostic_result = None
         if run_diagnostics:
             diagnostic_result = validate_startup(
                 startup_cfg,
                 blocking=not args.allow_diagnostics_errors,
                 log_report=True,
             )
-            state._last_diagnostic_result = diagnostic_result
+            self._diagnostic_result = diagnostic_result
+            state._last_diagnostic_result = diagnostic_result  # Backward compat
 
             if args.diagnostics_json:
                 json_path = pathlib.Path(args.diagnostics_json).absolute()

@@ -319,18 +319,20 @@ def add_applications(
         session_history=session_history,
     )
     startup_cfg.apply_to_config()
-    state._last_startup_config = startup_cfg
+    state._last_startup_config = startup_cfg  # Backward compat
 
+    diagnostic_result = None
     if run_diagnostics:
         diagnostic_result = validate_startup(
             startup_cfg,
             blocking=block_on_diagnostics_errors,
             log_report=False,
         )
-        state._last_diagnostic_result = diagnostic_result
+        state._last_diagnostic_result = diagnostic_result  # Backward compat
 
     apps = build_applications(
-        panel, title=title, location=location, admin=startup_cfg.admin
+        panel, title=title, location=location, admin=startup_cfg.admin,
+        startup_config=startup_cfg,
     )
     if prefix:
         apps = {_prefix_path(endpoint, prefix): app for endpoint, app in apps.items()}
@@ -342,6 +344,8 @@ def add_applications(
         kwargs['websocket_origins'] = resolved_origins
 
     application = BokehFastAPI(apps, app=app, **kwargs)
+    application._startup_config = startup_cfg
+    application._diagnostic_result = diagnostic_result
     if startup_cfg.session_history is not None:
         config.session_history = startup_cfg.session_history
         add_history_handler(application.app, endpoint=_prefix_path('/session_info', prefix))

@@ -253,40 +253,126 @@ class _state(param.Parameterized):
             return "state(servers=[])"
         return "state(servers=[\n  {}\n])".format(",\n  ".join(server_info))
 
-    def get_startup_config(self) -> dict[str, t.Any] | None:
-        if self._last_startup_config is None:
-            return None
-        return self._last_startup_config.to_dict()
+    def get_startup_config(self, server_id: str | None = None) -> dict[str, t.Any] | dict[str, dict[str, t.Any]] | None:
+        """
+        Get the effective startup configuration.
+
+        Parameters
+        ----------
+        server_id : str, optional
+            If provided, return the config for a specific server.
+            If None, return a dict of {server_id: config} for all servers.
+
+        Returns
+        -------
+        dict or None
+            Startup config dict for a single server, dict of {server_id: config}
+            for all servers, or None if no matching server.
+        """
+        if server_id is not None:
+            if server_id not in self._servers:
+                return None
+            server, _panel, _docs = self._servers[server_id]
+            cfg = getattr(server, '_startup_config', None)
+            return cfg.to_dict() if cfg is not None else None
+
+        all_configs: dict[str, dict[str, t.Any]] = {}
+        for sid, (server, _panel, _docs) in self._servers.items():
+            cfg = getattr(server, '_startup_config', None)
+            if cfg is not None:
+                all_configs[sid] = cfg.to_dict()
+        return all_configs if all_configs else None
 
     def get_server_status(
-        self, include_diagnostics: bool = True, as_json: bool = False, indent: int = 2
+        self, server_id: str | None = None,
+        include_diagnostics: bool = True, as_json: bool = False, indent: int = 2
     ) -> dict[str, t.Any] | str:
+        """
+        Get structured server status.
+
+        Parameters
+        ----------
+        server_id : str, optional
+            If provided, return status for a specific server.
+            If None, return status for all running servers.
+        include_diagnostics : bool
+            Whether to include the diagnostic report.
+        as_json : bool
+            Whether to return a JSON string instead of a dict.
+        indent : int
+            JSON indentation level when as_json=True.
+
+        Returns
+        -------
+        dict or str
+            Structured server status.
+        """
         import datetime as dt
 
         status: dict[str, t.Any] = {
             "timestamp": dt.datetime.now().isoformat(),
-            "servers": [
-                {
-                    "address": server.address or "localhost",
-                    "port": server.port or 0,
-                }
-                for server, _panel, _docs in self._servers.values()
-            ],
         }
 
-        if self._last_startup_config is not None:
-            status["startup"] = self._last_startup_config.to_status_dict()
-
-        if include_diagnostics and self._last_diagnostic_result is not None:
-            status["diagnostics"] = self._last_diagnostic_result.to_dict()
+        if server_id is not None:
+            if server_id not in self._servers:
+                status["error"] = f"Server {server_id!r} not found"
+                if as_json:
+                    import json
+                    return json.dumps(status, indent=indent, default=str)
+                return status
+            server, panel, _docs = self._servers[server_id]
+            cfg = getattr(server, '_startup_config', None)
+            diag = getattr(server, '_diagnostic_result', None)
+            server_status: dict[str, t.Any] = {
+                "id": server_id,
+                "address": server.address or "localhost",
+                "port": server.port or 0,
+                "panel": repr(panel),
+            }
+            if cfg is not None:
+                server_status["startup"] = cfg.to_status_dict()
+            if include_diagnostics and diag is not None:
+                server_status["diagnostics"] = diag.to_dict()
+            status["server"] = server_status
+        else:
+            servers_status = []
+            for sid, (server, panel, _docs) in self._servers.items():
+                cfg = getattr(server, '_startup_config', None)
+                diag = getattr(server, '_diagnostic_result', None)
+                entry: dict[str, t.Any] = {
+                    "id": sid,
+                    "address": server.address or "localhost",
+                    "port": server.port or 0,
+                    "panel": repr(panel),
+                }
+                if cfg is not None:
+                    entry["startup"] = cfg.to_status_dict()
+                if include_diagnostics and diag is not None:
+                    entry["diagnostics"] = diag.to_dict()
+                servers_status.append(entry)
+            status["servers"] = servers_status
 
         if as_json:
             import json
             return json.dumps(status, indent=indent, default=str)
         return status
 
-    def print_server_status(self, include_diagnostics: bool = True) -> None:
-        status = self.get_server_status(include_diagnostics=include_diagnostics)
+    def print_server_status(
+        self, server_id: str | None = None, include_diagnostics: bool = True
+    ) -> None:
+        """
+        Print a human-readable server status report.
+
+        Parameters
+        ----------
+        server_id : str, optional
+            If provided, print status for a specific server.
+        include_diagnostics : bool
+            Whether to include the diagnostic report.
+        """
+        status = self.get_server_status(
+            server_id=server_id, include_diagnostics=include_diagnostics
+        )
         lines = [
             "=" * 70,
             "Panel Server Status",
@@ -294,41 +380,72 @@ class _state(param.Parameterized):
             f"Timestamp: {status['timestamp']}",
             "",
         ]
-        if status.get("servers"):
-            lines.append("Active Servers:")
+
+        if status.get("error"):
+            lines.append(f"ERROR: {status['error']}")
+            lines.append("")
+        elif "server" in status:
+            srv = status["server"]
+            lines.append(f"Server: {srv['id']}")
+            lines.append(f"  URL: http://{srv['address']}:{srv['port']}/")
+            lines.append(f"  App: {srv['panel']}")
+            lines.append("")
+            self._format_startup_for_print(srv.get("startup"), lines)
+            if include_diagnostics:
+                self._format_diagnostics_for_print(srv.get("diagnostics"), lines)
+        elif status.get("servers"):
             for srv in status["servers"]:
-                lines.append(f"  - http://{srv['address']}:{srv['port']}/")
+                lines.append(f"Server: {srv['id']}")
+                lines.append(f"  URL: http://{srv['address']}:{srv['port']}/")
+                lines.append(f"  App: {srv['panel']}")
+                lines.append("")
+                self._format_startup_for_print(srv.get("startup"), lines)
+                if include_diagnostics:
+                    self._format_diagnostics_for_print(srv.get("diagnostics"), lines)
+                lines.append("-" * 70)
+                lines.append("")
+        else:
+            lines.append("No running servers.")
             lines.append("")
-        if status.get("startup"):
-            startup = status["startup"]
-            lines.append(f"Startup Mode: {startup['startup_mode'].upper()}")
-            lines.append("")
-            lines.append("Effective Configuration:")
-            for svc_name, svc_info in startup["services"].items():
-                lines.append(f"  {svc_name}:")
-                lines.append(f"    enabled: {svc_info['enabled']}")
-                if svc_info["config"]:
-                    for k, v in svc_info["config"].items():
-                        lines.append(f"    {k}: {v}")
-            lines.append("")
-        if status.get("diagnostics"):
-            diag = status["diagnostics"]
-            lines.append(f"Diagnostic Status: {diag['overall_status'].upper()}")
-            lines.append(f"  has_fatal: {diag['has_fatal']}")
-            lines.append(f"  has_errors: {diag['has_errors']}")
-            lines.append(f"  has_warnings: {diag['has_warnings']}")
-            lines.append("")
-            for svc_name, svc in diag["services"].items():
-                if svc["issues"]:
-                    lines.append(f"  {svc_name} issues:")
-                    for issue in svc["issues"]:
-                        lines.append(
-                            f"    [{issue['severity'].upper()}] "
-                            f"({issue['code']}) {issue['message']}"
-                        )
-            lines.append("")
+
         lines.append("=" * 70)
         print("\n".join(lines))  # noqa: T201
+
+    def _format_startup_for_print(
+        self, startup: dict[str, t.Any] | None, lines: list[str]
+    ) -> None:
+        if not startup:
+            return
+        lines.append(f"Startup Mode: {startup['startup_mode'].upper()}")
+        lines.append("")
+        lines.append("Effective Configuration:")
+        for svc_name, svc_info in startup["services"].items():
+            lines.append(f"  {svc_name}:")
+            lines.append(f"    enabled: {svc_info['enabled']}")
+            if svc_info["config"]:
+                for k, v in svc_info["config"].items():
+                    lines.append(f"    {k}: {v}")
+        lines.append("")
+
+    def _format_diagnostics_for_print(
+        self, diag: dict[str, t.Any] | None, lines: list[str]
+    ) -> None:
+        if not diag:
+            return
+        lines.append(f"Diagnostic Status: {diag['overall_status'].upper()}")
+        lines.append(f"  has_fatal: {diag['has_fatal']}")
+        lines.append(f"  has_errors: {diag['has_errors']}")
+        lines.append(f"  has_warnings: {diag['has_warnings']}")
+        lines.append("")
+        for svc_name, svc in diag["services"].items():
+            if svc["issues"]:
+                lines.append(f"  {svc_name} issues:")
+                for issue in svc["issues"]:
+                    lines.append(
+                        f"    [{issue['severity'].upper()}] "
+                        f"({issue['code']}) {issue['message']}"
+                    )
+        lines.append("")
 
     @property
     def _ioloop(self) -> IOLoop | asyncio.AbstractEventLoop:
@@ -359,6 +476,26 @@ class _state(param.Parameterized):
     @property
     def _is_pyodide(self) -> bool:
         return '_pyodide' in sys.modules
+
+    def _get_startup_config(self):
+        """
+        Get the StartupConfig for the current session/application context.
+        Priority: session_context._startup_config > curdoc's application > None
+        """
+        doc = self.curdoc
+        if doc and doc.session_context:
+            sc = doc.session_context
+            cfg = getattr(sc, '_startup_config', None)
+            if cfg is not None:
+                return cfg
+            if hasattr(sc, 'server_context') and sc.server_context:
+                app_ctx = sc.server_context.application_context
+                if app_ctx and hasattr(app_ctx, 'application'):
+                    app = app_ctx.application
+                    cfg = getattr(app, '_startup_config', None)
+                    if cfg is not None:
+                        return cfg
+        return None
 
     @property
     def _thread_id(self) -> int | None:
@@ -1176,7 +1313,7 @@ class _state(param.Parameterized):
         from ..config import config
         from .browser import BrowserInfo
 
-        startup_cfg = getattr(self, '_last_startup_config', None)
+        startup_cfg = self._get_startup_config()
         if startup_cfg is not None and startup_cfg.browser_info is not None:
             browser_info_enabled = startup_cfg.browser_info
         else:
@@ -1308,7 +1445,7 @@ class _state(param.Parameterized):
 
         from panel.config import config
 
-        startup_cfg = getattr(self, '_last_startup_config', None)
+        startup_cfg = self._get_startup_config()
         if startup_cfg is not None and startup_cfg.notifications is not None:
             notifications_enabled = startup_cfg.notifications
         else:
