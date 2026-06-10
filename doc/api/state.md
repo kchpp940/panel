@@ -55,6 +55,12 @@ The `pn.state` object makes various global state available and provides methods 
 `webdriver`
 : Caches the current webdriver to speed up export of bokeh models to PNGs.
 
+`_last_diagnostic_result`
+: Stores the diagnostic result from the most recent server startup validation.
+  This is a `StartupDiagnosticResult` object containing structured information
+  about configuration checks including services, issues, and overall status.
+  Only available after starting a server with diagnostics enabled (the default).
+
 ## Methods
 
 `add_periodic_callback`

@@ -44,6 +44,7 @@ def bundle_resources():
         print(f"{GREEN}[PANEL]{RESET} Failed bundling custom model resources", flush=True)
         raise e
 
+
 def clean_js_version(version):
     version = version.replace("-", "")
     for dev in ("a", "b", "rc"):

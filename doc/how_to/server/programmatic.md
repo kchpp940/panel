@@ -71,6 +71,79 @@ The ``pn.serve`` accepts a number of arguments:
       Whether to start the server on a new Thread
     admin: boolean (default=False)
       Whether to enable the admin panel
+    run_diagnostics: bool (default=True)
+      Whether to run startup diagnostics before starting the server.
+    block_on_diagnostics_errors: bool (default=True)
+      Whether to block server startup when diagnostics detect errors or fatal issues.
+    admin_endpoint: str (default=None)
+      Custom endpoint path for the admin panel.
     kwargs: dict
       Additional keyword arguments to pass to Server instance
 ```
+
+## Startup Diagnostics
+
+Panel provides a centralized startup diagnostics system that validates server configuration before starting the server. The diagnostics cover:
+
+- **WebSocket Origin**: Checks for wildcards, schemes, and ensures origins are properly configured.
+- **Static Directories**: Validates that static directories exist, are readable, and don't conflict with reserved routes.
+- **Autoreload**: Warns when autoreload is enabled (development-only feature) and checks file watcher availability.
+- **Admin Endpoint**: Ensures the admin panel is protected by authentication and the endpoint is valid.
+- **Session Cleanup**: Validates session history configuration and memory usage implications.
+- **Notifications**: Checks notification module availability and configuration.
+- **Browser Info**: Validates browser info module availability.
+
+When diagnostics detect errors or fatal issues, the server startup is blocked by default. You can access the diagnostic result programmatically:
+
+```python
+import panel as pn
+from panel.io import state
+
+# Create and configure your app
+app = pn.Row("Hello, World!")
+
+# Serve the app - diagnostics run automatically
+server = pn.serve(app, start=False, port=5006)
+
+# Access the last diagnostic result
+if state._last_diagnostic_result:
+    print(state._last_diagnostic_result.format_report())
+    print("JSON output:", state._last_diagnostic_result.to_json())
+```
+
+You can also run diagnostics independently:
+
+```python
+from panel.io import run_startup_diagnostics, DiagnosticContext
+
+context = DiagnosticContext(
+    websocket_origin=["example.com"],
+    static_dirs={"/assets": "./assets"},
+    admin=True,
+    session_history=100,
+)
+
+result = run_startup_diagnostics(context)
+print(result.format_report())
+```
+
+Or use the blocking validation wrapper:
+
+```python
+from panel.io import validate_startup
+
+try:
+    result = validate_startup(
+        websocket_origin=["*"],  # This will trigger a FATAL error
+        admin=True,
+    )
+except Exception as e:
+    print(f"Startup blocked: {e}")
+```
+
+### Diagnostic Severity Levels
+
+- **INFO**: Informational messages about configuration.
+- **WARNING**: Potential issues that may affect functionality or security.
+- **ERROR**: Configuration errors that may prevent features from working correctly.
+- **FATAL**: Critical security or configuration issues that block server startup.

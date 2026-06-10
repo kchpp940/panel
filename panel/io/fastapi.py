@@ -12,6 +12,7 @@ import tornado
 
 from ..config import config
 from .application import build_applications
+from .diagnostics import DiagnosticContext, validate_startup
 from .document import _cleanup_doc, extra_socket_handlers
 from .resources import COMPONENT_PATH
 from .server import (
@@ -249,6 +250,12 @@ def add_applications(
     admin: bool = False,
     session_history: int | None = None,
     liveness: bool | str = False,
+    run_diagnostics: bool = True,
+    block_on_diagnostics_errors: bool = True,
+    admin_endpoint: str | None = None,
+    static_dirs: t.Mapping[str, str] | None = None,
+    address: str | None = None,
+    port: int | None = None,
     **kwargs
 ):
     """
@@ -278,6 +285,18 @@ def add_applications(
       Whether to add a liveness endpoint. If a string is provided
       then this will be used as the endpoint, otherwise the endpoint
       will be hosted at /liveness.
+    run_diagnostics: bool (default=True)
+        Whether to run startup diagnostics.
+    block_on_diagnostics_errors: bool (default=True)
+        Whether to block server startup when diagnostics detect errors.
+    admin_endpoint: str (optional, default=None)
+        Custom endpoint path for the admin panel.
+    static_dirs: dict (optional, default=None)
+        Static directories to serve.
+    address: str (optional, default=None)
+        Server address.
+    port: int (optional, default=None)
+        Server port.
     **kwargs:
         Additional keyword arguments to pass to the BokehFastAPI application
     """
@@ -287,6 +306,26 @@ def add_applications(
             raise ValueError("prefix must start with '/'.")
         prefix = prefix.rstrip('/') or '/'
         kwargs['prefix'] = prefix
+
+    if run_diagnostics:
+        ws_origins = kwargs.get('websocket_origin', None)
+        diag_ctx = DiagnosticContext(
+            websocket_origin=ws_origins,
+            address=address,
+            port=port,
+            static_dirs=static_dirs or {},
+            autoreload=config.autoreload,
+            admin=admin,
+            admin_endpoint=admin_endpoint or config.admin_endpoint,
+            session_history=session_history,
+        )
+        diagnostic_result = validate_startup(
+            diag_ctx,
+            blocking=block_on_diagnostics_errors,
+            log_report=False,
+        )
+        state._last_diagnostic_result = diagnostic_result
+
     apps = build_applications(panel, title=title, location=location, admin=admin)
     if prefix:
         apps = {_prefix_path(endpoint, prefix): app for endpoint, app in apps.items()}

@@ -236,6 +236,9 @@ class _state(param.Parameterized):
     _watch_events: t.ClassVar[list[asyncio.Event]] = []
     _busy_cleanup_scheduled: t.ClassVar[PeriodicCallback | None] = None
 
+    # Diagnostics
+    _last_diagnostic_result: t.ClassVar[object | None] = None
+
     # Types
     _notification_type: t.ClassVar[type[NotificationAreaBase] | None] = None
 

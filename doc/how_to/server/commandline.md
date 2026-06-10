@@ -142,6 +142,12 @@ options:
   --reuse-sessions      Whether to reuse sessions when serving the initial request.
   --global-loading-spinner
                         Whether to add a global loading spinner to the application(s).
+  --diagnostics         Run startup diagnostics and print the report.
+  --no-diagnostics      Skip startup diagnostics.
+  --diagnostics-json DIAGNOSTICS_JSON
+                        Path to write the diagnostics report as JSON.
+  --allow-diagnostics-errors
+                        Allow server to start even when diagnostics detect errors.
 ```
 
 To turn a notebook into a deployable app simply append `.servable()` to one or more Panel objects, which will add the app to Bokeh's `curdoc`, ensuring it can be discovered by Bokeh server on deployment. In this way it is trivial to build dashboards that can be used interactively in a notebook and then seamlessly deployed on Bokeh server.

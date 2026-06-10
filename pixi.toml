@@ -290,7 +290,6 @@ pydeck = ">=0.8"  # Add back to examples, when it support ipywidgets 8.0
 sphinx = "<9"
 
 [feature.doc.tasks]
-_docs-sync-check = 'python scripts/docs_sync.py'
 _docs-refmanual = 'sphinx-apidoc -e -o doc/api/ panel/ --ext-autodoc --ext-intersphinx'
 _docs-convert-gallery = 'python scripts/gallery/convert_gallery.py'
 _docs-generate = 'nbsite build --what=html --output=builtdocs --org holoviz --project-name panel --disable-parallel'
@@ -298,11 +297,9 @@ _docs-generate-parallel = 'nbsite build --what=html --output=builtdocs --org hol
 _docs-copy-panel-dist = 'cp -r ./panel/dist ./builtdocs/panel_dist'
 _docs-pyodide = 'panel convert examples/gallery/*.ipynb doc/how_to/*/examples/*.md --to pyodide-worker --out ./builtdocs/pyodide/ --pwa --index --requirements doc/pyodide_dependencies.json --exclude examples/gallery/vtk*.ipynb'
 docs-server = 'python -m http.server 5500 --directory ./builtdocs'
-docs-sync = 'python scripts/docs_sync.py'
 
 [feature.doc.tasks.docs-build]
 depends-on = [
-    '_docs-sync-check',
     '_docs-refmanual',
     '_docs-convert-gallery',
     '_docs-generate',
@@ -312,7 +309,6 @@ depends-on = [
 
 [feature.doc.tasks.docs-build-parallel]
 depends-on = [
-    '_docs-sync-check',
     '_docs-refmanual',
     '_docs-convert-gallery',
     '_docs-generate-parallel',

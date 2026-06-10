@@ -34,6 +34,9 @@ from tornado.web import StaticFileHandler
 
 from ..auth import BasicAuthProvider, OAuthProvider
 from ..config import config
+from ..io.diagnostics import (
+    DiagnosticContext, DiagnosticSeverity, validate_startup,
+)
 from ..io.document import _cleanup_doc
 from ..io.liveness import LivenessHandler
 from ..io.reload import record_modules, watch
@@ -317,6 +320,25 @@ class Serve(_BkServe):
         ('--global-loading-spinner', Argument(
             action  = 'store_true',
             help    = "Whether to add a global loading spinner to the application(s).",
+        )),
+        ('--diagnostics', Argument(
+            action  = 'store_true',
+            help    = "Run startup diagnostics and print the report.",
+            default = True,
+        )),
+        ('--no-diagnostics', Argument(
+            action  = 'store_true',
+            help    = "Skip startup diagnostics.",
+        )),
+        ('--diagnostics-json', Argument(
+            action  = 'store',
+            type    = str,
+            help    = "Path to write the diagnostics report as JSON.",
+            default = None,
+        )),
+        ('--allow-diagnostics-errors', Argument(
+            action  = 'store_true',
+            help    = "Allow server to start even when diagnostics detect errors.",
         )),
     )) # type: ignore[assignment, ty:invalid-assignment]
 
@@ -780,5 +802,39 @@ class Serve(_BkServe):
         # See https://github.com/holoviz/panel/issues/2302
         if "DASK_DISTRIBUTED__LOGGING__BOKEH" not in os.environ:
             os.environ["DASK_DISTRIBUTED__LOGGING__BOKEH"] = "info"
+
+        run_diagnostics = not args.no_diagnostics
+        if run_diagnostics:
+            static_dirs = parse_vars(args.static_dirs) if args.static_dirs else {}
+            admin_endpoint = None
+            if args.admin_endpoint:
+                admin_endpoint = args.admin_endpoint
+                admin_endpoint = admin_endpoint if admin_endpoint.startswith('/') else f'/{admin_endpoint}'
+
+            diag_ctx = DiagnosticContext(
+                websocket_origin=args.allow_websocket_origin,
+                address=getattr(args, 'address', None),
+                port=getattr(args, 'port', None),
+                static_dirs=static_dirs,
+                autoreload=config.autoreload,
+                dev=bool(args.dev),
+                admin=bool(args.admin),
+                admin_endpoint=admin_endpoint,
+                session_history=args.session_history,
+                check_unused_sessions=getattr(args, 'check_unused_sessions', None),
+            )
+            diagnostic_result = validate_startup(
+                diag_ctx,
+                blocking=not args.allow_diagnostics_errors,
+                log_report=True,
+            )
+            state._last_diagnostic_result = diagnostic_result
+
+            if args.diagnostics_json:
+                json_path = pathlib.Path(args.diagnostics_json).absolute()
+                json_path.parent.mkdir(parents=True, exist_ok=True)
+                json_path.write_text(diagnostic_result.to_json(), encoding='utf-8')
+                log.info(f"Diagnostics report written to: {json_path}")
+
         args.dev = None
         super().invoke(args)

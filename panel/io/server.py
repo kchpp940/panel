@@ -65,6 +65,7 @@ from ..config import config
 from ..util import HTML_SANITIZER, edit_readonly, fullpath
 from ..util.warnings import warn
 from .application import build_applications
+from .diagnostics import DiagnosticContext, validate_startup
 from .document import (  # noqa
     _cleanup_doc, init_doc, unlocked, with_lock,
 )
@@ -1170,6 +1171,10 @@ def get_server(
     session_history: str | None = None,
     liveness: bool | str = False,
     warm: bool = False,
+    check_unused_sessions: int | None = None,
+    run_diagnostics: bool = True,
+    block_on_diagnostics_errors: bool = True,
+    admin_endpoint: str | None = None,
     **kwargs
 ) -> Server:
     """
@@ -1280,6 +1285,26 @@ def get_server(
     silence(EMPTY_LAYOUT, True)
     server_id = kwargs.pop('server_id', uuid.uuid4().hex)
     kwargs['extra_patterns'] = extra_patterns = list(kwargs.get('extra_patterns', []))
+
+    if run_diagnostics:
+        from ..config import config as _config
+        diag_ctx = DiagnosticContext(
+            websocket_origin=websocket_origin,
+            address=address,
+            port=port,
+            static_dirs=static_dirs,
+            autoreload=_config.autoreload,
+            admin=admin,
+            admin_endpoint=admin_endpoint or config.admin_endpoint,
+            session_history=session_history,
+            check_unused_sessions=check_unused_sessions,
+        )
+        diagnostic_result = validate_startup(
+            diag_ctx,
+            blocking=block_on_diagnostics_errors,
+            log_report=verbose,
+        )
+        state._last_diagnostic_result = diagnostic_result
 
     def flask_handler(slug, app):
         if 'flask' not in sys.modules:
