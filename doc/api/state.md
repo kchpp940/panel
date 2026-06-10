@@ -57,16 +57,16 @@ The `pn.state` object makes various global state available and provides methods 
 
 `_last_diagnostic_result`
 : Stores the diagnostic result from the most recent server startup validation.
-  This is a `StartupDiagnosticResult` object containing structured information
-  about configuration checks including services, issues, and overall status.
-  Only available after starting a server with diagnostics enabled (the default).
+  This is kept only for **backward compatibility** — prefer reading per-server
+  diagnostics via `server.diagnostic_result` or `state.get_server_status()`.
 
 `_last_startup_config`
 : Stores the resolved `StartupConfig` object from the most recent server startup.
-  This is the unified configuration source used by the server, CLI, and FastAPI
-  integration. All websocket origin, static dirs, autoreload, admin endpoint,
-  session cleanup, notifications, and browser info settings are available from
-  this single object.
+  This is kept only for **backward compatibility** — the actual effective
+  configuration is now bound to each individual `Server`, `Application`, and
+  `SessionContext` instance so that multiple servers or sequential restarts
+  never share or overwrite each other's settings. Use `state.get_startup_config(server_id)`
+  or `server.startup_config` instead.
 
 ## Methods
 
@@ -83,19 +83,26 @@ The `pn.state` object makes various global state available and provides methods 
 : Executes both synchronous and asynchronous callbacks appropriately depending on the context the application is running in.
 
 `get_startup_config`
-: Returns the effective startup configuration from the most recent server
-  startup as a plain dictionary. Includes websocket origins, static dirs,
-  admin settings, session history, autoreload, notifications, browser info,
-  and detected startup mode. Returns `None` if no server has been started.
+: Returns the effective startup configuration. Configuration is bound to
+  each individual server, so you can query a specific server or all servers:
+  - `state.get_startup_config(server_id)` → config dict for one server, or `None` if not found
+  - `state.get_startup_config()` → `{server_id: config_dict}` for all running servers
+  Each config dict includes websocket origins, static dirs, admin settings,
+  session history, autoreload, notifications, browser info, and detected
+  startup mode.
 
 `get_server_status`
 : Returns a structured server status dictionary (or JSON string when
-  `as_json=True`) containing:
-  - `timestamp`: ISO 8601 timestamp when the status was captured
-  - `active_servers`: Count of currently running servers
-  - `startup`: Effective per-service configuration (enabled, config details)
-  - `diagnostics`: Last diagnostic result (if `include_diagnostics=True`)
+  `as_json=True`). Supports querying a specific server or all servers:
+  - `state.get_server_status()` → status for all running servers (contains `servers` list)
+  - `state.get_server_status(server_id)` → status for one server (contains `server` dict or `error`)
+  Each server entry includes:
+  - `id`, `address`, `port`: server identity and bind info
+  - `panel`: the served application(s) repr
+  - `startup`: effective per-service configuration (enabled, config details)
+  - `diagnostics`: diagnostic result (if `include_diagnostics=True`)
   Parameters:
+  - `server_id` (str, optional): Query a single server instead of all.
   - `include_diagnostics` (bool): Whether to include the diagnostic report.
   - `as_json` (bool): Whether to return a formatted JSON string instead of dict.
   - `indent` (int): JSON indentation level when `as_json=True`.
@@ -108,9 +115,11 @@ The `pn.state` object makes various global state available and provides methods 
 
 `print_server_status`
 : Prints a human-readable formatted server status report to stdout.
+  Supports printing a single server or all servers.
   Includes startup mode, effective configuration for each service,
   and optionally the diagnostic report.
   Parameters:
+  - `server_id` (str, optional): Print status for a single server.
   - `include_diagnostics` (bool): Whether to include the diagnostic report.
 
 `schedule`

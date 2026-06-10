@@ -205,38 +205,78 @@ except Exception as e:
 ### Querying Effective Configuration and Server Status
 
 After the server starts, you can query the actual effective configuration and
-server status using the `state` object:
+server status using the `state` object. Configuration and diagnostics are
+**bound to each individual server instance**, so multiple servers running in
+the same process will never have their values mixed up.
 
 ```python
 import panel as pn
 from panel.io import state
 
-# Get the effective startup configuration as a dictionary
-cfg = state.get_startup_config()
-if cfg:
-    print("Websocket origins:", cfg["websocket_origin"])
-    print("Admin enabled:", cfg["admin"])
-    print("Session history:", cfg["session_history"])
-    print("Notifications:", cfg["notifications"])
-    print("Browser info:", cfg["browser_info"])
+# Get all server configs as a dict of {server_id: config_dict}
+all_cfgs = state.get_startup_config()
+if all_cfgs:
+    for sid, cfg in all_cfgs.items():
+        print(f"Server {sid}:")
+        print("  Websocket origins:", cfg["websocket_origin"])
+        print("  Admin enabled:", cfg["admin"])
+        print("  Session history:", cfg["session_history"])
+        print("  Notifications:", cfg["notifications"])
+        print("  Browser info:", cfg["browser_info"])
 
-# Get full structured server status (includes timestamp, config, diagnostics)
+# Get a specific server's config by server_id
+cfg = state.get_startup_config("some-server-id")
+if cfg is None:
+    print("Server not found")
+
+# Get full structured status for all running servers
 status = state.get_server_status()
-print("Startup mode:", status["startup"]["startup_mode"])
-print("Services:", list(status["startup"]["services"].keys()))
+for srv in status["servers"]:
+    print(f"Server {srv['id']} at http://{srv['address']}:{srv['port']}/")
+    print("  Startup mode:", srv["startup"]["startup_mode"])
+    print("  Services:", list(srv["startup"]["services"].keys()))
+
+# Get status for a specific server
+single_status = state.get_server_status(server_id="some-server-id")
 
 # Get status as formatted JSON string
 json_status = state.get_server_status(as_json=True, indent=2)
 
-# Print a human-readable status report to stdout
+# Print a human-readable status report for all servers
 state.print_server_status(include_diagnostics=True)
+
+# Print status for a specific server only
+state.print_server_status(server_id="some-server-id", include_diagnostics=True)
 ```
+
+Each `Server` instance also directly exposes:
+- `server.server_id`: The unique identifier of this server
+- `server.startup_config`: The `StartupConfig` bound to this server
+- `server.diagnostic_result`: The diagnostic result for this server (or None)
 
 The `get_server_status()` function returns a dictionary with:
 - `timestamp`: ISO 8601 timestamp of when the status was captured
-- `active_servers`: Count of currently running Panel servers
-- `startup`: The effective startup configuration (same as `get_startup_config()` but includes per-service detail)
-- `diagnostics`: The last diagnostic result (if `include_diagnostics=True`)
+- `servers`: List of per-server entries, each with `id`, `address`, `port`, `panel`, `startup`, and optionally `diagnostics`
+- Or if `server_id` is specified: `server` containing the single server entry, or `error` if not found
+
+### Configuration Isolation: Per-Server, Per-Application, Per-Session
+
+The `StartupConfig` is propagated through the lifecycle stack so that every
+component reads the correct configuration for its own context:
+
+1. **Server level**: Each `Server` instance holds its own `startup_config`
+   and `diagnostic_result`.
+
+2. **Application level**: Each `Application` (one per URL slug) holds a
+   reference to its `startup_config`, passed in via `build_applications()`.
+
+3. **Session level**: When a session is created, `Application.on_session_created`
+   attaches the `startup_config` to the `SessionContext`. Per-session features
+   such as `notifications`, `browser_info`, and `session cleanup` then read the
+   config directly from their `SessionContext` (falling back to the parent
+   `Application`) instead of any global state — so multiple servers, multiple
+   apps, and sequential restarts never cross-contaminate each other's
+   configuration.
 
 ### Diagnostic Severity Levels
 
