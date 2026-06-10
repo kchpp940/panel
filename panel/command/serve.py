@@ -34,9 +34,6 @@ from tornado.web import StaticFileHandler
 
 from ..auth import BasicAuthProvider, OAuthProvider
 from ..config import config
-from ..io.diagnostics import (
-    StartupConfig, DiagnosticSeverity, validate_startup,
-)
 from ..io.document import _cleanup_doc
 from ..io.liveness import LivenessHandler
 from ..io.reload import record_modules, watch
@@ -321,36 +318,6 @@ class Serve(_BkServe):
             action  = 'store_true',
             help    = "Whether to add a global loading spinner to the application(s).",
         )),
-        ('--diagnostics', Argument(
-            action  = 'store_true',
-            help    = "Run startup diagnostics and print the report.",
-            default = True,
-        )),
-        ('--no-diagnostics', Argument(
-            action  = 'store_true',
-            help    = "Skip startup diagnostics.",
-        )),
-        ('--diagnostics-json', Argument(
-            action  = 'store',
-            type    = str,
-            help    = "Path to write the diagnostics report as JSON.",
-            default = None,
-        )),
-        ('--allow-diagnostics-errors', Argument(
-            action  = 'store_true',
-            help    = "Allow server to start even when diagnostics detect errors.",
-        )),
-        ('--show-status', Argument(
-            action  = 'store_true',
-            help    = "Print effective server configuration and status after startup.",
-            default = False,
-        )),
-        ('--status-json', Argument(
-            action  = 'store',
-            type    = str,
-            help    = "Path to write the server status report as JSON.",
-            default = None,
-        )),
     )) # type: ignore[assignment, ty:invalid-assignment]
 
     # Supported file extensions
@@ -364,13 +331,6 @@ class Serve(_BkServe):
                     index = index[:-len(ext)]
             if f'/{index}' in applications:
                 applications['/'] = applications[f'/{index}']
-        startup_cfg = getattr(self, '_startup_cfg', None)
-        if startup_cfg is not None:
-            for _path, app in applications.items():
-                if not hasattr(app, '_startup_config') or app._startup_config is None:
-                    app._startup_config = startup_cfg
-                if not hasattr(app, '_admin'):
-                    app._admin = startup_cfg.admin
         return super().customize_applications(args, applications)
 
     def warm_applications(self, applications, reuse_sessions, error=True, initialize_session=True, index=None):
@@ -415,11 +375,7 @@ class Serve(_BkServe):
             settings.ico_path.set_value(args.ico_path)
         else:
             kwargs["ico_path"] = DIST_DIR / "images" / "favicon.ico"
-        startup_cfg = getattr(self, '_startup_cfg', None)
-        if startup_cfg is not None:
-            static_dirs = startup_cfg.normalized_static_dirs
-        else:
-            static_dirs = parse_vars(args.static_dirs) if args.static_dirs else {}
+        static_dirs = parse_vars(args.static_dirs) if args.static_dirs else {}
         patterns += get_static_routes(static_dirs)
 
         files = []
@@ -524,27 +480,17 @@ class Serve(_BkServe):
             patterns += [(rf"/{args.liveness_endpoint}", LivenessHandler, dict(applications=applications))]
 
         config.profiler = args.profiler
-
-        startup_cfg = getattr(self, '_startup_cfg', None)
-        use_admin = startup_cfg.admin if startup_cfg is not None else bool(args.admin)
-        admin_path = (
-            startup_cfg.resolved_admin_endpoint
-            if startup_cfg is not None
-            else (
-                f"/{args.admin_endpoint.lstrip('/')}"
-                if args.admin_endpoint else "/admin"
-            )
-        )
-        resolved_session_history = (
-            startup_cfg.session_history
-            if startup_cfg is not None and startup_cfg.session_history is not None
-            else args.session_history
-        )
-
-        if use_admin:
+        if args.admin:
             from ..io.admin import admin_panel
             from ..io.server import per_app_patterns
 
+            # If `--admin-endpoint` is not set, then we default to the `/admin` path.
+            admin_path = "/admin"
+            if args.admin_endpoint:
+                admin_path = args.admin_endpoint
+                admin_path = admin_path if admin_path.startswith('/') else f'/{admin_path}'
+
+            config._admin = True
             app = Application(FunctionHandler(admin_panel))
             unused_timeout = args.check_unused_sessions or 15000
             state._admin_context = app_ctx = AdminApplicationContext(
@@ -585,8 +531,7 @@ class Serve(_BkServe):
                 else:
                     config.admin_log_level = args.admin_log_level.upper()
 
-        if resolved_session_history is not None:
-            config.session_history = resolved_session_history
+        config.session_history = args.session_history
         if args.rest_session_info:
             pattern = REST_PROVIDERS['param'](files, 'rest')
             patterns.extend(pattern)
@@ -821,13 +766,6 @@ class Serve(_BkServe):
         if config.cookie_secret:
             kwargs['cookie_secret'] = config.cookie_secret
 
-        startup_cfg = getattr(self, '_startup_cfg', None)
-        if startup_cfg is not None:
-            kwargs['startup_config'] = startup_cfg
-        diagnostic_result = getattr(self, '_diagnostic_result', None)
-        if diagnostic_result is not None:
-            kwargs['diagnostic_result'] = diagnostic_result
-
         return kwargs
 
     def invoke(self, args: argparse.Namespace):
@@ -842,57 +780,5 @@ class Serve(_BkServe):
         # See https://github.com/holoviz/panel/issues/2302
         if "DASK_DISTRIBUTED__LOGGING__BOKEH" not in os.environ:
             os.environ["DASK_DISTRIBUTED__LOGGING__BOKEH"] = "info"
-
-        static_dirs = parse_vars(args.static_dirs) if args.static_dirs else {}
-        admin_endpoint = None
-        if args.admin_endpoint:
-            admin_endpoint = args.admin_endpoint
-            admin_endpoint = admin_endpoint if admin_endpoint.startswith('/') else f'/{admin_endpoint}'
-
-        startup_cfg = StartupConfig.resolve(
-            websocket_origin=args.allow_websocket_origin,
-            address=getattr(args, 'address', None),
-            port=getattr(args, 'port', None),
-            static_dirs=static_dirs,
-            autoreload=config.autoreload,
-            dev=bool(args.dev),
-            admin=bool(args.admin),
-            admin_endpoint=admin_endpoint,
-            session_history=args.session_history,
-            check_unused_sessions=getattr(args, 'check_unused_sessions', None),
-        )
-        startup_cfg.apply_to_config()
-        self._startup_cfg = startup_cfg
-        state._last_startup_config = startup_cfg  # Backward compat
-
-        run_diagnostics = not args.no_diagnostics
-        self._diagnostic_result = None
-        if run_diagnostics:
-            diagnostic_result = validate_startup(
-                startup_cfg,
-                blocking=not args.allow_diagnostics_errors,
-                log_report=True,
-            )
-            self._diagnostic_result = diagnostic_result
-            state._last_diagnostic_result = diagnostic_result  # Backward compat
-
-            if args.diagnostics_json:
-                json_path = pathlib.Path(args.diagnostics_json).absolute()
-                json_path.parent.mkdir(parents=True, exist_ok=True)
-                json_path.write_text(diagnostic_result.to_json(), encoding='utf-8')
-                log.info(f"Diagnostics report written to: {json_path}")
-
-        if args.show_status:
-            state.print_server_status(include_diagnostics=run_diagnostics)
-
-        if args.status_json:
-            status_json = state.get_server_status(
-                include_diagnostics=run_diagnostics, as_json=True
-            )
-            status_path = pathlib.Path(args.status_json).absolute()
-            status_path.parent.mkdir(parents=True, exist_ok=True)
-            status_path.write_text(status_json, encoding='utf-8')
-            log.info(f"Server status report written to: {status_path}")
-
         args.dev = None
         super().invoke(args)

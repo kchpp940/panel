@@ -6,12 +6,6 @@ import sys
 
 from .cache import cache  # noqa
 from .callbacks import PeriodicCallback  # noqa
-from .diagnostics import (  # noqa
-    DiagnosticContext, DiagnosticIssue, DiagnosticSeverity,
-    ServiceDiagnostic, StartupConfig, StartupDiagnosticResult,
-    StartupError, StartupMode,
-    run_startup_diagnostics, validate_startup,
-)
 from .document import (  # noqa
     hold, immediate_dispatch, init_doc, unlocked, with_lock,
 )
@@ -39,17 +33,9 @@ else:
             pass
 
 __all__ = (
-    "DiagnosticContext",
-    "DiagnosticIssue",
-    "DiagnosticSeverity",
     "JSCode",
     "PeriodicCallback",
     "Resources",
-    "ServiceDiagnostic",
-    "StartupConfig",
-    "StartupDiagnosticResult",
-    "StartupError",
-    "StartupMode",
     "hold",
     "immediate_dispatch",
     "ipywidget",
@@ -57,10 +43,8 @@ __all__ = (
     "profile",
     "push",
     "push_notebook",
-    "run_startup_diagnostics",
     "serve",
     "state",
     "unlocked",
-    "validate_startup",
     "with_lock"
 )

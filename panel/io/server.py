@@ -65,7 +65,6 @@ from ..config import config
 from ..util import HTML_SANITIZER, edit_readonly, fullpath
 from ..util.warnings import warn
 from .application import build_applications
-from .diagnostics import StartupConfig, validate_startup
 from .document import (  # noqa
     _cleanup_doc, init_doc, unlocked, with_lock,
 )
@@ -263,16 +262,8 @@ def _initialize_session_info(session_context: SessionContext):
     from ..config import config
     session_id = session_context.id
     sessions = state.session_info['sessions']
-
-    startup_cfg = getattr(session_context, '_startup_config', None)
-    if startup_cfg is not None and startup_cfg.session_history is not None:
-        history = -1 if startup_cfg.admin else startup_cfg.session_history
-        is_admin_app = startup_cfg.admin
-    else:
-        history = -1 if config._admin else config.session_history
-        is_admin_app = config._admin
-
-    if not is_admin_app and (history == 0 or session_id in sessions):
+    history = -1 if config._admin else config.session_history
+    if not config._admin and (history == 0 or session_id in sessions):
         return
 
     state.session_info['total'] += 1
@@ -424,25 +415,10 @@ def autoload_js_script(doc, resources, token, element_id, app_path, absolute_url
 class Server(BokehServer):
 
     def __init__(self, *args, **kwargs):
-        self._startup_config = kwargs.pop('startup_config', None)
-        self._diagnostic_result = kwargs.pop('diagnostic_result', None)
-        self._server_id: str | None = kwargs.pop('server_id', None)
         super().__init__(*args, **kwargs)
         self._autoreload_stop_event = None
         if state._admin_context:
             state._admin_context._loop = self._loop
-
-    @property
-    def server_id(self) -> str | None:
-        return self._server_id
-
-    @property
-    def startup_config(self):
-        return self._startup_config
-
-    @property
-    def diagnostic_result(self):
-        return self._diagnostic_result
 
     def start(self) -> None:
         super().start()
@@ -1194,10 +1170,6 @@ def get_server(
     session_history: str | None = None,
     liveness: bool | str = False,
     warm: bool = False,
-    check_unused_sessions: int | None = None,
-    run_diagnostics: bool = True,
-    block_on_diagnostics_errors: bool = True,
-    admin_endpoint: str | None = None,
     **kwargs
 ) -> Server:
     """
@@ -1309,30 +1281,6 @@ def get_server(
     server_id = kwargs.pop('server_id', uuid.uuid4().hex)
     kwargs['extra_patterns'] = extra_patterns = list(kwargs.get('extra_patterns', []))
 
-    startup_cfg = StartupConfig.resolve(
-        websocket_origin=websocket_origin,
-        address=address,
-        port=port,
-        static_dirs=static_dirs,
-        autoreload=config.autoreload,
-        dev=False,
-        admin=admin,
-        admin_endpoint=admin_endpoint or config.admin_endpoint,
-        session_history=session_history,
-        check_unused_sessions=check_unused_sessions,
-    )
-    startup_cfg.apply_to_config()
-    state._last_startup_config = startup_cfg  # Backward compat
-
-    diagnostic_result = None
-    if run_diagnostics:
-        diagnostic_result = validate_startup(
-            startup_cfg,
-            blocking=block_on_diagnostics_errors,
-            log_report=verbose,
-        )
-        state._last_diagnostic_result = diagnostic_result  # Backward compat
-
     def flask_handler(slug, app):
         if 'flask' not in sys.modules:
             return
@@ -1350,8 +1298,7 @@ def get_server(
         return True
 
     apps = build_applications(
-        panel, title=title, location=location, admin=startup_cfg.admin,
-        custom_handlers=(flask_handler,), startup_config=startup_cfg,
+        panel, title=title, location=location, admin=admin, custom_handlers=(flask_handler,)
     )
     normalized_apps: dict[str, BkApplication] = {}
     normalized_sources: dict[str, str] = {}
@@ -1366,11 +1313,11 @@ def get_server(
         normalized_sources[normalized_endpoint] = endpoint
     apps = normalized_apps
 
-    if warm or startup_cfg.effective_autoreload:
+    if warm or config.autoreload:
         for endpoint, app in apps.items():
-            if endpoint == startup_cfg.resolved_admin_endpoint:
+            if endpoint == '/admin':
                 continue
-            if startup_cfg.effective_autoreload:
+            if config.autoreload:
                 with record_modules(list(apps.values())):
                     session = generate_session(app)
             else:
@@ -1379,10 +1326,10 @@ def get_server(
                 state._on_load(None)
             _cleanup_doc(session.document, destroy=True)
 
-    extra_patterns += get_static_routes(startup_cfg.normalized_static_dirs)
+    extra_patterns += get_static_routes(static_dirs)
 
-    if startup_cfg.session_history is not None:
-        config.session_history = startup_cfg.session_history
+    if session_history is not None:
+        config.session_history = session_history
     if config.session_history != 0:
         pattern = REST_PROVIDERS['param']([], 'rest')
         extra_patterns.extend(pattern)
@@ -1405,12 +1352,13 @@ def get_server(
     if 'ico_path' not in opts:
         opts['ico_path'] = DIST_DIR / "images" / "favicon.ico"
 
-    if startup_cfg.address is not None:
-        opts['address'] = startup_cfg.address
+    if address is not None:
+        opts['address'] = address
 
-    resolved_origins = startup_cfg.resolved_websocket_origin_list
-    if resolved_origins:
-        opts['allow_websocket_origin'] = resolved_origins
+    if websocket_origin:
+        if not isinstance(websocket_origin, list):
+            websocket_origin = [websocket_origin]
+        opts['allow_websocket_origin'] = websocket_origin
 
     # Configure OAuth
     from ..config import config
@@ -1457,9 +1405,6 @@ def get_server(
             state.base_url = root_path  # type: ignore
     opts['cookie_path'] = config.cookie_path
     opts['cookie_secret'] = config.cookie_secret
-    opts['startup_config'] = startup_cfg
-    opts['diagnostic_result'] = diagnostic_result
-    opts['server_id'] = server_id
 
     server = Server(apps, port=port, **opts)
     if verbose:

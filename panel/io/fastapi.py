@@ -12,7 +12,6 @@ import tornado
 
 from ..config import config
 from .application import build_applications
-from .diagnostics import StartupConfig, validate_startup
 from .document import _cleanup_doc, extra_socket_handlers
 from .resources import COMPONENT_PATH
 from .server import (
@@ -250,12 +249,6 @@ def add_applications(
     admin: bool = False,
     session_history: int | None = None,
     liveness: bool | str = False,
-    run_diagnostics: bool = True,
-    block_on_diagnostics_errors: bool = True,
-    admin_endpoint: str | None = None,
-    static_dirs: t.Mapping[str, str] | None = None,
-    address: str | None = None,
-    port: int | None = None,
     **kwargs
 ):
     """
@@ -285,18 +278,6 @@ def add_applications(
       Whether to add a liveness endpoint. If a string is provided
       then this will be used as the endpoint, otherwise the endpoint
       will be hosted at /liveness.
-    run_diagnostics: bool (default=True)
-        Whether to run startup diagnostics.
-    block_on_diagnostics_errors: bool (default=True)
-        Whether to block server startup when diagnostics detect errors.
-    admin_endpoint: str (optional, default=None)
-        Custom endpoint path for the admin panel.
-    static_dirs: dict (optional, default=None)
-        Static directories to serve.
-    address: str (optional, default=None)
-        Server address.
-    port: int (optional, default=None)
-        Server port.
     **kwargs:
         Additional keyword arguments to pass to the BokehFastAPI application
     """
@@ -306,48 +287,18 @@ def add_applications(
             raise ValueError("prefix must start with '/'.")
         prefix = prefix.rstrip('/') or '/'
         kwargs['prefix'] = prefix
-
-    ws_origins = kwargs.get('websocket_origin', None)
-    startup_cfg = StartupConfig.resolve(
-        websocket_origin=ws_origins,
-        address=address,
-        port=port,
-        static_dirs=static_dirs or {},
-        autoreload=config.autoreload,
-        admin=admin,
-        admin_endpoint=admin_endpoint or config.admin_endpoint,
-        session_history=session_history,
-    )
-    startup_cfg.apply_to_config()
-    state._last_startup_config = startup_cfg  # Backward compat
-
-    diagnostic_result = None
-    if run_diagnostics:
-        diagnostic_result = validate_startup(
-            startup_cfg,
-            blocking=block_on_diagnostics_errors,
-            log_report=False,
-        )
-        state._last_diagnostic_result = diagnostic_result  # Backward compat
-
-    apps = build_applications(
-        panel, title=title, location=location, admin=startup_cfg.admin,
-        startup_config=startup_cfg,
-    )
+    apps = build_applications(panel, title=title, location=location, admin=admin)
     if prefix:
         apps = {_prefix_path(endpoint, prefix): app for endpoint, app in apps.items()}
-
-    resolved_origins = startup_cfg.resolved_websocket_origin_list
-    if 'websocket_origin' in kwargs:
-        kwargs.pop('websocket_origin')
-    if resolved_origins:
-        kwargs['websocket_origins'] = resolved_origins
+    ws_origins = kwargs.pop('websocket_origin', None)
+    if ws_origins and not isinstance(ws_origins, list):
+        ws_origins = [ws_origins]
+    if ws_origins:
+        kwargs['websocket_origins'] = ws_origins
 
     application = BokehFastAPI(apps, app=app, **kwargs)
-    application._startup_config = startup_cfg
-    application._diagnostic_result = diagnostic_result
-    if startup_cfg.session_history is not None:
-        config.session_history = startup_cfg.session_history
+    if session_history is not None:
+        config.session_history = session_history
         add_history_handler(application.app, endpoint=_prefix_path('/session_info', prefix))
     if liveness:
         liveness_endpoint = liveness if isinstance(liveness, str) else '/liveness'
