@@ -259,6 +259,9 @@ class StartupConfig:
     session_history: int | None = None
     check_unused_sessions: int | None = None
 
+    notifications: bool | None = None
+    browser_info: bool | None = None
+
     extra_checks: list[t.Callable[[], ServiceDiagnostic]] = field(default_factory=list)
 
     @classmethod
@@ -275,6 +278,8 @@ class StartupConfig:
         admin_endpoint: str | None = None,
         session_history: int | None = None,
         check_unused_sessions: int | None = None,
+        notifications: bool | None = None,
+        browser_info: bool | None = None,
         mode: StartupMode | str = StartupMode.AUTO,
         extra_checks: list[t.Callable[[], ServiceDiagnostic]] | None = None,
     ) -> "StartupConfig":
@@ -299,9 +304,47 @@ class StartupConfig:
                 else config.session_history
             ),
             check_unused_sessions=check_unused_sessions,
+            notifications=(
+                notifications if notifications is not None else bool(config.notifications)
+            ),
+            browser_info=(
+                browser_info if browser_info is not None else bool(config.browser_info)
+            ),
             extra_checks=extra_checks or [],
         )
         return resolved
+
+    @property
+    def resolved_websocket_origin_list(self) -> list[str]:
+        if not self.websocket_origin:
+            return []
+        if isinstance(self.websocket_origin, list):
+            return list(self.websocket_origin)
+        return [self.websocket_origin]
+
+    @property
+    def normalized_static_dirs(self) -> dict[str, str]:
+        from ..util import fullpath
+
+        if not self.static_dirs:
+            return {}
+        normalized: dict[str, str] = {}
+        for slug, path in self.static_dirs.items():
+            if not slug.startswith("/"):
+                slug = "/" + slug
+            normalized[slug] = fullpath(path)
+        return normalized
+
+    @property
+    def resolved_admin_endpoint(self) -> str:
+        endpoint = self.admin_endpoint or "/admin"
+        if not endpoint.startswith("/"):
+            endpoint = "/" + endpoint
+        return endpoint
+
+    @property
+    def effective_autoreload(self) -> bool:
+        return bool(self.autoreload)
 
     def detect_mode(self) -> StartupMode:
         if self.mode != StartupMode.AUTO:
@@ -328,6 +371,23 @@ class StartupConfig:
             return StartupMode.PRODUCTION
 
         return StartupMode.DEVELOPMENT
+
+    def apply_to_config(self) -> None:
+        from ..config import config
+
+        if self.admin:
+            config._admin = True
+        if self.admin_endpoint:
+            config._admin_endpoint = self.admin_endpoint
+        if self.session_history is not None:
+            config.session_history = self.session_history
+        if self.autoreload is not None:
+            config.autoreload = self.autoreload
+        if self.notifications is not None:
+            config.notifications = self.notifications
+        if self.browser_info is not None:
+            config.browser_info = self.browser_info
+
 
 
 DiagnosticContext = StartupConfig

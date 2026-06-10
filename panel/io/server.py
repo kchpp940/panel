@@ -1286,19 +1286,21 @@ def get_server(
     server_id = kwargs.pop('server_id', uuid.uuid4().hex)
     kwargs['extra_patterns'] = extra_patterns = list(kwargs.get('extra_patterns', []))
 
+    startup_cfg = StartupConfig.resolve(
+        websocket_origin=websocket_origin,
+        address=address,
+        port=port,
+        static_dirs=static_dirs,
+        autoreload=config.autoreload,
+        dev=False,
+        admin=admin,
+        admin_endpoint=admin_endpoint or config.admin_endpoint,
+        session_history=session_history,
+        check_unused_sessions=check_unused_sessions,
+    )
+    startup_cfg.apply_to_config()
+
     if run_diagnostics:
-        from ..config import config as _config
-        startup_cfg = StartupConfig.resolve(
-            websocket_origin=websocket_origin,
-            address=address,
-            port=port,
-            static_dirs=static_dirs,
-            autoreload=_config.autoreload,
-            admin=admin,
-            admin_endpoint=admin_endpoint or config.admin_endpoint,
-            session_history=session_history,
-            check_unused_sessions=check_unused_sessions,
-        )
         diagnostic_result = validate_startup(
             startup_cfg,
             blocking=block_on_diagnostics_errors,
@@ -1323,7 +1325,8 @@ def get_server(
         return True
 
     apps = build_applications(
-        panel, title=title, location=location, admin=admin, custom_handlers=(flask_handler,)
+        panel, title=title, location=location, admin=startup_cfg.admin,
+        custom_handlers=(flask_handler,)
     )
     normalized_apps: dict[str, BkApplication] = {}
     normalized_sources: dict[str, str] = {}
@@ -1338,11 +1341,11 @@ def get_server(
         normalized_sources[normalized_endpoint] = endpoint
     apps = normalized_apps
 
-    if warm or config.autoreload:
+    if warm or startup_cfg.effective_autoreload:
         for endpoint, app in apps.items():
-            if endpoint == '/admin':
+            if endpoint == startup_cfg.resolved_admin_endpoint:
                 continue
-            if config.autoreload:
+            if startup_cfg.effective_autoreload:
                 with record_modules(list(apps.values())):
                     session = generate_session(app)
             else:
@@ -1351,10 +1354,10 @@ def get_server(
                 state._on_load(None)
             _cleanup_doc(session.document, destroy=True)
 
-    extra_patterns += get_static_routes(static_dirs)
+    extra_patterns += get_static_routes(startup_cfg.normalized_static_dirs)
 
-    if session_history is not None:
-        config.session_history = session_history
+    if startup_cfg.session_history is not None:
+        config.session_history = startup_cfg.session_history
     if config.session_history != 0:
         pattern = REST_PROVIDERS['param']([], 'rest')
         extra_patterns.extend(pattern)
@@ -1377,13 +1380,12 @@ def get_server(
     if 'ico_path' not in opts:
         opts['ico_path'] = DIST_DIR / "images" / "favicon.ico"
 
-    if address is not None:
-        opts['address'] = address
+    if startup_cfg.address is not None:
+        opts['address'] = startup_cfg.address
 
-    if websocket_origin:
-        if not isinstance(websocket_origin, list):
-            websocket_origin = [websocket_origin]
-        opts['allow_websocket_origin'] = websocket_origin
+    resolved_origins = startup_cfg.resolved_websocket_origin_list
+    if resolved_origins:
+        opts['allow_websocket_origin'] = resolved_origins
 
     # Configure OAuth
     from ..config import config

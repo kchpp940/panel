@@ -397,7 +397,11 @@ class Serve(_BkServe):
             settings.ico_path.set_value(args.ico_path)
         else:
             kwargs["ico_path"] = DIST_DIR / "images" / "favicon.ico"
-        static_dirs = parse_vars(args.static_dirs) if args.static_dirs else {}
+        startup_cfg = getattr(self, '_startup_cfg', None)
+        if startup_cfg is not None:
+            static_dirs = startup_cfg.normalized_static_dirs
+        else:
+            static_dirs = parse_vars(args.static_dirs) if args.static_dirs else {}
         patterns += get_static_routes(static_dirs)
 
         files = []
@@ -502,17 +506,27 @@ class Serve(_BkServe):
             patterns += [(rf"/{args.liveness_endpoint}", LivenessHandler, dict(applications=applications))]
 
         config.profiler = args.profiler
-        if args.admin:
+
+        startup_cfg = getattr(self, '_startup_cfg', None)
+        use_admin = startup_cfg.admin if startup_cfg is not None else bool(args.admin)
+        admin_path = (
+            startup_cfg.resolved_admin_endpoint
+            if startup_cfg is not None
+            else (
+                f"/{args.admin_endpoint.lstrip('/')}"
+                if args.admin_endpoint else "/admin"
+            )
+        )
+        resolved_session_history = (
+            startup_cfg.session_history
+            if startup_cfg is not None and startup_cfg.session_history is not None
+            else args.session_history
+        )
+
+        if use_admin:
             from ..io.admin import admin_panel
             from ..io.server import per_app_patterns
 
-            # If `--admin-endpoint` is not set, then we default to the `/admin` path.
-            admin_path = "/admin"
-            if args.admin_endpoint:
-                admin_path = args.admin_endpoint
-                admin_path = admin_path if admin_path.startswith('/') else f'/{admin_path}'
-
-            config._admin = True
             app = Application(FunctionHandler(admin_panel))
             unused_timeout = args.check_unused_sessions or 15000
             state._admin_context = app_ctx = AdminApplicationContext(
@@ -553,7 +567,8 @@ class Serve(_BkServe):
                 else:
                     config.admin_log_level = args.admin_log_level.upper()
 
-        config.session_history = args.session_history
+        if resolved_session_history is not None:
+            config.session_history = resolved_session_history
         if args.rest_session_info:
             pattern = REST_PROVIDERS['param'](files, 'rest')
             patterns.extend(pattern)
@@ -803,26 +818,29 @@ class Serve(_BkServe):
         if "DASK_DISTRIBUTED__LOGGING__BOKEH" not in os.environ:
             os.environ["DASK_DISTRIBUTED__LOGGING__BOKEH"] = "info"
 
+        static_dirs = parse_vars(args.static_dirs) if args.static_dirs else {}
+        admin_endpoint = None
+        if args.admin_endpoint:
+            admin_endpoint = args.admin_endpoint
+            admin_endpoint = admin_endpoint if admin_endpoint.startswith('/') else f'/{admin_endpoint}'
+
+        startup_cfg = StartupConfig.resolve(
+            websocket_origin=args.allow_websocket_origin,
+            address=getattr(args, 'address', None),
+            port=getattr(args, 'port', None),
+            static_dirs=static_dirs,
+            autoreload=config.autoreload,
+            dev=bool(args.dev),
+            admin=bool(args.admin),
+            admin_endpoint=admin_endpoint,
+            session_history=args.session_history,
+            check_unused_sessions=getattr(args, 'check_unused_sessions', None),
+        )
+        startup_cfg.apply_to_config()
+        self._startup_cfg = startup_cfg
+
         run_diagnostics = not args.no_diagnostics
         if run_diagnostics:
-            static_dirs = parse_vars(args.static_dirs) if args.static_dirs else {}
-            admin_endpoint = None
-            if args.admin_endpoint:
-                admin_endpoint = args.admin_endpoint
-                admin_endpoint = admin_endpoint if admin_endpoint.startswith('/') else f'/{admin_endpoint}'
-
-            startup_cfg = StartupConfig.resolve(
-                websocket_origin=args.allow_websocket_origin,
-                address=getattr(args, 'address', None),
-                port=getattr(args, 'port', None),
-                static_dirs=static_dirs,
-                autoreload=config.autoreload,
-                dev=bool(args.dev),
-                admin=bool(args.admin),
-                admin_endpoint=admin_endpoint,
-                session_history=args.session_history,
-                check_unused_sessions=getattr(args, 'check_unused_sessions', None),
-            )
             diagnostic_result = validate_startup(
                 startup_cfg,
                 blocking=not args.allow_diagnostics_errors,

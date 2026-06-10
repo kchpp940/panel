@@ -307,18 +307,20 @@ def add_applications(
         prefix = prefix.rstrip('/') or '/'
         kwargs['prefix'] = prefix
 
+    ws_origins = kwargs.get('websocket_origin', None)
+    startup_cfg = StartupConfig.resolve(
+        websocket_origin=ws_origins,
+        address=address,
+        port=port,
+        static_dirs=static_dirs or {},
+        autoreload=config.autoreload,
+        admin=admin,
+        admin_endpoint=admin_endpoint or config.admin_endpoint,
+        session_history=session_history,
+    )
+    startup_cfg.apply_to_config()
+
     if run_diagnostics:
-        ws_origins = kwargs.get('websocket_origin', None)
-        startup_cfg = StartupConfig.resolve(
-            websocket_origin=ws_origins,
-            address=address,
-            port=port,
-            static_dirs=static_dirs or {},
-            autoreload=config.autoreload,
-            admin=admin,
-            admin_endpoint=admin_endpoint or config.admin_endpoint,
-            session_history=session_history,
-        )
         diagnostic_result = validate_startup(
             startup_cfg,
             blocking=block_on_diagnostics_errors,
@@ -326,18 +328,21 @@ def add_applications(
         )
         state._last_diagnostic_result = diagnostic_result
 
-    apps = build_applications(panel, title=title, location=location, admin=admin)
+    apps = build_applications(
+        panel, title=title, location=location, admin=startup_cfg.admin
+    )
     if prefix:
         apps = {_prefix_path(endpoint, prefix): app for endpoint, app in apps.items()}
-    ws_origins = kwargs.pop('websocket_origin', None)
-    if ws_origins and not isinstance(ws_origins, list):
-        ws_origins = [ws_origins]
-    if ws_origins:
-        kwargs['websocket_origins'] = ws_origins
+
+    resolved_origins = startup_cfg.resolved_websocket_origin_list
+    if 'websocket_origin' in kwargs:
+        kwargs.pop('websocket_origin')
+    if resolved_origins:
+        kwargs['websocket_origins'] = resolved_origins
 
     application = BokehFastAPI(apps, app=app, **kwargs)
-    if session_history is not None:
-        config.session_history = session_history
+    if startup_cfg.session_history is not None:
+        config.session_history = startup_cfg.session_history
         add_history_handler(application.app, endpoint=_prefix_path('/session_info', prefix))
     if liveness:
         liveness_endpoint = liveness if isinstance(liveness, str) else '/liveness'
