@@ -35,7 +35,7 @@ from tornado.web import StaticFileHandler
 from ..auth import BasicAuthProvider, OAuthProvider
 from ..config import config
 from ..io.diagnostics import (
-    DiagnosticContext, DiagnosticSeverity, validate_startup,
+    StartupConfig, DiagnosticSeverity, validate_startup,
 )
 from ..io.document import _cleanup_doc
 from ..io.liveness import LivenessHandler
@@ -811,7 +811,7 @@ class Serve(_BkServe):
                 admin_endpoint = args.admin_endpoint
                 admin_endpoint = admin_endpoint if admin_endpoint.startswith('/') else f'/{admin_endpoint}'
 
-            diag_ctx = DiagnosticContext(
+            startup_cfg = StartupConfig.resolve(
                 websocket_origin=args.allow_websocket_origin,
                 address=getattr(args, 'address', None),
                 port=getattr(args, 'port', None),
@@ -824,7 +824,7 @@ class Serve(_BkServe):
                 check_unused_sessions=getattr(args, 'check_unused_sessions', None),
             )
             diagnostic_result = validate_startup(
-                diag_ctx,
+                startup_cfg,
                 blocking=not args.allow_diagnostics_errors,
                 log_report=True,
             )

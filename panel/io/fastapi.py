@@ -12,7 +12,7 @@ import tornado
 
 from ..config import config
 from .application import build_applications
-from .diagnostics import DiagnosticContext, validate_startup
+from .diagnostics import StartupConfig, validate_startup
 from .document import _cleanup_doc, extra_socket_handlers
 from .resources import COMPONENT_PATH
 from .server import (
@@ -309,7 +309,7 @@ def add_applications(
 
     if run_diagnostics:
         ws_origins = kwargs.get('websocket_origin', None)
-        diag_ctx = DiagnosticContext(
+        startup_cfg = StartupConfig.resolve(
             websocket_origin=ws_origins,
             address=address,
             port=port,
@@ -320,7 +320,7 @@ def add_applications(
             session_history=session_history,
         )
         diagnostic_result = validate_startup(
-            diag_ctx,
+            startup_cfg,
             blocking=block_on_diagnostics_errors,
             log_report=False,
         )

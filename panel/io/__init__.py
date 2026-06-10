@@ -8,7 +8,8 @@ from .cache import cache  # noqa
 from .callbacks import PeriodicCallback  # noqa
 from .diagnostics import (  # noqa
     DiagnosticContext, DiagnosticIssue, DiagnosticSeverity,
-    ServiceDiagnostic, StartupDiagnosticResult, StartupError,
+    ServiceDiagnostic, StartupConfig, StartupDiagnosticResult,
+    StartupError, StartupMode,
     run_startup_diagnostics, validate_startup,
 )
 from .document import (  # noqa
@@ -45,8 +46,10 @@ __all__ = (
     "PeriodicCallback",
     "Resources",
     "ServiceDiagnostic",
+    "StartupConfig",
     "StartupDiagnosticResult",
     "StartupError",
+    "StartupMode",
     "hold",
     "immediate_dispatch",
     "ipywidget",

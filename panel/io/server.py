@@ -65,7 +65,7 @@ from ..config import config
 from ..util import HTML_SANITIZER, edit_readonly, fullpath
 from ..util.warnings import warn
 from .application import build_applications
-from .diagnostics import DiagnosticContext, validate_startup
+from .diagnostics import StartupConfig, validate_startup
 from .document import (  # noqa
     _cleanup_doc, init_doc, unlocked, with_lock,
 )
@@ -1288,7 +1288,7 @@ def get_server(
 
     if run_diagnostics:
         from ..config import config as _config
-        diag_ctx = DiagnosticContext(
+        startup_cfg = StartupConfig.resolve(
             websocket_origin=websocket_origin,
             address=address,
             port=port,
@@ -1300,7 +1300,7 @@ def get_server(
             check_unused_sessions=check_unused_sessions,
         )
         diagnostic_result = validate_startup(
-            diag_ctx,
+            startup_cfg,
             blocking=block_on_diagnostics_errors,
             log_report=verbose,
         )

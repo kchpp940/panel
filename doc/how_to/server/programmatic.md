@@ -83,7 +83,12 @@ The ``pn.serve`` accepts a number of arguments:
 
 ## Startup Diagnostics
 
-Panel provides a centralized startup diagnostics system that validates server configuration before starting the server. The diagnostics cover:
+Panel provides a centralized startup diagnostics system built on a unified
+`StartupConfig` that consolidates configuration from CLI arguments, programmatic
+calls, and environment variables. This ensures consistent validation across all
+server entry points (`CLI`, `pn.serve()`, and FastAPI integration).
+
+The diagnostics cover:
 
 - **WebSocket Origin**: Checks for wildcards, schemes, and ensures origins are properly configured.
 - **Static Directories**: Validates that static directories exist, are readable, and don't conflict with reserved routes.
@@ -93,7 +98,61 @@ Panel provides a centralized startup diagnostics system that validates server co
 - **Notifications**: Checks notification module availability and configuration.
 - **Browser Info**: Validates browser info module availability.
 
-When diagnostics detect errors or fatal issues, the server startup is blocked by default. You can access the diagnostic result programmatically:
+### Unified Startup Configuration
+
+All server entry points use `StartupConfig.resolve()` to aggregate configuration
+from multiple sources:
+
+```python
+from panel.io import StartupConfig, StartupMode
+
+# Build a unified config from explicit values + environment variables + global config
+cfg = StartupConfig.resolve(
+    websocket_origin=["example.com"],
+    admin=True,
+    static_dirs={"/assets": "./assets"},
+    session_history=100,
+    # mode can be "auto", "development", or "production"
+    mode=StartupMode.AUTO,
+)
+
+# Detect effective mode (development vs production)
+print(cfg.detect_mode())  # StartupMode.DEVELOPMENT or StartupMode.PRODUCTION
+```
+
+### Development vs Production Mode
+
+Diagnostics automatically detect whether the server is running in development or
+production mode and adjust severity levels accordingly:
+
+| Condition | Detected Mode |
+|-----------|---------------|
+| `--dev` / `--autoreload` flags | DEVELOPMENT |
+| `PANEL_ENV=dev` or `PYTHON_ENV=dev` | DEVELOPMENT |
+| Address bound to `localhost` / `127.0.0.1` | DEVELOPMENT |
+| `PANEL_ENV=prod` or `PYTHON_ENV=prod` | PRODUCTION |
+| Address bound to external interface | PRODUCTION |
+
+In **DEVELOPMENT** mode, certain security-sensitive checks are downgraded from
+FATAL/ERROR to WARNING/INFO so that routine local development workflows are not
+unnecessarily blocked. In **PRODUCTION** mode, all checks run at full severity.
+
+You can explicitly force the mode:
+
+```python
+from panel.io import StartupMode, validate_startup
+
+# Force production-level checks even on localhost
+result = validate_startup(
+    websocket_origin=["*"],
+    mode=StartupMode.PRODUCTION,
+)
+```
+
+### Accessing Diagnostic Results
+
+When diagnostics detect errors or fatal issues, the server startup is blocked by
+default. You can access the diagnostic result programmatically:
 
 ```python
 import panel as pn
@@ -109,14 +168,16 @@ server = pn.serve(app, start=False, port=5006)
 if state._last_diagnostic_result:
     print(state._last_diagnostic_result.format_report())
     print("JSON output:", state._last_diagnostic_result.to_json())
+    print("Startup mode:", state._last_diagnostic_result.startup_mode)
 ```
 
 You can also run diagnostics independently:
 
 ```python
-from panel.io import run_startup_diagnostics, DiagnosticContext
+from panel.io import run_startup_diagnostics, StartupConfig
 
-context = DiagnosticContext(
+# Using StartupConfig.resolve() automatically reads env vars and config defaults
+context = StartupConfig.resolve(
     websocket_origin=["example.com"],
     static_dirs={"/assets": "./assets"},
     admin=True,
@@ -147,3 +208,7 @@ except Exception as e:
 - **WARNING**: Potential issues that may affect functionality or security.
 - **ERROR**: Configuration errors that may prevent features from working correctly.
 - **FATAL**: Critical security or configuration issues that block server startup.
+
+Note: In DEVELOPMENT mode, some ERROR/FATAL checks may be downgraded to
+WARNING/INFO. The diagnostic report will indicate when running in DEVELOPMENT
+mode.
